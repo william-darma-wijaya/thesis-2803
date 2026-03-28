@@ -373,27 +373,232 @@ def main(cfg: PipelineConfig) -> None:
     run_official_evaluation(cfg)
 
 
+
+# ---------------------------------------------------------------------------
+# Comparison: GraphRAG vs Baseline side-by-side
+# ---------------------------------------------------------------------------
+
+def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
+    """
+    Run GraphRAG (column/node) AND Baseline (table/node) on the same
+    dev-set sample, then print a side-by-side schema-linking + prediction
+    comparison report.
+
+    Predictions are saved to:
+        predictions.txt          — GraphRAG
+        baseline_predictions.txt — Baseline
+        comparison_report.txt    — side-by-side summary
+    """
+    import numpy as np
+    from baseline import (
+        BaselineResult,
+        build_table_graph,
+        build_table_index,
+        run_single_baseline,
+        _save_predictions as bl_save_pred,
+        _save_log        as bl_save_log,
+        _save_csv        as bl_save_csv,
+        _print_summary   as bl_print_summary,
+        _run_spider_eval as bl_spider_eval,
+    )
+
+    set_seed(cfg.seed)
+
+    # ── Shared setup ──────────────────────────────────────────────────────
+    logger.info("Loading schema …")
+    schema_df = load_spider_schema(cfg.tables_json)
+
+    logger.info("Loading dev set …")
+    with open(cfg.dev_json, "r", encoding="utf-8") as f:
+        dev_data = json.load(f)
+
+    # Deterministic subsample (same for both modes)
+    if sample_ratio < 1.0:
+        n = max(1, int(len(dev_data) * sample_ratio))
+        rng = np.random.default_rng(cfg.seed)
+        indices = rng.choice(len(dev_data), size=n, replace=False)
+        dev_data = [dev_data[i] for i in sorted(indices)]
+        logger.info(
+            "Comparison sample: %d / total questions (%.0f%%)",
+            len(dev_data), sample_ratio * 100,
+        )
+
+    logger.info("Loading embedding model: %s", cfg.embedding_model)
+    embed_model = SentenceTransformer(cfg.embedding_model)
+
+    logger.info("Loading LLM: %s (4-bit)", cfg.llm_model)
+    llm, tokenizer = load_model_and_tokenizer(cfg)
+
+    unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_data))
+
+    # ── Build both graphs & indices ───────────────────────────────────────
+    logger.info("Building column graph (GraphRAG) …")
+    col_graph = build_schema_graph(schema_df)
+    col_cache: dict[str, "SchemaIndex"] = {
+        db_id: build_schema_index(col_graph, db_id, embed_model)
+        for db_id in tqdm(unique_db_ids, desc="Indexing columns")
+    }
+
+    logger.info("Building table graph (Baseline) …")
+    tbl_graph = build_table_graph(schema_df)
+    tbl_cache = {
+        db_id: build_table_index(tbl_graph, db_id, embed_model)
+        for db_id in tqdm(unique_db_ids, desc="Indexing tables")
+    }
+
+    # Few-shot index (GraphRAG only)
+    few_shot_idx = None
+    if cfg.few_shot_k > 0:
+        from few_shot import build_few_shot_index
+        logger.info("Building few-shot index …")
+        few_shot_idx = build_few_shot_index(cfg.train_json, embed_model)
+
+    # ── Main loop — run both pipelines on the same sample ─────────────────
+    graphrag_results: list[PipelineResult] = []
+    baseline_results: list[BaselineResult] = []
+
+    g_pred_path = Path("predictions.txt")
+    b_pred_path = Path("baseline_predictions.txt")
+
+    W = 72
+    with open(g_pred_path, "w", encoding="utf-8") as gf, \
+         open(b_pred_path, "w", encoding="utf-8") as bf:
+
+        for i, item in enumerate(tqdm(dev_data, desc="Running both pipelines")):
+            db_id    = item["db_id"]
+            question = item["question"]
+            gold_sql = item["query"]
+
+            # GraphRAG
+            try:
+                g_pred, g_recall, g_prec, g_schema, _ = run_single(
+                    question, gold_sql, db_id,
+                    col_graph, embed_model, llm, tokenizer, cfg,
+                    schema_index=col_cache[db_id],
+                    few_shot_index=few_shot_idx,
+                )
+            except Exception:
+                logger.exception("GraphRAG error on sample %d", i)
+                g_pred, g_recall, g_prec, g_schema = "SELECT 1", 0.0, 0.0, ""
+
+            # Baseline
+            try:
+                b_pred, b_recall, b_prec = run_single_baseline(
+                    question, gold_sql, db_id,
+                    tbl_graph, embed_model, llm, tokenizer, cfg,
+                    table_index=tbl_cache[db_id],
+                )
+            except Exception:
+                logger.exception("Baseline error on sample %d", i)
+                b_pred, b_recall, b_prec = "SELECT 1", 0.0, 0.0
+
+            graphrag_results.append(PipelineResult(
+                index=i + 1, db_id=db_id, question=question,
+                gold_sql=gold_sql, pred_sql=g_pred,
+                recall=g_recall, precision=g_prec,
+            ))
+            baseline_results.append(BaselineResult(
+                index=i + 1, db_id=db_id, question=question,
+                gold_sql=gold_sql, pred_sql=b_pred,
+                recall=b_recall, precision=b_prec,
+            ))
+
+            gf.write(g_pred.strip() + "\n")
+            bf.write(b_pred.strip() + "\n")
+
+            # Per-sample progress print
+            if (i + 1) % 20 == 0 or i == 0 or (i + 1) == len(dev_data):
+                print("\n" + "=" * W)
+                print(f"  [{i+1:>4}/{len(dev_data)}]  DB: {db_id}")
+                print("=" * W)
+                print(f"  Q              : {question}")
+                print(f"  GOLD           : {gold_sql}")
+                print("-" * W)
+                print(f"  [GraphRAG] pred: {g_pred}")
+                print(f"             R={g_recall*100:.1f}%  P={g_prec*100:.1f}%")
+                print(f"  [Baseline] pred: {b_pred}")
+                print(f"             R={b_recall*100:.1f}%  P={b_prec*100:.1f}%")
+                print("=" * W)
+
+    # ── Save baseline artefacts ────────────────────────────────────────────
+    bl_save_log(baseline_results, Path("baseline_log.txt"))
+    bl_save_csv(baseline_results, Path("baseline_results.csv"))
+
+    # ── Schema linking summaries ───────────────────────────────────────────
+    print_schema_linking_summary(graphrag_results)
+    bl_print_summary(baseline_results, label="Baseline (table/node)")
+
+    # ── Side-by-side comparison report ────────────────────────────────────
+    g_r = np.mean([r.recall    for r in graphrag_results]) * 100
+    g_p = np.mean([r.precision for r in graphrag_results]) * 100
+    b_r = np.mean([r.recall    for r in baseline_results]) * 100
+    b_p = np.mean([r.precision for r in baseline_results]) * 100
+
+    report_lines = [
+        "",
+        "=" * 70,
+        "  COMPARISON REPORT — GraphRAG (column/node) vs Baseline (table/node)",
+        "=" * 70,
+        f"  {'Metric':<22} {'GraphRAG':>12}  {'Baseline':>12}  {'Delta (G-B)':>12}",
+        "-" * 70,
+        f"  {'Schema Recall':<22} {g_r:>11.2f}%  {b_r:>11.2f}%  {g_r-b_r:>+11.2f}%",
+        f"  {'Schema Precision':<22} {g_p:>11.2f}%  {b_p:>11.2f}%  {g_p-b_p:>+11.2f}%",
+        "-" * 70,
+        "  Node granularity      column/node      table/node",
+        "  Schema context        pruned cols      all cols in table",
+        "  Linking strategy      n-gram match     single query embed",
+        "=" * 70,
+        "",
+    ]
+    report = "\n".join(report_lines)
+    print(report)
+    Path("comparison_report.txt").write_text(report, encoding="utf-8")
+    logger.info("Comparison report → comparison_report.txt")
+
+    # ── Official Spider eval for both ──────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("  SPIDER EVAL — GraphRAG (column/node)")
+    print("=" * 60)
+    run_official_evaluation(cfg)
+
+    print("\n" + "=" * 60)
+    print("  SPIDER EVAL — Baseline (table/node)")
+    print("=" * 60)
+    bl_spider_eval(b_pred_path, cfg)
+
+
+# ---------------------------------------------------------------------------
+# CLI — GANTI if __name__ == "__main__" yang lama dengan ini
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GraphRAG Text-to-SQL Pipeline")
     parser.add_argument(
-        "--full-schema",
-        action="store_true",
+        "--full-schema", action="store_true",
         help="Bypass GraphRAG and feed the full DB schema to the LLM (ablation mode).",
     )
     parser.add_argument(
-        "--skip-sweep",
-        action="store_true",
+        "--skip-sweep", action="store_true",
         help="Skip the precision sweep and use top_k values from config.py as-is.",
     )
     parser.add_argument(
         "--sweep-sample", type=float, default=0.2,
         help="Fraction of dev set used for the precision sweep (default: 0.2).",
     )
+    parser.add_argument(
+        "--baseline", action="store_true",
+        help="Also run the table/node baseline and print a comparison report.",
+    )
+    parser.add_argument(
+        "--sample", type=float, default=1.0,
+        help="Fraction of dev set to evaluate when --baseline is used (default: 1.0).",
+    )
     args, unknown = parser.parse_known_args()
 
     config = PipelineConfig(use_full_schema_bypass=args.full_schema)
 
-    if not args.skip_sweep and not config.use_full_schema_bypass:
+    # Sweep (skipped automatically when --baseline is used or --full-schema)
+    if not args.skip_sweep and not config.use_full_schema_bypass and not args.baseline:
         logger.info("=" * 60)
         logger.info("STEP 0: Precision sweep (pass --skip-sweep to skip)")
         logger.info("=" * 60)
@@ -413,4 +618,19 @@ if __name__ == "__main__":
             config.top_k_tables, config.top_k_columns,
         )
 
-    main(config)
+    if args.baseline:
+        # Import baseline imports here to keep them lazy
+        from baseline import (
+            BaselineResult,
+            build_table_graph,
+            build_table_index,
+            run_single_baseline,
+            _save_predictions,
+            _save_log,
+            _save_csv,
+            _print_summary,
+            _run_spider_eval,
+        )
+        run_comparison(config, sample_ratio=args.sample)
+    else:
+        main(config)
