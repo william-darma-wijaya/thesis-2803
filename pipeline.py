@@ -598,7 +598,7 @@ if __name__ == "__main__":
     config = PipelineConfig(use_full_schema_bypass=args.full_schema)
 
     # Sweep (skipped automatically when --baseline is used or --full-schema)
-    if not args.skip_sweep and not config.use_full_schema_bypass and not args.baseline:
+    if not args.skip_sweep and not config.use_full_schema_bypass:
         logger.info("=" * 60)
         logger.info("STEP 0: Precision sweep (pass --skip-sweep to skip)")
         logger.info("=" * 60)
