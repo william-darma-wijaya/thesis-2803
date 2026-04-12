@@ -36,7 +36,7 @@ class PipelineConfig:
 
     # --- Models ---
     embedding_model: str = "BAAI/bge-m3"
-    llm_model: str = "Qwen/Qwen2.5-Coder-7B-Instruct"
+    llm_model: str = "Qwen/Qwen2.5-Coder-14B-Instruct"
 
     # --- Quantization ---
     load_in_4bit: bool = True
