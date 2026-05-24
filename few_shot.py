@@ -139,6 +139,7 @@ def format_few_shot_block(examples: list[FewShotExample]) -> str:
     Format per example:
         -- Example N
         -- Q: <question>
+        -- A:
         SELECT ...
     """
     if not examples:
@@ -148,6 +149,7 @@ def format_few_shot_block(examples: list[FewShotExample]) -> str:
     for i, ex in enumerate(examples, start=1):
         lines.append(f"-- Example {i}")
         lines.append(f"-- Q: {ex.question}")
+        lines.append("-- A:")
         lines.append(ex.sql.strip())
         lines.append("")  # blank line between examples
 

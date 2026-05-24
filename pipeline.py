@@ -5,8 +5,21 @@ Usage:
     python pipeline.py [--full-schema]
 
 Flags:
-    --full-schema   Bypass GraphRAG retrieval and feed the entire DB schema to the LLM.
-                    Useful for ablation studies.
+                    
+    "--full-schema", action="store_true",
+        help="Bypass GraphRAG and feed the full DB schema to the LLM (ablation mode).",
+    
+    "--skip-sweep", action="store_true",
+        help="Skip the precision sweep and use top_k values from config.py as-is.",
+    
+    "--sweep-sample", type=float, default=0.2,
+        help="Fraction of dev set used for the precision sweep (default: 0.2).",
+    
+    "--baseline", action="store_true",
+        help="Also run the table/node baseline and print a comparison report.",
+    
+    "--sample", type=float, default=1.0,
+        help="Fraction of dev set to evaluate when --baseline is used (default: 1.0).",
 """
 
 import argparse

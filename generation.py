@@ -78,14 +78,16 @@ def build_prompt(
                            Pass the output of few_shot.format_few_shot_block().
                            If empty, the prompt is zero-shot.
     """
-    value_hints = _format_value_hints(extracted_values)
+    # value_hints = _format_value_hints(extracted_values)
+
+### VALUE HINTS HAPUS DULU SOALNYA MAISH BELOM BAGUS BUAT EXTRACT
+### HARUS PAKE NAMED ENTITY RECOGNITION GABISA CUMA PAKE REGEX DOANG
 
     return (
         "### Task\n"
         "Generate a valid SQLite query to answer the following question.\n"
         "### Database Schema\n"
         f"{schema_context}\n"
-        f"{value_hints}"
         f"{few_shot_block}"
         "### Question\n"
         f"{question}\n"
@@ -103,16 +105,16 @@ def build_prompt(
     )
 
 
-def _format_value_hints(extracted_values: dict) -> str:
-    strings = extracted_values.get("strings", [])
-    numbers = extracted_values.get("numbers", [])
-    if not strings and not numbers:
-        return ""
+# def _format_value_hints(extracted_values: dict) -> str:
+#     strings = extracted_values.get("strings", [])
+#     numbers = extracted_values.get("numbers", [])
+#     if not strings and not numbers:
+#         return ""
 
-    lines = ["-- Important values\n"]
-    lines += [f"-- Use string value '{s}'\n" for s in strings]
-    lines += [f"-- Use numeric value {n}\n" for n in numbers]
-    return "".join(lines)
+#     lines = ["-- Important values\n"]
+#     lines += [f"-- Use string value '{s}'\n" for s in strings]
+#     lines += [f"-- Use numeric value {n}\n" for n in numbers]
+#     return "".join(lines)
 
 
 # ---------------------------------------------------------------------------

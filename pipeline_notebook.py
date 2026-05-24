@@ -6,7 +6,13 @@
 # re-run cheaply to tweak config or inspect results.
 # =============================================================================
 
+"""
+ONLY USE THIS NOTEBOOK KALAU MISALNYA MAU CEK CEK PIPELINE 
+KALAU MISALNYA ENGGA YAUDAH PAKE PIPELINE PY AJA
 
+or kalau mau bikin ipynb yah pake yang ini aja deh aokwoakowka
+sekarang masih males 
+"""
 # ── Cell 1 ── Imports & logging ───────────────────────────────────────────────
 import json
 import logging
