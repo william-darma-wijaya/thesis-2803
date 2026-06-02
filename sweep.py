@@ -73,10 +73,9 @@ class SweepResult:
     top_k_columns:       int
     avg_recall:          float
     avg_precision:       float
-    f1:                  float  # standard harmonic mean
-    recall_weighted_f1:  float  # recall-weighted: only maximise precision
-                                #   among configs that meet RECALL_THRESHOLD
-    meets_recall_target: bool   # avg_recall >= RECALL_THRESHOLD
+    f1:                  float  # standard F1 (β=1), shown for reference
+    f6:                  float  # F6 (β=6): peak correlation with EX (arxiv 2501.17174)
+    meets_recall_target: bool   # avg_recall >= RECALL_THRESHOLD (informational)
     n_samples:           int
 
 
@@ -139,14 +138,11 @@ def _run_combination(
     f1    = (2 * avg_r * avg_p / (avg_r + avg_p)) if (avg_r + avg_p) > 0 else 0.0
 
     meets_target = avg_r >= RECALL_THRESHOLD
-    # Recall-weighted F1: configs below the recall threshold are penalised
-    # by setting their score to recall only (no precision credit).
-    # Among configs that meet the threshold, rank purely by precision
-    # since recall is already "good enough".
-    if meets_target:
-        rw_f1 = avg_p          # maximise precision once recall target is met
-    else:
-        rw_f1 = avg_r * 0.5   # penalise: half credit, recall-only
+    # F6 (β=6): weights recall 36× more than precision.
+    # Chosen because β=6 yields peak correlation with Execution Accuracy (EX)
+    # among all F-beta variants — see arxiv 2501.17174.
+    denom = 36 * avg_p + avg_r
+    f6 = 37 * avg_r * avg_p / denom if denom > 0 else 0.0
 
     return SweepResult(
         top_k_tables=top_k_tables,
@@ -154,7 +150,7 @@ def _run_combination(
         avg_recall=avg_r,
         avg_precision=avg_p,
         f1=f1,
-        recall_weighted_f1=rw_f1,
+        f6=f6,
         meets_recall_target=meets_target,
         n_samples=len(dev_subset),
     )
@@ -185,24 +181,21 @@ def _print_table(results: list[SweepResult]) -> None:
         )
     print("=" * W)
 
-    # --- Table 2: ranked by recall-weighted score (RECOMMENDED) ---
+    # --- Table 2: ranked by F6 (RECOMMENDED) ---
     print("\n" + "=" * W)
-    print(
-        f"SWEEP RESULTS — ranked by recall-weighted score  "
-        f"(recall threshold: {RECALL_THRESHOLD*100:.0f}%)"
-    )
-    print("  Logic: configs below recall threshold are penalised.")
-    print("         among configs that meet threshold, rank by precision.")
+    print("SWEEP RESULTS — ranked by F6 score (β=6)  [RECOMMENDED]")
+    print("  F6 = 37×P×R / (36P+R)  |  recall weighted 36× more than precision")
+    print(f"  Peak EX correlation among F-beta variants (arxiv 2501.17174)  |  90% recall line shown for reference")
     print("=" * W)
     print(header)
     print("-" * W)
-    for i, r in enumerate(sorted(results, key=lambda r: r.recall_weighted_f1, reverse=True)):
+    for i, r in enumerate(sorted(results, key=lambda r: r.f6, reverse=True)):
         target_str = "YES" if r.meets_recall_target else "NO "
         note = ""
         if i == 0:
-            note = "<-- RECOMMENDED"
+            note = "<-- RECOMMENDED (best F6)"
         elif not r.meets_recall_target:
-            note = f"recall too low (<{RECALL_THRESHOLD*100:.0f}%)"
+            note = f"recall < {RECALL_THRESHOLD*100:.0f}%"
         print(
             f"{r.top_k_tables:>8} {r.top_k_columns:>6} "
             f"{r.avg_recall*100:>8.2f}% {r.avg_precision*100:>10.2f}% "
@@ -216,7 +209,7 @@ def _save_csv(results: list[SweepResult], path: Path) -> None:
         writer = csv.DictWriter(
             f,
             fieldnames=["top_k_tables", "top_k_columns", "avg_recall",
-                        "avg_precision", "f1", "recall_weighted_f1",
+                        "avg_precision", "f1", "f6",
                         "meets_recall_target", "n_samples"],
         )
         writer.writeheader()
@@ -227,7 +220,7 @@ def _save_csv(results: list[SweepResult], path: Path) -> None:
                 "avg_recall":          round(r.avg_recall, 4),
                 "avg_precision":       round(r.avg_precision, 4),
                 "f1":                  round(r.f1, 4),
-                "recall_weighted_f1":  round(r.recall_weighted_f1, 4),
+                "f6":                  round(r.f6, 4),
                 "meets_recall_target": r.meets_recall_target,
                 "n_samples":           r.n_samples,
             })
@@ -288,15 +281,14 @@ def main(sample_ratio: float) -> None:
     _save_csv(results, Path("sweep_results.csv"))
 
     # Recommend best config
-    best = max(results, key=lambda r: r.recall_weighted_f1)
+    best = max(results, key=lambda r: r.f6)
     print(
-        f"\nRecommended config (recall-weighted): "
+        f"\nRecommended config (best F6): "
         f"top_k_tables={best.top_k_tables}, top_k_columns={best.top_k_columns}\n"
         f"  recall={best.avg_recall*100:.2f}%  "
         f"precision={best.avg_precision*100:.2f}%  "
         f"meets_90%_target={'YES' if best.meets_recall_target else 'NO'}\n"
-        f"  (standard F1={best.f1*100:.2f}%, "
-        f"recall-weighted score={best.recall_weighted_f1*100:.2f}%)"
+        f"  (F1={best.f1*100:.2f}%  F6={best.f6*100:.2f}%)"
     )
     if not best.meets_recall_target:
         print(
@@ -365,7 +357,7 @@ def run_sweep_and_get_best(
     _print_table(results)
     _save_csv(results, Path("sweep_results.csv"))
 
-    best = max(results, key=lambda r: r.recall_weighted_f1)
+    best = max(results, key=lambda r: r.f6)
     logger.info(
         "Best config (recall-weighted): top_k_tables=%d top_k_columns=%d "
         "recall=%.2f%% precision=%.2f%%",

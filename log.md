@@ -54,6 +54,18 @@ Format: `[YYYY-MM-DD HH:MM]` | file(s) | what changed | **why**
 
 ---
 
+---
+
+## 2026-06-02 (session cont.)
+
+### `sweep.py`
+- **Replaced recall-weighted scoring with F6 (β=6) as the primary ranking criterion**
+  - Why: arxiv 2501.17174 shows F6 has the peak correlation with Execution Accuracy (EX) among all F-beta variants (F6: 0.911 vs F5: 0.897 vs F7: 0.821 — peak at β=6). Using F6 directly optimises for the metric that best predicts actual SQL correctness, and is defensible in the thesis with a citation.
+  - Formula: F6 = 37 × P × R / (36P + R) — weights recall 36× more than precision (β² = 36).
+  - `meets_recall_target` (90% threshold) is kept as an informational display column but no longer drives the ranking.
+
+---
+
 <!-- Template for future entries:
 ## YYYY-MM-DD
 
