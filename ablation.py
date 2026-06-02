@@ -60,10 +60,12 @@ DEFAULT_K_VALUES = [0, 1, 3, 5]
 class AblationResult:
     k: int
     mode: str
-    avg_recall:    float
-    avg_precision: float
-    n_samples:     int
+    avg_recall:       float
+    avg_precision:    float
+    avg_prompt_tokens: float
+    n_samples:        int
     predictions_file: Path
+    prompts_file:     Path
 
 
 # ---------------------------------------------------------------------------
@@ -108,11 +110,13 @@ def _run_k(
         use_full_schema_bypass=False,
     )
 
-    pred_path = output_dir / f"ablation_{mode}_predictions_k{k}.txt"
-    recalls, precisions = [], []
+    pred_path   = output_dir / f"ablation_{mode}_predictions_k{k}.txt"
+    prompt_path = output_dir / f"ablation_{mode}_prompts_k{k}.jsonl"
+    recalls, precisions, prompt_tokens_list = [], [], []
 
-    with open(pred_path, "w", encoding="utf-8") as pred_file:
-        for item in tqdm(dev_subset, desc=f"{mode} k={k}", leave=False):
+    with open(pred_path, "w", encoding="utf-8") as pred_file, \
+         open(prompt_path, "w", encoding="utf-8") as prompt_file:
+        for idx, item in enumerate(tqdm(dev_subset, desc=f"{mode} k={k}", leave=False)):
             db_id    = item["db_id"]
             question = item["question"]
             gold_sql = item["query"]
@@ -174,6 +178,17 @@ def _run_k(
                     "numbers": re.findall(r"\d+", question),
                 }
                 prompt   = build_prompt(question, schema_context, extracted_values, few_shot_block)
+                n_tokens = len(tokenizer.encode(prompt))
+                prompt_tokens_list.append(n_tokens)
+                prompt_file.write(
+                    json.dumps({"i": idx + 1, "db_id": db_id, "question": question,
+                                "tokens": n_tokens, "prompt": prompt}, ensure_ascii=False) + "\n"
+                )
+                logger.info(
+                    "  [%d/%d] db=%-20s tokens=%4d | R=%.1f%% P=%.1f%%",
+                    idx + 1, len(dev_subset), db_id, n_tokens,
+                    recalls[-1] * 100, precisions[-1] * 100,
+                )
                 pred_sql = generate_sql(prompt, llm, tokenizer, cfg)
 
             except Exception:
@@ -181,6 +196,7 @@ def _run_k(
                 pred_sql = "SELECT 1"
                 recalls.append(0.0)
                 precisions.append(0.0)
+                prompt_tokens_list.append(0)
 
             pred_file.write(f"{pred_sql}\n")
 
@@ -189,8 +205,10 @@ def _run_k(
         mode=mode,
         avg_recall=float(np.mean(recalls)),
         avg_precision=float(np.mean(precisions)),
+        avg_prompt_tokens=float(np.mean(prompt_tokens_list)) if prompt_tokens_list else 0.0,
         n_samples=len(dev_subset),
         predictions_file=pred_path,
+        prompts_file=prompt_path,
     )
 
 
@@ -199,17 +217,17 @@ def _run_k(
 # ---------------------------------------------------------------------------
 
 def _print_table(results: list[AblationResult]) -> None:
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 85)
     print("FEW-SHOT ABLATION RESULTS")
-    print("=" * 70)
-    print(f"{'mode':<12} {'k':>5} {'recall':>9} {'precision':>11}  predictions file")
-    print("-" * 70)
+    print("=" * 85)
+    print(f"{'mode':<12} {'k':>5} {'recall':>9} {'precision':>11} {'avg_tokens':>11}  predictions file")
+    print("-" * 85)
     for r in sorted(results, key=lambda x: (x.mode, x.k)):
         print(
             f"{r.mode:<12} {r.k:>5} {r.avg_recall*100:>8.2f}% "
-            f"{r.avg_precision*100:>10.2f}%  {r.predictions_file.name}"
+            f"{r.avg_precision*100:>10.2f}% {r.avg_prompt_tokens:>11.1f}  {r.predictions_file.name}"
         )
-    print("=" * 70)
+    print("=" * 85)
     modes = list(dict.fromkeys(r.mode for r in results))
     print("\nRun Spider official evaluation for each k / mode:")
     for mode in modes:
@@ -224,17 +242,20 @@ def _print_table(results: list[AblationResult]) -> None:
 def _save_csv(results: list[AblationResult], path: Path) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["mode", "k", "avg_recall", "avg_precision", "n_samples", "predictions_file"]
+            f, fieldnames=["mode", "k", "avg_recall", "avg_precision",
+                           "avg_prompt_tokens", "n_samples", "predictions_file", "prompts_file"]
         )
         writer.writeheader()
         for r in results:
             writer.writerow({
-                "mode":             r.mode,
-                "k":                r.k,
-                "avg_recall":       round(r.avg_recall, 4),
-                "avg_precision":    round(r.avg_precision, 4),
-                "n_samples":        r.n_samples,
-                "predictions_file": str(r.predictions_file),
+                "mode":              r.mode,
+                "k":                 r.k,
+                "avg_recall":        round(r.avg_recall, 4),
+                "avg_precision":     round(r.avg_precision, 4),
+                "avg_prompt_tokens": round(r.avg_prompt_tokens, 1),
+                "n_samples":         r.n_samples,
+                "predictions_file":  str(r.predictions_file),
+                "prompts_file":      str(r.prompts_file),
             })
     logger.info("CSV saved to %s", path)
 

@@ -64,6 +64,13 @@ Format: `[YYYY-MM-DD HH:MM]` | file(s) | what changed | **why**
   - Formula: F6 = 37 × P × R / (36P + R) — weights recall 36× more than precision (β² = 36).
   - `meets_recall_target` (90% threshold) is kept as an informational display column but no longer drives the ranking.
 
+### `ablation.py`
+- **Token consumption tracking: count tokens inline + save full prompts to JSONL**
+  - Why: Token consumption is a core thesis metric (see CLAUDE.md — Token Consumption, TEP). Counting inline with the already-loaded tokenizer is accurate and free. Saving full prompts to JSONL enables post-hoc TEP analysis without re-running inference.
+  - Per-sample log line: `[12/1034] db=concert_singer tokens=847 | R=100.0% P=72.3%` — visible immediately during the run.
+  - New output files per mode×k: `ablation_{mode}_prompts_k{k}.jsonl` (fields: i, db_id, question, tokens, prompt).
+  - `AblationResult` now carries `avg_prompt_tokens` and `prompts_file`; both appear in the results table and `ablation_results.csv`.
+
 ---
 
 <!-- Template for future entries:
