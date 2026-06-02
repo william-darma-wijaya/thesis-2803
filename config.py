@@ -71,5 +71,11 @@ class PipelineConfig:
     # --- Mode ---
     use_full_schema_bypass: bool = False
 
+    # --- Token consumption ---
+    # α in T = T_in + α × T_out.
+    # Set to 1.0 for local models (input and output consume equal compute).
+    # Set to 3.0 or 5.0 to mirror commercial API pricing ratios.
+    token_output_weight: float = 1.0
+
     # --- Reproducibility ---
     seed: int = 42

@@ -157,8 +157,8 @@ python ablation.py --mode graphrag --k-values 0 1 3 5 --sample 1.0
 
 Output per run:
 - `ablation_{mode}_predictions_k{k}.txt` — SQL predictions → masuk ke Spider `evaluation.py` untuk EM/EX
-- `ablation_{mode}_prompts_k{k}.jsonl` — full prompts + token counts per sample (fields: i, db_id, question, tokens, prompt)
-- `ablation_results.csv` — avg_recall, avg_precision, avg_prompt_tokens per mode×k → dasar perhitungan TEP
+- `ablation_{mode}_prompts_k{k}.jsonl` — per sample: i, db_id, question, tokens_in, tokens_out, token_consumption, prompt, pred_sql
+- `ablation_results.csv` — avg_recall, avg_precision, avg_prompt_tokens (T_in), avg_output_tokens (T_out), avg_token_consumption (T) per mode×k → dasar perhitungan TEP
 
 | | k=0 | k=1 | k=3 | k=5 |
 |---|---|---|---|---|
@@ -176,8 +176,8 @@ Tujuan ablation: cari **elbow point** — nilai k di mana penambahan few-shot ex
 | Exact Set Match (ESM) | Spider `evaluation.py --etype match` | |
 | Execution Accuracy (EX) | Spider `evaluation.py --etype exec` | |
 | Component Match (CM) | Spider `evaluation.py` | |
-| Token Consumption | `avg_prompt_tokens` di `ablation_results.csv` | Diukur inline saat ablation: `len(tokenizer.encode(prompt))` per sample. Full prompt disimpan ke `ablation_{mode}_prompts_k{k}.jsonl` untuk analisis lanjutan. |
-| TEP (Token Elasticity of Performance) | Custom metric, hitung post-hoc | TEP = ΔEX / Δavg_tokens antar k — bisa dihitung dari `ablation_results.csv` setelah dapat EX dari Spider eval. |
+| Token Consumption | `avg_token_consumption` di `ablation_results.csv` | T = T_in + α×T_out. T_in = prompt tokens, T_out = generated SQL tokens, α = `token_output_weight` di config.py (default 1.0 untuk local model). Diukur inline per sample setelah generate_sql. |
+| TEP (Token Elasticity of Performance) | Custom metric, hitung post-hoc | TEP_G = (ΔEX_G/EX_B) / (ΔT_G/T_B) — elastisitas performa GraphRAG relatif terhadap konsumsi token vs Baseline. ΔEX_G = EX_G − EX_B, ΔT_G = T_G − T_B. Hitung dari `ablation_results.csv` + EX dari Spider eval. |
 | QVT (Query Variance Testing) | Custom metric | Stabilitas output terhadap variasi pertanyaan |
 
 Spider evaluation scripts harus didownload manual:

@@ -73,6 +73,44 @@ Format: `[YYYY-MM-DD HH:MM]` | file(s) | what changed | **why**
 
 ---
 
+---
+
+## 2026-06-02 (session cont.)
+
+### `ablation.py`
+- **`_print_table`: now prints both `--etype match` AND `--etype exec` commands with real paths**
+  - Why: Old implementation only printed `--etype exec` and used `<gold_path>` / `<db_dir>` / `<tables_json>` placeholders. EM (Exact Match) scores would be silently missed. Fixed to print both eval types and substitute actual paths from `PipelineConfig` so commands are copy-pasteable on Kaggle.
+- **Added `_run_ablation_evals(results, cfg)` function**
+  - Why: `pipeline.py` auto-runs Spider eval at the end; `ablation.py` did not. With 8 prediction files (2 modes × 4 k-values) × 2 eval types = 16 commands to run manually. New function runs them all automatically.
+- **Added `--run-eval` CLI flag**
+  - Why: Auto-eval is opt-in (adds wall-clock time and requires `evaluation.py` + `process_sql.py` to be present). Flag lets the user decide: omit for fast prediction-only runs, pass for a single command that produces all EM/EX numbers.
+- **Added sweep-not-run warning in `main()`**
+  - Why: If `ablation.py` is run before `sweep.py` and `config.py` is not updated, the pipeline uses default `top_k_tables=3`, `top_k_columns=5`. Results would be subtly wrong without any indication. Warning fires when values match the defaults.
+
+---
+
+## 2026-06-02 (session cont.)
+
+### `config.py`
+- **Added `token_output_weight: float = 1.0` (α)**
+  - Why: Token Consumption formula is T = T_in + α×T_out. α lets you weight output tokens differently from input tokens (e.g. to mirror API pricing where output costs 3–5× more). Default 1.0 for local model (equal compute cost per token). Change this before TEP calculation if comparing to API-based systems.
+
+### `ablation.py`
+- **Corrected Token Consumption to T = T_in + α×T_out (was only T_in)**
+  - Why: The thesis definition (Zhu et al., 2025) counts both input and output tokens, with α multiplier on output. Previous implementation only measured prompt length (T_in), missing the generated SQL token cost (T_out).
+  - `generate_sql` is now called before the JSONL write so T_out is available in the same sample pass.
+  - JSONL fields updated: `tokens` → `tokens_in`, `tokens_out`, `token_consumption` (T), `pred_sql` added.
+- **`AblationResult` now carries `avg_output_tokens` and `avg_token_consumption`**
+  - Why: Thesis needs T, T_in, and T_out separately for TEP and for the breakdown table.
+- **`_save_csv` updated** — new columns: `avg_output_tokens`, `avg_token_consumption`
+- **`_print_table` updated** — shows T_consume, T_in, T_out columns; prints α value in header
+
+### `CLAUDE.md`
+- **Corrected Token Consumption and TEP metric descriptions**
+  - TEP formula: TEP_G = (ΔEX_G/EX_B) / (ΔT_G/T_B) — comparing GraphRAG vs Baseline (not k vs k)
+  - Token Consumption: T = T_in + α×T_out
+  - JSONL fields updated to match new schema
+
 <!-- Template for future entries:
 ## YYYY-MM-DD
 
