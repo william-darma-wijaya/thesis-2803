@@ -184,7 +184,7 @@ def generate_sql(
     cfg: PipelineConfig,
 ) -> str:
     """Run a single greedy-decode pass and return the cleaned SQL."""
-    inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
     with torch.no_grad():
         outputs = model.generate(

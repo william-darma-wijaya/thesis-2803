@@ -65,7 +65,7 @@ class PipelineConfig:
     few_shot_same_db_first: bool = True
 
     # --- Generation ---
-    max_new_tokens: int = 200
+    max_new_tokens: int = 256
     temperature: float = 0.0
 
     # --- Mode ---

@@ -33,7 +33,6 @@ from retrieval import (
     SchemaIndex,
     build_schema_index,
     evaluate_schema_linking,
-    prune_path_nodes,
     semantic_schema_linking,
     trace_schema_paths,
 )
@@ -124,12 +123,7 @@ def _run_combination(
             ]
         else:
             c_nodes, paths, _ = trace_schema_paths(graph, db_id, detected_cols)
-            all_path_nodes = list(set(c_nodes + [node for path in paths for node in path]))
-            # Apply same pruning as pipeline so sweep metrics match LLM input
-            detected_col_names = {c.lower() for c in detected_cols}
-            column_nodes = prune_path_nodes(graph, detected_col_names, all_path_nodes)
-            if not column_nodes:
-                column_nodes = all_path_nodes
+            column_nodes = list(set(c_nodes + [node for path in paths for node in path]))
 
         if not column_nodes:
             recalls.append(0.0)
