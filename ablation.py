@@ -32,7 +32,7 @@ from tqdm import tqdm
 
 from config import PipelineConfig
 from few_shot import FewShotIndex, build_few_shot_index, format_few_shot_block, retrieve_few_shot_examples
-from generation import build_prompt, generate_sql, load_model_and_tokenizer
+from generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
 from retrieval import (
     build_schema_context,
     build_schema_index,
@@ -166,9 +166,6 @@ def _run_k(
                     r, p = evaluate_table_linking(gold_sql, table_nodes, graph, db_id)
                     schema_context = build_table_schema_context(graph, table_nodes)
 
-                recalls.append(r)
-                precisions.append(p)
-
                 # --- Few-shot block ---
                 few_shot_block = ""
                 if few_shot_index is not None and k > 0:
@@ -182,13 +179,17 @@ def _run_k(
                     "strings": re.findall(r"'([^']*)'", question),
                     "numbers": re.findall(r"\d+", question),
                 }
-                prompt   = build_prompt(question, schema_context, extracted_values, few_shot_block)
-                pred_sql = generate_sql(prompt, llm, tokenizer, cfg)
+                prompt = build_prompt(question, schema_context, extracted_values, few_shot_block)
+                pred_sql, n_out = generate_sql_with_token_count(prompt, llm, tokenizer, cfg)
 
-                n_in  = len(tokenizer.encode(prompt))
-                n_out = len(tokenizer.encode(pred_sql))
-                n_t   = int(n_in + alpha * n_out)
+                n_in = len(tokenizer.encode(prompt))   # T_in  — prompt tokens
+                # n_out (T_out) is the real count of tokens the model emitted.
+                n_t  = int(n_in + alpha * n_out)        # T = T_in + α × T_out
 
+                # Append all metrics together so the lists never desync, even
+                # if generation throws (the except branch appends one 0 to each).
+                recalls.append(r)
+                precisions.append(p)
                 prompt_tokens_list.append(n_in)
                 output_tokens_list.append(n_out)
                 consumption_list.append(n_t)

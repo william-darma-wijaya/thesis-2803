@@ -111,6 +111,13 @@ Format: `[YYYY-MM-DD HH:MM]` | file(s) | what changed | **why**
   - Token Consumption: T = T_in + α×T_out
   - JSONL fields updated to match new schema
 
+### `generation.py` + `ablation.py` — T_out now counts real emitted tokens
+- **Added `generate_sql_with_token_count()` returning `(cleaned_sql, n_generated_tokens)`**
+  - Why: T_out was being measured as `len(tokenizer.encode(pred_sql))` — i.e. re-encoding the CLEANED SQL. But cleaning strips ` ```sql ` fences, explanations, aliases, and collapses whitespace, so it undercounts the tokens the model actually emitted (the true generation cost, esp. when the model hits max_new_tokens or rambles). The new function returns the raw count of `generated_tokens` from `model.generate`, which is the correct T_out per the thesis definition ("teks yang dikeluarkan oleh LLM").
+  - `generate_sql()` kept as a thin wrapper — `pipeline.py` and `baseline.py` are unaffected.
+- **Fixed double-append bug in `ablation._run_k`**
+  - Why: `recalls.append(r)` / `precisions.append(p)` ran BEFORE generation. If `generate_sql` threw (CUDA OOM on T4 is common), the `except` block appended `0.0` again — that sample contributed two entries to recall/precision but one to the token lists, desyncing the lists and skewing averages. Now all five metric lists are appended together after generation succeeds; the except branch appends exactly one `0` to each.
+
 <!-- Template for future entries:
 ## YYYY-MM-DD
 
