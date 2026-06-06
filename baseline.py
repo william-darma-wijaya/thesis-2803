@@ -286,8 +286,11 @@ def build_table_schema_context(
             col_lines.append(line)
 
         fk_lines = []
+        this_cols = {col["Column"] for col in d["columns"]}
         for _, neighbor, ed in graph.edges(node, data=True):
-            if ed.get("relation") == "foreign_key" and ed.get("from_col"):
+            # Only annotate if this node is the FK source (from_col lives here,
+            # not on the referenced/parent side of the edge).
+            if ed.get("relation") == "foreign_key" and ed.get("from_col") in this_cols:
                 neighbor_table = graph.nodes[neighbor]["table"]
                 fk_lines.append(
                     f"    FOREIGN KEY ({ed['from_col']}) "
@@ -313,30 +316,38 @@ def evaluate_table_linking(
     """
     Compute recall and precision of the table-level schema linking step.
 
-    Gold elements: table names and column names extracted by token matching
-    from the gold SQL (same approach as the notebook and retrieval.py).
-
-    Retrieved elements: table names + column names from all retrieved table
-    nodes (since each node carries the full column list).
+    Uses schema-aware matching (same strategy as evaluate_schema_linking in
+    retrieval.py): tokens are validated against known schema names and SQL
+    stopwords are filtered out, preventing spurious matches on tokens like
+    'id', 'name', or 'type' that appear in SQL as literals or aliases.
 
     Returns:
         (recall, precision) — floats in [0, 1]
     """
-    clean_sql = re.sub(r"[^\w\s]", " ", gold_sql.lower())
-    sql_tokens = set(clean_sql.split())
+    from retrieval import _SQL_STOPWORDS
 
-    # Build gold element set from all nodes in this DB
-    gold_elements: set[str] = set()
-    for n, d in graph.nodes(data=True):
+    # Build known schema names from the table-level graph for this database
+    known_tables: set[str] = set()
+    known_columns: set[str] = set()
+    for _, d in graph.nodes(data=True):
         if d.get("database") != db_name:
             continue
-        t_name = d["table"].lower()
-        if t_name in sql_tokens:
-            gold_elements.add(t_name)
+        known_tables.add(d["table"].lower())
         for col in d.get("columns", []):
-            c_name = col["Column"].lower()
-            if c_name in sql_tokens and c_name != "*":
-                gold_elements.add(c_name)
+            c = col["Column"].lower()
+            if c != "*":
+                known_columns.add(c)
+
+    # Schema-aware gold element parsing (mirrors _parse_gold_elements)
+    raw_tokens = re.split(r'[\s\(\),;=<>!"\']+', gold_sql.lower())
+    tokens = {t.lstrip(".") for t in raw_tokens if t and t not in _SQL_STOPWORDS}
+
+    gold_elements: set[str] = set()
+    for token in tokens:
+        if token in known_tables:
+            gold_elements.add(token)
+        if token in known_columns:
+            gold_elements.add(token)
 
     if not gold_elements:
         return 1.0, 1.0

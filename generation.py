@@ -177,14 +177,23 @@ def _clean_sql(sql: str) -> str:
 # Generation
 # ---------------------------------------------------------------------------
 
-def generate_sql(
+def generate_sql_with_token_count(
     prompt: str,
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     cfg: PipelineConfig,
-) -> str:
-    """Run a single greedy-decode pass and return the cleaned SQL."""
-    inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+) -> tuple[str, int]:
+    """
+    Run a single greedy-decode pass.
+
+    Returns:
+        (cleaned_sql, n_generated_tokens)
+        n_generated_tokens is the count of tokens the model ACTUALLY emitted
+        (raw generation, including any markdown/explanation/EOS that cleaning
+        later strips). This is the true T_out for token-consumption accounting —
+        re-encoding the cleaned SQL would undercount the real generation cost.
+    """
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
     with torch.no_grad():
         outputs = model.generate(
@@ -196,5 +205,17 @@ def generate_sql(
         )
 
     generated_tokens = outputs[0][inputs.input_ids.shape[1] :]
+    n_generated = int(generated_tokens.shape[0])
     generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-    return _clean_sql(generated_text)
+    return _clean_sql(generated_text), n_generated
+
+
+def generate_sql(
+    prompt: str,
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    cfg: PipelineConfig,
+) -> str:
+    """Run a single greedy-decode pass and return the cleaned SQL."""
+    sql, _ = generate_sql_with_token_count(prompt, model, tokenizer, cfg)
+    return sql

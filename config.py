@@ -42,7 +42,7 @@ class PipelineConfig:
     load_in_4bit: bool = True
     bnb_double_quant: bool = True
     bnb_quant_type: str = "nf4"
-    bnb_compute_dtype: torch.dtype = torch.bfloat16
+    bnb_compute_dtype: torch.dtype = torch.float16
 
     # --- Schema Linking ---
     semantic_similarity_threshold: float = 0.35
@@ -65,11 +65,17 @@ class PipelineConfig:
     few_shot_same_db_first: bool = True
 
     # --- Generation ---
-    max_new_tokens: int = 200
+    max_new_tokens: int = 256
     temperature: float = 0.0
 
     # --- Mode ---
     use_full_schema_bypass: bool = False
+
+    # --- Token consumption ---
+    # α in T = T_in + α × T_out.
+    # Set to 1.0 for local models (input and output consume equal compute).
+    # Set to 3.0 or 5.0 to mirror commercial API pricing ratios.
+    token_output_weight: float = 1.0
 
     # --- Reproducibility ---
     seed: int = 42

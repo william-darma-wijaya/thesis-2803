@@ -46,8 +46,6 @@ from retrieval import (
     build_schema_context,
     build_schema_index,
     evaluate_schema_linking,
-    precompute_column_embeddings,
-    prune_path_nodes,
     semantic_schema_linking,
     trace_schema_paths,
 )
@@ -146,13 +144,7 @@ def run_single(
             ]
         else:
             c_nodes, paths, _ = trace_schema_paths(graph, db_id, detected_cols)
-            # Collect all path nodes, then prune intermediate-only nodes
-            all_path_nodes = list(set(c_nodes + [node for path in paths for node in path]))
-            detected_col_names = {c.lower() for c in detected_cols}
-            column_nodes = prune_path_nodes(graph, detected_col_names, all_path_nodes)
-            # Fallback: if pruning removed everything, keep original expansion
-            if not column_nodes:
-                column_nodes = all_path_nodes
+            column_nodes = list(set(c_nodes + [node for path in paths for node in path]))
 
     if not column_nodes:
         return "SELECT 1", 0.0, 0.0, "", []
