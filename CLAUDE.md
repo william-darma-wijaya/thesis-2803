@@ -6,6 +6,7 @@ Environment: Kaggle Notebook (GPU T4, memory terbatas)
 
 ---
 
+
 ## Konteks Penelitian
 
 Penelitian ini menganalisis trade-off antara performa SQL generation dan efisiensi token consumption. Ada dua pendekatan utama yang dibandingkan:
