@@ -2,7 +2,7 @@
 Main entry point for the GraphRAG Text-to-SQL pipeline.
 
 Usage:
-    python pipeline.py [--full-schema]
+    python src/experiments/pipeline.py [--full-schema]
 
 Flags:
                     

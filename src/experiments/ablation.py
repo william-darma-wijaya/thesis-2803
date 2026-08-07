@@ -7,14 +7,14 @@ saves predictions for each k so you can run the official Spider evaluator
 on each one independently.
 
 Usage:
-    python ablation.py --mode graphrag --k-values 0 1 3 5 --sample 1.0
-    python ablation.py --mode baseline --k-values 0 1 3 5 --sample 1.0
-    python ablation.py                        # default: graphrag, 20% dev set, k in [0,1,3,5]
+    python src/experiments/ablation.py --mode graphrag --k-values 0 1 3 5 --sample 1.0
+    python src/experiments/ablation.py --mode baseline --k-values 0 1 3 5 --sample 1.0
+    python src/experiments/ablation.py                        # default: graphrag, 20% dev set, k in [0,1,3,5]
 
 Outputs (one set per mode × k):
-    ablation_graphrag_predictions_k{k}.txt   — GraphRAG predictions
-    ablation_baseline_predictions_k{k}.txt   — Baseline predictions
-    ablation_results.csv                     — recall/precision per mode × k
+    outputs/predictions/ablation_graphrag_predictions_k{k}.txt   — GraphRAG predictions
+    outputs/predictions/ablation_baseline_predictions_k{k}.txt   — Baseline predictions
+    outputs/tables/ablation_results.csv                          — recall/precision per mode × k
 """
 
 import argparse

@@ -190,9 +190,9 @@ Tujuan ablation: cari **elbow point** — nilai k di mana penambahan few-shot ex
 
 | Metrik | Tool | Keterangan |
 |---|---|---|
-| Exact Set Match (ESM) | Spider `evaluation.py --etype match` | |
-| Execution Accuracy (EX) | Spider `evaluation.py --etype exec` | |
-| Component Match (CM) | Spider `evaluation.py` | |
+| Exact Set Match (ESM) | Spider `external/spider_eval/evaluation.py --etype match` | |
+| Execution Accuracy (EX) | Spider `external/spider_eval/evaluation.py --etype exec` | |
+| Component Match (CM) | Spider `external/spider_eval/evaluation.py` | |
 | Token Consumption | `avg_token_consumption` di `ablation_results.csv` | T = T_in + α×T_out. T_in = prompt tokens, T_out = generated SQL tokens, α = `token_output_weight` di config.py (default 1.0 untuk local model). Diukur inline per sample setelah generate_sql. |
 | TEP (Token Elasticity of Performance) | Custom metric, hitung post-hoc | TEP_G = (ΔEX_G/EX_B) / (ΔT_G/T_B) — elastisitas performa GraphRAG relatif terhadap konsumsi token vs Baseline. ΔEX_G = EX_G − EX_B, ΔT_G = T_G − T_B. Hitung dari `ablation_results.csv` + EX dari Spider eval. |
 | QVT (Query Variance Testing) | Custom metric | Stabilitas output terhadap variasi pertanyaan |

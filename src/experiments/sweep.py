@@ -6,12 +6,12 @@ all combinations of top_k_tables and top_k_columns. Fast because no
 GPU inference is involved — just embedding lookups.
 
 Usage:
-    python sweep.py                      # default: 20% dev set
-    python sweep.py --sample 0.5        # 50% dev set
-    python sweep.py --sample 1.0        # full dev set
+    python src/experiments/sweep.py                      # default: 20% dev set
+    python src/experiments/sweep.py --sample 0.5        # 50% dev set
+    python src/experiments/sweep.py --sample 1.0        # full dev set
 
 Output:
-    sweep_results.csv   — raw per-combination metrics
+    outputs/tables/sweep_results.csv   — raw per-combination metrics
     sweep_summary.txt   — human-readable ranked table
 """
 

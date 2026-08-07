@@ -81,7 +81,7 @@ SQL Cleaner              ← Strip dialect quirks, fix aliases
 predictions.txt
    │
    ▼
-Official Spider Eval     ← EM + EX via evaluation.py
+Official Spider Eval     ← EM + EX via external/spider_eval/evaluation.py
 ```
 
 ---

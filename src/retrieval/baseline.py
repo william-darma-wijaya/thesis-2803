@@ -14,11 +14,11 @@ Architecture difference:
                                lower precision.
 
 Usage:
-    python baseline.py                           # default 20% dev-set sample
-    python baseline.py --sample 0.5             # 50% dev set
-    python baseline.py --sample 1.0             # full dev set
-    python baseline.py --skip-sweep             # skip top-k sweep
-    python baseline.py --compare                # run BOTH modes & print comparison
+    python src/retrieval/baseline.py                           # default 20% dev-set sample
+    python src/retrieval/baseline.py --sample 0.5             # 50% dev set
+    python src/retrieval/baseline.py --sample 1.0             # full dev set
+    python src/retrieval/baseline.py --skip-sweep             # skip top-k sweep
+    python src/retrieval/baseline.py --compare                # run BOTH modes & print comparison
 
 The script can also be imported and called from pipeline.py via run_baseline().
 
@@ -683,7 +683,7 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float = 0.2) -> None:
     }
 
     graphrag_results: list[PipelineResult] = []
-    with open("graphrag_predictions.txt", "w", encoding="utf-8") as pf:
+    with open("outputs/predictions/graphrag_predictions.txt", "w", encoding="utf-8") as pf:
         for i, item in enumerate(tqdm(dev_data, desc="GraphRAG — generating")):
             db_id, question, gold_sql = item["db_id"], item["question"], item["query"]
             try:
