@@ -22,6 +22,7 @@ import csv
 import json
 import logging
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,17 +31,19 @@ import torch
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-from config import PipelineConfig
-from few_shot import FewShotIndex, build_few_shot_index, format_few_shot_block, retrieve_few_shot_examples
-from generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
-from retrieval import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.core.config import PipelineConfig
+from src.generation.few_shot import FewShotIndex, build_few_shot_index, format_few_shot_block, retrieve_few_shot_examples
+from src.generation.generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
+from src.retrieval.retrieval import (
     build_schema_context,
     build_schema_index,
     evaluate_schema_linking,
     semantic_schema_linking,
     trace_schema_paths,
 )
-from schema import build_schema_graph, load_spider_schema
+from src.core.schema import build_schema_graph, load_spider_schema
 
 logging.basicConfig(
     level=logging.INFO,
@@ -96,7 +99,7 @@ def _run_k(
         mode  : "graphrag" (column-level retrieval) or
                 "baseline" (table-level retrieval).
     """
-    from baseline import (
+    from src.retrieval.baseline import (
         semantic_linking_table_level,
         trace_table_paths,
         build_table_schema_context,
@@ -268,7 +271,7 @@ def _print_table(results: list[AblationResult], cfg: "PipelineConfig | None" = N
         for r in sorted((x for x in results if x.mode == mode), key=lambda x: x.k):
             for etype in ["match", "exec"]:
                 print(
-                    f"  python evaluation.py --gold {gold} "
+                    f"  python external/spider_eval/evaluation.py --gold {gold} "
                     f"--pred {r.predictions_file} "
                     f"--db {db_dir} --table {tables} --etype {etype}"
                 )
@@ -277,11 +280,12 @@ def _print_table(results: list[AblationResult], cfg: "PipelineConfig | None" = N
 def _run_ablation_evals(results: list[AblationResult], cfg: PipelineConfig) -> None:
     """Run Spider official evaluation (EM + EX) for every ablation prediction file."""
     import subprocess
-    evaluator = Path("evaluation.py")
+    evaluator = Path("external/spider_eval/evaluation.py")
     if not evaluator.exists():
         logger.warning(
-            "evaluation.py not found — cannot auto-run Spider eval.\n"
+            "external/spider_eval/evaluation.py not found — cannot auto-run Spider eval.\n"
             "Download it first:\n"
+            "  mkdir -p external/spider_eval && cd external/spider_eval\n"
             "  wget https://raw.githubusercontent.com/taoyds/spider/master/evaluation.py\n"
             "  wget https://raw.githubusercontent.com/taoyds/spider/master/process_sql.py"
         )
@@ -299,7 +303,7 @@ def _run_ablation_evals(results: list[AblationResult], cfg: PipelineConfig) -> N
             print(f"  SPIDER EVAL — mode={r.mode}  k={r.k}  {label}")
             print("=" * 70)
             subprocess.run(
-                ["python", "evaluation.py"] + base_args +
+                ["python", "external/spider_eval/evaluation.py"] + base_args +
                 ["--pred", str(r.predictions_file), "--etype", etype],
                 check=False,
             )
@@ -337,7 +341,7 @@ def _save_csv(results: list[AblationResult], path: Path) -> None:
 
 def main(sample_ratio: float, k_values: list[int], mode: str = "graphrag", run_eval: bool = False) -> None:
     cfg = PipelineConfig()
-    output_dir = Path(".")
+    output_dir = Path("outputs/predictions")
 
     # Warn if config still has default top_k values (sweep not yet run)
     if cfg.top_k_tables == 3 and cfg.top_k_columns == 5:
@@ -376,7 +380,7 @@ def main(sample_ratio: float, k_values: list[int], mode: str = "graphrag", run_e
             for db_id in tqdm(unique_db_ids, desc="Indexing columns")
         }
     else:  # baseline
-        from baseline import build_table_graph, build_table_index
+        from src.retrieval.baseline import build_table_graph, build_table_index
         logger.info("Building table-level graph (Baseline) …")
         graph = build_table_graph(schema_df)
         logger.info("Building table indices for %d databases …", len(unique_db_ids))
@@ -409,7 +413,7 @@ def main(sample_ratio: float, k_values: list[int], mode: str = "graphrag", run_e
         )
 
     _print_table(results, cfg)
-    _save_csv(results, Path("ablation_results.csv"))
+    _save_csv(results, Path("outputs/tables/ablation_results.csv"))
 
     if run_eval:
         logger.info("Auto-running Spider evaluation for all prediction files …")
