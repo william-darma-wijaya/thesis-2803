@@ -37,11 +37,13 @@ import torch
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-from config import PipelineConfig
-from sweep import run_sweep_and_get_best
-from few_shot import FewShotIndex, build_few_shot_index, format_few_shot_block, retrieve_few_shot_examples
-from generation import build_prompt, generate_sql, load_model_and_tokenizer
-from retrieval import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.core.config import PipelineConfig
+from src.experiments.sweep import run_sweep_and_get_best
+from src.generation.few_shot import FewShotIndex, build_few_shot_index, format_few_shot_block, retrieve_few_shot_examples
+from src.generation.generation import build_prompt, generate_sql, load_model_and_tokenizer
+from src.retrieval.retrieval import (
     SchemaIndex,
     build_schema_context,
     build_schema_index,
@@ -49,7 +51,7 @@ from retrieval import (
     semantic_schema_linking,
     trace_schema_paths,
 )
-from schema import build_schema_graph, load_spider_schema
+from src.core.schema import build_schema_graph, load_spider_schema
 
 logging.basicConfig(
     level=logging.INFO,
@@ -178,11 +180,12 @@ def run_single(
 
 def run_official_evaluation(cfg: PipelineConfig) -> None:
     """Run the Spider official evaluation script for EM and EX metrics."""
-    evaluator = Path("evaluation.py")
+    evaluator = Path("external/spider_eval/evaluation.py")
     if not evaluator.exists():
         logger.warning(
-            "evaluation.py not found — skipping official Spider evaluation.\n"
+            "external/spider_eval/evaluation.py not found — skipping official Spider evaluation.\n"
             "Download it with:\n"
+            "  mkdir -p external/spider_eval && cd external/spider_eval\n"
             "  wget https://raw.githubusercontent.com/taoyds/spider/master/evaluation.py\n"
             "  wget https://raw.githubusercontent.com/taoyds/spider/master/process_sql.py"
         )
@@ -197,12 +200,12 @@ def run_official_evaluation(cfg: PipelineConfig) -> None:
     print("\n" + "=" * 60)
     print("🎯 OFFICIAL SPIDER EVALUATION (Exact Match)")
     print("=" * 60)
-    subprocess.run(["python", "evaluation.py"] + common_args + ["--etype", "match"], check=False)
+    subprocess.run(["python", "external/spider_eval/evaluation.py"] + common_args + ["--etype", "match"], check=False)
 
     print("\n" + "=" * 60)
     print("🎯 OFFICIAL SPIDER EVALUATION (Execution Accuracy)")
     print("=" * 60)
-    subprocess.run(["python", "evaluation.py"] + common_args + ["--etype", "exec"], check=False)
+    subprocess.run(["python", "external/spider_eval/evaluation.py"] + common_args + ["--etype", "exec"], check=False)
 
 
 def print_schema_linking_summary(results: list[PipelineResult]) -> None:
@@ -236,7 +239,7 @@ def build_gold_schema_context(
     actually references. Used purely for display — lets you compare what the
     model received vs what the gold answer required.
     """
-    from retrieval import _parse_gold_elements, build_schema_context
+    from src.retrieval.retrieval import _parse_gold_elements, build_schema_context
 
     gold_elements = _parse_gold_elements(gold_sql, graph, db_id)
 
@@ -395,7 +398,7 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
         comparison_report.txt    — side-by-side summary
     """
     import numpy as np
-    from baseline import (
+    from src.retrieval.baseline import (
         BaselineResult,
         build_table_graph,
         build_table_index,
@@ -454,7 +457,7 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
     # Few-shot index (GraphRAG only)
     few_shot_idx = None
     if cfg.few_shot_k > 0:
-        from few_shot import build_few_shot_index
+        from src.generation.few_shot import build_few_shot_index
         logger.info("Building few-shot index …")
         few_shot_idx = build_few_shot_index(cfg.train_json, embed_model)
 
@@ -462,8 +465,8 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
     graphrag_results: list[PipelineResult] = []
     baseline_results: list[BaselineResult] = []
 
-    g_pred_path = Path("predictions.txt")
-    b_pred_path = Path("baseline_predictions.txt")
+    g_pred_path = Path("outputs/predictions/predictions.txt")
+    b_pred_path = Path("outputs/predictions/baseline_predictions.txt")
 
     W = 72
     with open(g_pred_path, "w", encoding="utf-8") as gf, \
@@ -526,8 +529,8 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
                 print("=" * W)
 
     # ── Save baseline artefacts ────────────────────────────────────────────
-    bl_save_log(baseline_results, Path("baseline_log.txt"))
-    bl_save_csv(baseline_results, Path("baseline_results.csv"))
+    bl_save_log(baseline_results, Path("outputs/logs/baseline_log.txt"))
+    bl_save_csv(baseline_results, Path("outputs/tables/baseline_results.csv"))
 
     # ── Schema linking summaries ───────────────────────────────────────────
     print_schema_linking_summary(graphrag_results)
@@ -557,8 +560,8 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
     ]
     report = "\n".join(report_lines)
     print(report)
-    Path("comparison_report.txt").write_text(report, encoding="utf-8")
-    logger.info("Comparison report → comparison_report.txt")
+    Path("outputs/tables/comparison_report.txt").write_text(report, encoding="utf-8")
+    logger.info("Comparison report → outputs/tables/comparison_report.txt")
 
     # ── Official Spider eval for both ──────────────────────────────────────
     print("\n" + "=" * 60)
@@ -625,7 +628,7 @@ if __name__ == "__main__":
 
     if args.baseline:
         # Import baseline imports here to keep them lazy
-        from baseline import (
+        from src.retrieval.baseline import (
             BaselineResult,
             build_table_graph,
             build_table_index,
