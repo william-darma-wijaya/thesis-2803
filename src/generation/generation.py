@@ -7,7 +7,7 @@ import logging
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import torch
 
-from config import PipelineConfig
+from src.core.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
 
