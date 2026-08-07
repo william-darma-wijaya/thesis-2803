@@ -7,13 +7,22 @@ A modular pipeline for the Spider Text-to-SQL benchmark, combining **Graph-based
 ## Project Structure
 
 ```
-text2sql_pipeline/
-├── config.py       — All hyperparameters and paths in one place
-├── schema.py       — Spider schema loading + graph construction (NetworkX)
-├── retrieval.py    — GraphRAG: semantic linking, path tracing, context builder, evaluation
-├── generation.py   — Prompt template, SQL cleaning, model loading & inference
-├── pipeline.py     — Orchestration, CLI entry point, official Spider evaluation
-└── README.md
+src/
+├── core/
+│   ├── config.py       — All hyperparameters and paths in one place
+│   └── schema.py       — Spider schema loading + graph construction (NetworkX)
+├── retrieval/
+│   ├── retrieval.py    — GraphRAG: semantic linking, path tracing, context builder, evaluation
+│   └── baseline.py     — Baseline: table-level retrieval
+├── generation/
+│   ├── generation.py   — Prompt template, SQL cleaning, model loading & inference
+│   └── few_shot.py     — Few-shot example retrieval
+└── experiments/
+    ├── pipeline.py      — Orchestration, CLI entry point, official Spider evaluation
+    ├── sweep.py         — top_k_tables × top_k_columns sweep
+    └── ablation.py      — few-shot k ablation
+external/spider_eval/    — Official SPIDER evaluation.py + process_sql.py
+README.md
 ```
 
 ---
@@ -23,7 +32,8 @@ text2sql_pipeline/
 ```bash
 pip install -U bitsandbytes>=0.46.1 sentence-transformers transformers networkx pandas torch tqdm
 
-# Download Spider evaluation scripts
+# Download Spider evaluation scripts into external/spider_eval/
+mkdir -p external/spider_eval && cd external/spider_eval
 wget https://raw.githubusercontent.com/taoyds/spider/master/evaluation.py
 wget https://raw.githubusercontent.com/taoyds/spider/master/process_sql.py
 ```
@@ -34,12 +44,12 @@ wget https://raw.githubusercontent.com/taoyds/spider/master/process_sql.py
 
 ### Normal run (GraphRAG)
 ```bash
-python pipeline.py
+python src/experiments/pipeline.py
 ```
 
 ### Ablation: full schema bypass (no retrieval)
 ```bash
-python pipeline.py --full-schema
+python src/experiments/pipeline.py --full-schema
 ```
 
 ---
