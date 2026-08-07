@@ -11,7 +11,7 @@ from pathlib import Path
 class PipelineConfig:
     # --- Paths ---
     data_path: Path = Path("/kaggle/input/datasets/alrette/spiderdataset/spider_data")
-    predictions_file: Path = Path("predictions.txt")
+    predictions_file: Path = Path("outputs/predictions/predictions.txt")
 
     @property
     def tables_json(self) -> Path:

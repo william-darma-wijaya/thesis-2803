@@ -21,18 +21,34 @@ Token efficiency GraphRAG berasal dari selektivitas retrieval — bukan dari sel
 ## Struktur File
 
 ```
-text2sql_pipeline/
-├── config.py       — semua hyperparameter dan path (sumber kebenaran tunggal)
-├── schema.py       — parsing tables.json Spider → DataFrame → NetworkX graph (column-level)
-├── retrieval.py    — GraphRAG: two-stage semantic linking, graph traversal, path pruning, context builder
-├── baseline.py     — Baseline: table-level graph, table-level semantic linking, context builder
-├── few_shot.py     — few-shot index: pre-compute training set embeddings, dynamic retrieval
-├── generation.py   — prompt builder, SQL cleaner, model loading (4-bit quantized), greedy decode
-├── pipeline.py     — orchestration utama, CLI entry point, Spider evaluation
-├── sweep.py        — hyperparameter sweep: top_k_tables × top_k_columns (tanpa LLM)
-├── ablation.py     — ablation study: few-shot k={0,1,3,5} × {baseline, graphrag}
-└── CLAUDE.md       — file ini
+thesis-2803/
+├── src/
+│   ├── core/
+│   │   ├── config.py       — semua hyperparameter dan path (sumber kebenaran tunggal)
+│   │   └── schema.py       — parsing tables.json Spider → DataFrame → NetworkX graph (column-level)
+│   ├── retrieval/
+│   │   ├── retrieval.py    — GraphRAG: two-stage semantic linking, graph traversal, path pruning, context builder
+│   │   └── baseline.py     — Baseline: table-level graph, table-level semantic linking, context builder
+│   ├── generation/
+│   │   ├── generation.py   — prompt builder, SQL cleaner, model loading (4-bit quantized), greedy decode
+│   │   └── few_shot.py     — few-shot index: pre-compute training set embeddings, dynamic retrieval
+│   └── experiments/
+│       ├── pipeline.py     — orchestration utama, CLI entry point, Spider evaluation
+│       ├── sweep.py        — hyperparameter sweep: top_k_tables × top_k_columns (tanpa LLM)
+│       └── ablation.py     — ablation study: few-shot k={0,1,3,5} × {baseline, graphrag}
+├── external/
+│   └── spider_eval/        — official SPIDER evaluation.py + process_sql.py (di-wget manual)
+├── notebooks/               — EDA notebooks + notebooks/compiled/ (Kaggle-ready compiled notebook)
+├── outputs/
+│   ├── plots/               — EDA plot PNGs
+│   ├── predictions/         — predictions.txt, baseline_predictions.txt, ablation_*_predictions_k*.txt
+│   ├── logs/                — baseline_log.txt
+│   └── tables/              — sweep_results.csv, ablation_results.csv, baseline_results.csv, comparison_report.txt
+├── evaluation_pipeline/     — proyek terpisah: metrics + dimensi analisis skripsi (lihat evaluation_pipeline/CLAUDE.md-nya sendiri kalau ada)
+└── CLAUDE.md                — file ini (tetap di root)
 ```
+
+Semua modul di `src/` dipanggil sebagai `src.<paket>.<modul>` (mis. `from src.core.config import PipelineConfig`). Entry point CLI (`pipeline.py`, `sweep.py`, `ablation.py`, `baseline.py`) masih bisa dijalankan langsung dengan `python src/experiments/pipeline.py` dkk — setiap entry point punya bootstrap `sys.path.insert(...)` di baris import supaya import `src.*`-nya tetap resolve meski dijalankan sebagai script, bukan module.
 
 ---
 
@@ -148,18 +164,18 @@ Cross design 2×4 — jalankan terpisah 2x untuk menghindari OOM:
 
 **Run 1 — Baseline RAG:**
 ```bash
-python ablation.py --mode baseline --k-values 0 1 3 5 --sample 1.0
+python src/experiments/ablation.py --mode baseline --k-values 0 1 3 5 --sample 1.0
 ```
 
 **Run 2 — GraphRAG:**
 ```bash
-python ablation.py --mode graphrag --k-values 0 1 3 5 --sample 1.0
+python src/experiments/ablation.py --mode graphrag --k-values 0 1 3 5 --sample 1.0
 ```
 
 Output per run:
-- `ablation_{mode}_predictions_k{k}.txt` — SQL predictions → masuk ke Spider `evaluation.py` untuk EM/EX
-- `ablation_{mode}_prompts_k{k}.jsonl` — per sample: i, db_id, question, tokens_in, tokens_out, token_consumption, prompt, pred_sql
-- `ablation_results.csv` — avg_recall, avg_precision, avg_prompt_tokens (T_in), avg_output_tokens (T_out), avg_token_consumption (T) per mode×k → dasar perhitungan TEP
+- `outputs/predictions/ablation_{mode}_predictions_k{k}.txt` — SQL predictions → masuk ke Spider `external/spider_eval/evaluation.py` untuk EM/EX
+- `outputs/predictions/ablation_{mode}_prompts_k{k}.jsonl` — per sample: i, db_id, question, tokens_in, tokens_out, token_consumption, prompt, pred_sql
+- `outputs/tables/ablation_results.csv` — avg_recall, avg_precision, avg_prompt_tokens (T_in), avg_output_tokens (T_out), avg_token_consumption (T) per mode×k → dasar perhitungan TEP
 
 | | k=0 | k=1 | k=3 | k=5 |
 |---|---|---|---|---|
@@ -174,15 +190,16 @@ Tujuan ablation: cari **elbow point** — nilai k di mana penambahan few-shot ex
 
 | Metrik | Tool | Keterangan |
 |---|---|---|
-| Exact Set Match (ESM) | Spider `evaluation.py --etype match` | |
-| Execution Accuracy (EX) | Spider `evaluation.py --etype exec` | |
-| Component Match (CM) | Spider `evaluation.py` | |
+| Exact Set Match (ESM) | Spider `external/spider_eval/evaluation.py --etype match` | |
+| Execution Accuracy (EX) | Spider `external/spider_eval/evaluation.py --etype exec` | |
+| Component Match (CM) | Spider `external/spider_eval/evaluation.py` | |
 | Token Consumption | `avg_token_consumption` di `ablation_results.csv` | T = T_in + α×T_out. T_in = prompt tokens, T_out = generated SQL tokens, α = `token_output_weight` di config.py (default 1.0 untuk local model). Diukur inline per sample setelah generate_sql. |
 | TEP (Token Elasticity of Performance) | Custom metric, hitung post-hoc | TEP_G = (ΔEX_G/EX_B) / (ΔT_G/T_B) — elastisitas performa GraphRAG relatif terhadap konsumsi token vs Baseline. ΔEX_G = EX_G − EX_B, ΔT_G = T_G − T_B. Hitung dari `ablation_results.csv` + EX dari Spider eval. |
 | QVT (Query Variance Testing) | Custom metric | Stabilitas output terhadap variasi pertanyaan |
 
-Spider evaluation scripts harus didownload manual:
+Spider evaluation scripts harus didownload manual ke `external/spider_eval/`:
 ```bash
+mkdir -p external/spider_eval && cd external/spider_eval
 wget https://raw.githubusercontent.com/taoyds/spider/master/evaluation.py
 wget https://raw.githubusercontent.com/taoyds/spider/master/process_sql.py
 ```
@@ -232,23 +249,23 @@ data_path = Path("/kaggle/input/datasets/alrette/spiderdataset/spider_data")
 
 ```bash
 # GraphRAG — full dev set
-python pipeline.py --skip-sweep
+python src/experiments/pipeline.py --skip-sweep
 
 # GraphRAG — dengan sweep otomatis dulu
-python pipeline.py
+python src/experiments/pipeline.py
 
 # Baseline — table-level retrieval
-python baseline.py --sample 1.0
+python src/retrieval/baseline.py --sample 1.0
 
 # Full schema bypass (eksperimen, belum jadi mode resmi)
-python pipeline.py --full-schema
+python src/experiments/pipeline.py --full-schema
 
 # Ablation few-shot
-python ablation.py --k-values 0 1 3 5
+python src/experiments/ablation.py --k-values 0 1 3 5
 
 # Hyperparameter sweep saja (tanpa LLM, cepat)
-python sweep.py --sample 0.2
+python src/experiments/sweep.py --sample 0.2
 
 # Perbandingan GraphRAG vs Baseline
-python pipeline.py --baseline
+python src/experiments/pipeline.py --baseline
 ```

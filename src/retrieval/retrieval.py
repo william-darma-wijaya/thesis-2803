@@ -22,7 +22,7 @@ import networkx as nx
 import torch
 from sentence_transformers import SentenceTransformer, util
 
-from config import PipelineConfig
+from src.core.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
 

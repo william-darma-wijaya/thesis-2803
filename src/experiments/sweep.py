@@ -6,12 +6,12 @@ all combinations of top_k_tables and top_k_columns. Fast because no
 GPU inference is involved — just embedding lookups.
 
 Usage:
-    python sweep.py                      # default: 20% dev set
-    python sweep.py --sample 0.5        # 50% dev set
-    python sweep.py --sample 1.0        # full dev set
+    python src/experiments/sweep.py                      # default: 20% dev set
+    python src/experiments/sweep.py --sample 0.5        # 50% dev set
+    python src/experiments/sweep.py --sample 1.0        # full dev set
 
 Output:
-    sweep_results.csv   — raw per-combination metrics
+    outputs/tables/sweep_results.csv   — raw per-combination metrics
     sweep_summary.txt   — human-readable ranked table
 """
 
@@ -19,6 +19,7 @@ import argparse
 import csv
 import json
 import logging
+import sys
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
@@ -28,15 +29,17 @@ import torch
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-from config import PipelineConfig
-from retrieval import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.core.config import PipelineConfig
+from src.retrieval.retrieval import (
     SchemaIndex,
     build_schema_index,
     evaluate_schema_linking,
     semantic_schema_linking,
     trace_schema_paths,
 )
-from schema import build_schema_graph, load_spider_schema
+from src.core.schema import build_schema_graph, load_spider_schema
 
 logging.basicConfig(
     level=logging.INFO,
@@ -278,7 +281,7 @@ def main(sample_ratio: float) -> None:
         )
 
     _print_table(results)
-    _save_csv(results, Path("sweep_results.csv"))
+    _save_csv(results, Path("outputs/tables/sweep_results.csv"))
 
     # Recommend best config
     best = max(results, key=lambda r: r.f6)
@@ -316,7 +319,7 @@ def run_sweep_and_get_best(
     """
     import json
     from sentence_transformers import SentenceTransformer
-    from schema import build_schema_graph, load_spider_schema
+    from src.core.schema import build_schema_graph, load_spider_schema
 
     logger.info("Loading schema for sweep …")
     schema_df = load_spider_schema(cfg.tables_json)
@@ -355,7 +358,7 @@ def run_sweep_and_get_best(
         )
 
     _print_table(results)
-    _save_csv(results, Path("sweep_results.csv"))
+    _save_csv(results, Path("outputs/tables/sweep_results.csv"))
 
     best = max(results, key=lambda r: r.f6)
     logger.info(
