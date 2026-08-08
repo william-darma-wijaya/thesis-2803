@@ -244,7 +244,7 @@ def _run_k(
 # ---------------------------------------------------------------------------
 
 def _print_table(results: list[AblationResult], cfg: "PipelineConfig | None" = None) -> None:
-    alpha = cfg.token_output_weight if cfg else 1.0
+    alpha = cfg.token_output_weight if cfg else PipelineConfig().token_output_weight
     W = 100
     print("\n" + "=" * W)
     print("FEW-SHOT ABLATION RESULTS")

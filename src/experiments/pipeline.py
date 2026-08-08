@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.core.config import PipelineConfig
 from src.experiments.sweep import run_sweep_and_get_best
 from src.generation.few_shot import FewShotIndex, build_few_shot_index, format_few_shot_block, retrieve_few_shot_examples
-from src.generation.generation import build_prompt, generate_sql, load_model_and_tokenizer
+from src.generation.generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
 from src.retrieval.retrieval import (
     SchemaIndex,
     build_schema_context,
@@ -52,6 +52,9 @@ from src.retrieval.retrieval import (
     trace_schema_paths,
 )
 from src.core.schema import build_schema_graph, load_spider_schema
+from src.metrics import esm_ex_cm
+from src.metrics.sla import extract_ground_truth_schema
+from src.utils.schema_utils import load_db_schema
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,7 +107,7 @@ def run_single(
     cfg: PipelineConfig,
     schema_index: SchemaIndex = None,
     few_shot_index: FewShotIndex = None,
-) -> tuple[str, float, float, str, list]:
+) -> tuple[str, float, float, str, list, int, int]:
     """
     Run the full retrieval + generation pipeline for one question.
 
@@ -113,9 +116,16 @@ def run_single(
         few_shot_index  : pre-built FewShotIndex from build_few_shot_index()
                           Pass None to run zero-shot.
     Returns:
-        pred_sql  : generated SQL string
-        recall    : schema-linking recall vs gold SQL
-        precision : schema-linking precision vs gold SQL
+        pred_sql     : generated SQL string
+        recall       : schema-linking recall vs gold SQL
+        precision    : schema-linking precision vs gold SQL
+        schema_context : CREATE TABLE DDL fed to the LLM
+        column_nodes : retrieved column node ids (used for raw_logs predicted_schema)
+        n_in         : prompt token count (T_in) -- added for raw_logs / token
+                       consumption logging, same generate_sql_with_token_count()
+                       already used by ablation.py, just wired into this path too
+        n_out        : generated SQL token count (T_out), raw output before
+                       post-processing (see guide 1.5 poin (e))
     """
     # --- Build schema index if not supplied (fallback, not the hot path) ---
     if schema_index is None:
@@ -149,7 +159,7 @@ def run_single(
             column_nodes = list(set(c_nodes + [node for path in paths for node in path]))
 
     if not column_nodes:
-        return "SELECT 1", 0.0, 0.0, "", []
+        return "SELECT 1", 0.0, 0.0, "", [], 0, 0
 
     # --- Schema linking evaluation ---
     recall, precision = evaluate_schema_linking(gold_sql, column_nodes, graph, db_id)
@@ -169,9 +179,10 @@ def run_single(
         "numbers": re.findall(r"\d+", question),
     }
     prompt = build_prompt(question, schema_context, extracted_values, few_shot_block)
-    pred_sql = generate_sql(prompt, model, tokenizer, cfg)
+    pred_sql, n_out = generate_sql_with_token_count(prompt, model, tokenizer, cfg)
+    n_in = len(tokenizer.encode(prompt))  # T_in -- same pattern as ablation.py's _run_k()
 
-    return pred_sql, recall, precision, schema_context, column_nodes
+    return pred_sql, recall, precision, schema_context, column_nodes, n_in, n_out
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +267,50 @@ def build_gold_schema_context(
 
     return build_schema_context(graph, gold_nodes)
 
+
+# ---------------------------------------------------------------------------
+# predicted_schema helpers for data/raw_logs/*.json (see run_comparison())
+# ---------------------------------------------------------------------------
+
+def _column_nodes_to_predicted_schema(graph, column_nodes: list) -> list[str]:
+    """
+    Convert GraphRAG column node ids into a flat sorted ["table.column", ...]
+    list for raw_logs' predicted_schema field. Reads table/column from node
+    ATTRIBUTES (not by string-splitting the node id "{db}.{table}.{col}")
+    since that's how the rest of the codebase already looks these up (see
+    evaluate_schema_linking() in src/retrieval/retrieval.py).
+    """
+    out = set()
+    for node in column_nodes:
+        d = graph.nodes[node]
+        table = d.get("table")
+        column = d.get("column")
+        if table and column and column != "*":
+            out.add(f"{table.lower()}.{column.lower()}")
+    return sorted(out)
+
+
+def _table_nodes_to_predicted_schema(graph, table_nodes: list) -> list[str]:
+    """
+    Convert Baseline table node ids into a flat sorted ["table.column", ...]
+    list. Baseline sends ALL columns of the selected tables with no pruning
+    (see CLAUDE.md root, "Arsitektur Pipeline (Baseline)"), so this expands
+    each table node's "columns" attribute (see build_table_graph() in
+    src/retrieval/baseline.py) rather than just listing the table names.
+    """
+    out = set()
+    for node in table_nodes:
+        d = graph.nodes[node]
+        table = d.get("table")
+        if not table:
+            continue
+        for col_info in d.get("columns", []):
+            column = col_info.get("Column")
+            if column and column != "*":
+                out.add(f"{table.lower()}.{column.lower()}")
+    return sorted(out)
+
+
 # ---------------------------------------------------------------------------
 # Seed & model setup
 # ---------------------------------------------------------------------------
@@ -323,7 +378,7 @@ def main(cfg: PipelineConfig) -> None:
             gold_sql = item["query"]
 
             try:
-                pred_sql, recall, precision, retrieved_schema, column_nodes = run_single(
+                pred_sql, recall, precision, retrieved_schema, column_nodes, _n_in, _n_out = run_single(
                     question, gold_sql, db_id, graph, embed_model, llm, tokenizer, cfg,
                     schema_index=schema_cache[db_id],
                     few_shot_index=few_shot_idx,
@@ -461,6 +516,20 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
         logger.info("Building few-shot index …")
         few_shot_idx = build_few_shot_index(cfg.train_json, embed_model)
 
+    # ── Raw-log evaluation setup (SLA/ESM/EX/CM per query -> data/raw_logs/) ──
+    # This is what feeds src/dimensions/ later (see context/EVALUATION_ANALYSIS_GUIDE.md
+    # Bagian 2 for the exact raw_log schema). db_schema and kmaps are each built
+    # ONCE for the whole run (not per query, not per db_id) -- see the performance
+    # notes on load_db_schema()/build_kmaps() docstrings for why that matters.
+    # spider_schema_for_db (the parser Schema object, needs a live sqlite handle)
+    # is cached lazily per db_id as we encounter it in the loop below.
+    logger.info("Loading db_schema + building foreign-key maps for raw_logs evaluation …")
+    db_schema = load_db_schema(str(cfg.tables_json))
+    kmaps = esm_ex_cm.build_kmaps(str(cfg.tables_json))
+    spider_schema_cache: dict[str, "esm_ex_cm.Schema"] = {}
+    graphrag_raw_logs: list[dict] = []
+    baseline_raw_logs: list[dict] = []
+
     # ── Main loop — run both pipelines on the same sample ─────────────────
     graphrag_results: list[PipelineResult] = []
     baseline_results: list[BaselineResult] = []
@@ -479,7 +548,7 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
 
             # GraphRAG
             try:
-                g_pred, g_recall, g_prec, g_schema, _ = run_single(
+                g_pred, g_recall, g_prec, g_schema, g_column_nodes, g_n_in, g_n_out = run_single(
                     question, gold_sql, db_id,
                     col_graph, embed_model, llm, tokenizer, cfg,
                     schema_index=col_cache[db_id],
@@ -488,10 +557,11 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
             except Exception:
                 logger.exception("GraphRAG error on sample %d", i)
                 g_pred, g_recall, g_prec, g_schema = "SELECT 1", 0.0, 0.0, ""
+                g_column_nodes, g_n_in, g_n_out = [], 0, 0
 
             # Baseline
             try:
-                b_pred, b_recall, b_prec = run_single_baseline(
+                b_pred, b_recall, b_prec, b_table_nodes, b_n_in, b_n_out = run_single_baseline(
                     question, gold_sql, db_id,
                     tbl_graph, embed_model, llm, tokenizer, cfg,
                     table_index=tbl_cache[db_id],
@@ -499,6 +569,7 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
             except Exception:
                 logger.exception("Baseline error on sample %d", i)
                 b_pred, b_recall, b_prec = "SELECT 1", 0.0, 0.0
+                b_table_nodes, b_n_in, b_n_out = [], 0, 0
 
             graphrag_results.append(PipelineResult(
                 index=i + 1, db_id=db_id, question=question,
@@ -510,6 +581,48 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
                 gold_sql=gold_sql, pred_sql=b_pred,
                 recall=b_recall, precision=b_prec,
             ))
+
+            # ── Raw-log entry (SLA + ESM/EX/CM) for both conditions ──────────
+            # Wrapped in its own try/except SEPARATE from the G/B generation
+            # try/excepts above -- a failure here (parser/evaluator edge case)
+            # must not throw away the predictions we already generated, it
+            # should just skip logging that one query's evaluation metrics.
+            try:
+                db_path = str(cfg.db_dir / db_id / f"{db_id}.sqlite")
+                if db_id not in spider_schema_cache:
+                    spider_schema_cache[db_id] = esm_ex_cm.build_schema_for_db(db_path)
+                spider_schema = spider_schema_cache[db_id]
+                kmap = kmaps[db_id]
+
+                gold_schema = sorted(extract_ground_truth_schema(gold_sql, db_id, db_schema))
+
+                g_eval = esm_ex_cm.evaluate_single_query(g_pred, gold_sql, db_id, db_path, spider_schema, kmap)
+                b_eval = esm_ex_cm.evaluate_single_query(b_pred, gold_sql, db_id, db_path, spider_schema, kmap)
+                # difficulty is a property of gold_sql alone, so g_eval and
+                # b_eval always agree on it -- either works, just pick one.
+                difficulty = g_eval.difficulty
+
+                query_id = f"dev_{i + 1:04d}"
+                graphrag_raw_logs.append({
+                    "query_id": query_id, "db_id": db_id, "difficulty": difficulty,
+                    "gold_sql": gold_sql, "predicted_sql": g_pred,
+                    "gold_schema": gold_schema,
+                    "predicted_schema": _column_nodes_to_predicted_schema(col_graph, g_column_nodes),
+                    "token_input": g_n_in, "token_output": g_n_out,
+                    "esm_result": g_eval.esm, "ex_result": g_eval.ex,
+                    "cm_per_clause": g_eval.cm_per_clause,
+                })
+                baseline_raw_logs.append({
+                    "query_id": query_id, "db_id": db_id, "difficulty": difficulty,
+                    "gold_sql": gold_sql, "predicted_sql": b_pred,
+                    "gold_schema": gold_schema,
+                    "predicted_schema": _table_nodes_to_predicted_schema(tbl_graph, b_table_nodes),
+                    "token_input": b_n_in, "token_output": b_n_out,
+                    "esm_result": b_eval.esm, "ex_result": b_eval.ex,
+                    "cm_per_clause": b_eval.cm_per_clause,
+                })
+            except Exception:
+                logger.exception("Raw-log evaluation error on sample %d (db=%s)", i, db_id)
 
             gf.write(g_pred.strip() + "\n")
             bf.write(b_pred.strip() + "\n")
@@ -531,6 +644,20 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
     # ── Save baseline artefacts ────────────────────────────────────────────
     bl_save_log(baseline_results, Path("outputs/logs/baseline_log.txt"))
     bl_save_csv(baseline_results, Path("outputs/tables/baseline_results.csv"))
+
+    # ── Save raw_logs (input for src/dimensions/, see EVALUATION_ANALYSIS_GUIDE.md
+    # Bagian 2 for the schema) ──────────────────────────────────────────────
+    raw_logs_dir = Path("data/raw_logs")
+    raw_logs_dir.mkdir(parents=True, exist_ok=True)
+    with open(raw_logs_dir / "graphrag_log.json", "w", encoding="utf-8") as f:
+        json.dump(graphrag_raw_logs, f, ensure_ascii=False, indent=2)
+    with open(raw_logs_dir / "baseline_log.json", "w", encoding="utf-8") as f:
+        json.dump(baseline_raw_logs, f, ensure_ascii=False, indent=2)
+    logger.info(
+        "Raw logs saved → %s (%d entries), %s (%d entries)",
+        raw_logs_dir / "graphrag_log.json", len(graphrag_raw_logs),
+        raw_logs_dir / "baseline_log.json", len(baseline_raw_logs),
+    )
 
     # ── Schema linking summaries ───────────────────────────────────────────
     print_schema_linking_summary(graphrag_results)

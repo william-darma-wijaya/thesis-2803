@@ -48,7 +48,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.core.config import PipelineConfig
-from src.generation.generation import build_prompt, generate_sql, load_model_and_tokenizer
+from src.generation.generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
 from src.core.schema import build_schema_graph, load_spider_schema
 
 logging.basicConfig(
@@ -387,13 +387,18 @@ def run_single_baseline(
     tokenizer,
     cfg: PipelineConfig,
     table_index: TableSchemaIndex,
-) -> tuple[str, float, float]:
+) -> tuple[str, float, float, list, int, int]:
     """
     Run the full BASELINE pipeline for one question:
         embed → link tables → trace paths → build context → generate SQL.
 
     Returns:
-        (pred_sql, recall, precision)
+        (pred_sql, recall, precision, table_nodes, n_in, n_out)
+        table_nodes : selected table node ids (used for raw_logs predicted_schema —
+                      baseline sends ALL columns of these tables, no pruning)
+        n_in, n_out : prompt/output token counts (T_in/T_out), same
+                      generate_sql_with_token_count() pattern as pipeline.py's
+                      run_single() and ablation.py's _run_k()
     """
     if cfg.use_full_schema_bypass:
         # Bypass: feed all tables in the database
@@ -416,7 +421,7 @@ def run_single_baseline(
             table_nodes = trace_table_paths(graph, detected)
 
     if not table_nodes:
-        return "SELECT 1", 0.0, 0.0
+        return "SELECT 1", 0.0, 0.0, [], 0, 0
 
     recall, precision = evaluate_table_linking(gold_sql, table_nodes, graph, db_id)
     schema_context = build_table_schema_context(graph, table_nodes)
@@ -426,9 +431,10 @@ def run_single_baseline(
         "numbers": re.findall(r"\d+", question),
     }
     prompt = build_prompt(question, schema_context, extracted_values, few_shot_block="")
-    pred_sql = generate_sql(prompt, model, tokenizer, cfg)
+    pred_sql, n_out = generate_sql_with_token_count(prompt, model, tokenizer, cfg)
+    n_in = len(tokenizer.encode(prompt))
 
-    return pred_sql, recall, precision
+    return pred_sql, recall, precision, table_nodes, n_in, n_out
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +593,7 @@ def run_baseline(
             gold_sql = item["query"]
 
             try:
-                pred_sql, recall, precision = run_single_baseline(
+                pred_sql, recall, precision, _table_nodes, _n_in, _n_out = run_single_baseline(
                     question, gold_sql, db_id,
                     table_graph, embed_model, llm, tokenizer, cfg,
                     table_index=table_cache[db_id],
