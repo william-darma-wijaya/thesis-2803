@@ -5,7 +5,8 @@ Referensi: EVALUATION_ANALYSIS_GUIDE.md Bagian 1.6.
 
 PRASYARAT DATA: dataset variasi NL question per gold SQL, taruh di
 data/qvt_variations/. Ini TIDAK datang otomatis dari SPIDER dev set biasa,
-harus disiapkan/digenerate terpisah.
+harus disiapkan/digenerate terpisah (belum ada generator-nya di src/experiments/
+per saat modul ini ditulis — lihat catatan run_all_dimensions.py).
 
 Format data yang diharapkan (per gold SQL):
 {
@@ -15,11 +16,19 @@ Format data yang diharapkan (per gold SQL):
      {"nl_question": "...", "predicted_sql": "...", "is_correct": 0 | 1}
   ]
 }
-"is_correct" diukur pakai EX ATAU ESM - tentukan salah satu dan pakai KONSISTEN
-untuk semua perhitungan QVT (lihat guide 1.6 poin (e)).
+
+KEPUTUSAN (2026-08-15, lihat context/IMPLEMENTATION_DECISIONS.md poin 10):
+"is_correct" per variasi diukur pakai **EX** (Execution Accuracy), bukan ESM.
+Ini keputusan whoever MENGISI data/qvt_variations/*.json (mis. experiment
+script yang menjalankan pipeline atas tiap variasi lalu memanggil
+src.metrics.esm_ex_cm.evaluate_single_query() dan mengambil `.ex`) — qvt.py
+sendiri hanya MENGONSUMSI field "is_correct" yang sudah jadi, tidak menghitung
+EX/ESM sendiri. Dicatat di sini supaya kontrak data ini tidak diinterpretasi
+ulang jadi ESM oleh sesi berikutnya.
 """
 
-from typing import List, Dict
+import statistics
+from typing import List
 from dataclasses import dataclass
 
 
@@ -34,27 +43,41 @@ def compute_qvt_per_query(query_id: str, variations: List[dict]) -> QVTQueryResu
     """
     Hitung skor level-1 untuk satu gold SQL.
 
-    Referensi guide 1.6 poin (c) langkah 2-3.
-
-    TODO:
-    - correct_count = jumlah variations dengan is_correct == 1
-    - Kalau correct_count == 0 -> return QVTQueryResult(query_id, included=False, score=0.0)
-      (FILTER WAJIB - lihat guide 1.6 poin (e), kesalahan paling umum kalau dilewatkan)
-    - Kalau tidak -> score = correct_count / len(variations)
-    - return QVTQueryResult(query_id, included=True, score=score)
+    Referensi guide 1.6 poin (c) langkah 2-3. `variations` tidak boleh kosong
+    (m_i = 0 berarti tidak ada variasi disiapkan untuk query ini sama sekali —
+    itu bug di data prep, bukan kasus "semua gagal" yang filter wajib maksud).
     """
-    raise NotImplementedError
+    if not variations:
+        raise ValueError(
+            f"query_id={query_id!r}: variations kosong — tidak ada variasi NL "
+            "question untuk query ini (beda dengan 'semua variasi gagal', "
+            "yang seharusnya tetap punya entri dengan is_correct=0)"
+        )
+
+    correct_count = sum(1 for v in variations if v["is_correct"] == 1)
+
+    if correct_count == 0:
+        # FILTER WAJIB — guide 1.6 poin (e): query yang semua variasinya gagal
+        # dibuang dari perhitungan QVT sama sekali, bukan dihitung skor=0.
+        return QVTQueryResult(query_id=query_id, included=False, score=0.0)
+
+    score = correct_count / len(variations)
+    return QVTQueryResult(query_id=query_id, included=True, score=score)
 
 
 def aggregate_qvt(per_query_results: List[QVTQueryResult]) -> float:
     """
     QVT = mean(score) HANYA untuk query dengan included=True.
-    Jangan ikutkan query yang included=False dalam pembagian (guide 1.6 poin (c) langkah 4).
-
-    TODO:
-    - included_scores = [r.score for r in per_query_results if r.included]
-    - return mean(included_scores) jika included_scores tidak kosong, else raise/warning
-      (dataset kosong berarti semua query gagal di semua variasi - kondisi anomali,
-      laporkan ke peneliti, jangan diam-diam return 0)
+    Jangan ikutkan query yang included=False dalam pembagian (guide 1.6 poin (c)
+    langkah 4 — M di formula adalah jumlah query yang LOLOS filter, bukan total
+    semua query di dataset).
     """
-    raise NotImplementedError
+    included_scores = [r.score for r in per_query_results if r.included]
+    if not included_scores:
+        raise ValueError(
+            "Semua query dibuang oleh filter wajib (tidak ada satupun query "
+            "dengan minimal 1 variasi benar) — QVT tidak terdefinisi untuk "
+            "populasi ini. Ini kondisi anomali, bukan skor 0 — laporkan ke "
+            "peneliti sebelum melanjutkan, jangan diam-diam return 0.0."
+        )
+    return statistics.mean(included_scores)

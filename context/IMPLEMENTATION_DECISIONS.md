@@ -106,6 +106,39 @@ Format tiap entri: **Konflik/ambiguitas** → **Keputusan** → **Alasan** → *
 
 ---
 
+## 9. Token Consumption: ints-only, tanpa tokenizer sendiri; TEP epsilon = ±0.05
+
+**Konflik/ambiguitas (a):** stub asli `src/metrics/token_consumption.py` dirancang untuk memuat tokenizer Qwen2.5-Coder-7B-Instruct sendiri (`get_tokenizer()`/`count_tokens()`) dan menghitung `T_in`/`T_out` dari re-encode raw prompt/output **text**. Tapi `generate_sql_with_token_count()` (`src/generation/generation.py` baris 180) sudah menghitung `T_in`/`T_out` sebagai **int** di titik generasi, pakai tokenizer yang SUDAH dimuat (bukan instance baru) — hasilnya sudah tersimpan sebagai int di `data/raw_logs/*.json` (`token_input`/`token_output`) dan `outputs/tables/ablation_results.csv`. Tidak ada raw prompt/output text yang disimpan di raw_logs untuk di-re-tokenize belakangan.
+
+**Keputusan (2026-08-15):** `compute_token_consumption()` di ubah jadi murni aritmetika atas int yang sudah ada (`T = T_in + mu*T_out`), `get_tokenizer()`/`count_tokens()` dihapus total dari `token_consumption.py`.
+
+**Alasan:** memuat tokenizer kedua di `token_consumption.py` akan redundan (satu instance sudah dipakai live di `pipeline.py`/`ablation.py`) dan tidak pernah dipanggil siapa pun di alur nyata — `dim1_efficiency.py` selalu bekerja dari raw_logs yang sudah berisi int, bukan teks mentah.
+
+**Konflik/ambiguitas (b):** guide Bagian 3 Dimensi 1 mendefinisikan tabel interpretasi TEP dengan tiga band (`TEP < 0`, `TEP ≈ 0`, `TEP > 0`) tapi tidak memberi angka eksplisit untuk lebar band "≈ 0" — beda dengan threshold lain di guide (±2% QVT, 80%/65% F1/EX Dimensi 5) yang eksplisit "WAJIB, jangan diubah".
+
+**Keputusan (2026-08-15):** epsilon = ±0.05 sebagai default `compute_tep(..., epsilon=0.05)` di `src/metrics/tep.py`.
+
+**Alasan:** skala kecil, konsisten dengan urutan besaran threshold ±2% QVT di guide Dimensi 4. Dioper sebagai parameter (bukan konstanta buta di dalam fungsi) supaya bisa direvisi peneliti tanpa mengubah signature kalau nanti ada angka lain yang lebih tepat.
+
+**Lokasi implementasi:** `src/metrics/token_consumption.py` (`compute_token_consumption(token_input: int, token_output: int, mu)`, `aggregate_token_consumption()`), `src/metrics/tep.py` (`compute_tep()`, `DEFAULT_EPSILON = 0.05`).
+
+---
+
+## 10. QVT "is_correct": pakai EX, bukan ESM
+
+**Konflik/ambiguitas:** guide 1.6 poin (e) eksplisit minta "benar" per variasi NL question didefinisikan pakai EX ATAU ESM — "tentukan salah satu secara konsisten" — tapi tidak memutuskan yang mana.
+
+**Keputusan (2026-08-15):** EX.
+
+**Alasan:**
+1. QVT mengukur *stabilitas jawaban fungsional* terhadap parafrase (guide 1.6 poin (a): "apakah model tetap menghasilkan SQL yang benar" secara hasil, bukan secara struktur persis) — EX cocok dengan tujuan ini, ESM tidak (ESM sensitif ke struktur, bukan hasil).
+2. Open item A di file ini (parser resmi SPIDER tidak bisa parse `LEFT JOIN`/`RIGHT JOIN` — `KeyError: 'left'`) akan menghantam ESM/CM lebih parah khusus untuk QVT: parafrase pertanyaan (mis. "siswa yang tidak punya nilai" vs "siswa dengan nilai") kemungkinan besar justru MEMICU LLM memilih idiom SQL berbeda seperti `LEFT JOIN` — variasi yang secara fungsional benar akan otomatis gagal ESM/CM murni karena parser-nya crash, bukan karena SQL-nya salah. EX (`eval_exec_match()`) tidak butuh parsing sama sekali (langsung eksekusi SQLite), jadi tidak kena isu ini.
+3. Trade-off yang diterima: EX mewarisi isu order-sensitivity yang sudah didokumentasikan di poin 5 di atas — tapi itu bukan risiko baru, sudah accepted risk untuk EX di seluruh skripsi ini.
+
+**Lokasi implementasi:** `src/metrics/qvt.py` (docstring modul menegaskan kontrak data `"is_correct"` = hasil EX; `compute_qvt_per_query()`/`aggregate_qvt()` sendiri cuma mengonsumsi field itu, tidak menghitung EX/ESM sendiri). **Belum ada** kode yang benar-benar mengisi `data/qvt_variations/*.json` (generator/runner untuk itu belum ditulis) — sesi berikutnya yang membangun generator itu WAJIB memanggil `src.metrics.esm_ex_cm.evaluate_single_query()` dan mengambil field `.ex`, bukan `.esm`, supaya konsisten dengan keputusan ini.
+
+---
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER

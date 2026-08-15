@@ -1,6 +1,6 @@
 # Metrics — Explained Simply
 
-> Companion to `EVALUATION_ANALYSIS_GUIDE.md` — that file has the formulas, algorithms, and thresholds. This file explains *what the numbers actually mean*, one metric at a time, in plain terms. Currently covers: **SLA**. The rest (ESM, EX, CM, Token Consumption, TEP, QVT) will be added here later as we get to each one.
+> Companion to `EVALUATION_ANALYSIS_GUIDE.md` — that file has the formulas, algorithms, and thresholds. This file explains *what the numbers actually mean*, one metric at a time, in plain terms. Currently covers: **SLA, Token Consumption, TEP**. The rest (ESM, EX, CM, QVT) will be added here later as we get to each one.
 >
 > Throughout: 🔧 marks something that's the **actual official SPIDER benchmark source code** (from `external/spider_eval/`, downloaded from the official `taoyds/spider` GitHub repo) — not written for this thesis. ✍️ marks code **written specifically for this thesis** (usually wrapping or extending the 🔧 pieces). See `CLAUDE.md` → "Atribusi kode: SPIDER resmi vs custom" for the full rule.
 
@@ -79,3 +79,93 @@ Every question gets its own precision/recall/F1. The final score is the **averag
 ### Where it fits in the bigger picture
 
 SLA is diagnostic, not a final grade. It pairs with EX in **Dimension 5 (Bottleneck: Retrieval vs. Generation)**: high SLA F1 but low EX means retrieval found the right stuff and generation is where it broke. Low SLA F1 means retrieval itself is the bottleneck — the LLM never had a fair shot.
+
+---
+
+## Token Consumption (T)
+
+> Code: `src/metrics/token_consumption.py`. Formula: guide Section 1.5.
+>
+> ✍️ **100% custom to this thesis, no 🔧 official SPIDER piece involved** — SPIDER's benchmark doesn't measure inference cost at all, only SQL correctness. Unlike SLA (which at least reuses SPIDER's parser), this metric borrows nothing from `external/spider_eval/`.
+
+### What it checks
+
+This one isn't about being *right* — it's about being *expensive*. Every question sent to the LLM costs something to process: reading the prompt costs tokens, and writing the answer costs tokens too. Token Consumption adds those up into one number per query, so GraphRAG's "smaller, pruned schema" claim can actually be checked against a number instead of just eyeballed.
+
+### The two halves
+
+- **T_in** — everything fed *into* the model for that question: the schema (as `CREATE TABLE` DDL), the few-shot examples (if any), and the natural-language question itself. This is the "reading" cost.
+- **T_out** — everything the model *writes back*: the raw generated SQL, counted **before** any cleanup happens (before alias-stripping, `CAST` removal, etc. — see `generation.py`'s SQL cleaner). Counting the *cleaned* SQL instead would be cheating the number down — the model already did the work of producing the messy version, so that's the real cost paid.
+
+Both counts use the actual **Qwen2.5-Coder-7B-Instruct tokenizer** — the same one doing the real inference — not a generic stand-in like `tiktoken`. Different tokenizers slice text into different-sized pieces, so a "token" from the wrong tokenizer wouldn't correspond to a real unit of cost for this model.
+
+### The formula
+
+```
+T = T_in + μ · T_out          (μ = 3, fixed — from proposal subbab 3.8.2.5)
+```
+
+Output tokens count **3× heavier** than input tokens. Why the imbalance: generating text is a slow, one-token-at-a-time process (the model has to run a full forward pass for every single output token, in sequence). Reading the prompt, by contrast, happens largely in parallel in one pass (prefill). So a query that makes the model *write more* is punished harder in this formula than one that just hands it a longer schema to *read* — which matches how these costs actually behave in real inference.
+
+### Where the numbers actually come from (implementation note)
+
+`compute_token_consumption()` doesn't tokenize any text itself — it's pure arithmetic, `T_in + μ·T_out`, over integers that already exist. The real counting happens once, at the moment of generation: `generate_sql_with_token_count()` (in `src/generation/generation.py`) uses the LLM's already-loaded tokenizer to count `T_out` as the model generates, and the caller counts `T_in` the same way right next to it. Those integers get written straight into `data/raw_logs/*.json` (`token_input`/`token_output`) and `outputs/tables/ablation_results.csv`. So by the time this metric module sees a query, the tokenizing work is already done — it just adds the two numbers together with the right weight.
+
+### Reporting: mean *and* median
+
+Both are required, not just one. Token counts per query tend to be **skewed** — most queries are short, but a handful of gnarly multi-join questions can be much longer, and those drag the mean up. The median shows what a "typical" query costs; the mean shows the average including the expensive outliers. Reporting both (and broken down per difficulty level: Easy/Medium/Hard/Extra) gives a fuller picture than either alone.
+
+### Where it fits in the bigger picture
+
+Token Consumption is the raw ingredient for two things: **Dimension 1 (Efficiency)**, where GraphRAG's `T` is compared straight against Baseline's `T` to see if the pruning actually saves anything, and **TEP** (below), which asks a sharper question than "is it cheaper" — it asks "is it cheaper *without giving up accuracy*."
+
+---
+
+## TEP (Token Elasticity of Performance)
+
+> Code: `src/metrics/tep.py`. Formula: guide Section 1.5, sub-bagian "TEP". Interpretation table: guide Section 3, "Dimensi 1".
+>
+> ✍️ **100% custom to this thesis** — this is the novelty metric of the whole research, adapted from an economics concept (see below). No SPIDER involvement at all; it's computed entirely from numbers Token Consumption and EX already produced.
+
+### The idea, borrowed from economics
+
+Economists have a concept called *price elasticity of demand*: if a product's price goes up by 10% and people buy 5% less of it, the "elasticity" is `-5%/10% = -0.5`. It's a single number that answers "how sensitive is one thing to a change in another thing?" — not just "did it change," but "how efficiently did it change relative to the thing that moved it."
+
+TEP asks the same style of question about this research: **if GraphRAG changes token cost by some percentage, how much does accuracy (EX) change in response, proportionally?**
+
+```
+TEP_G = (ΔEX_G / EX_B) / (ΔT_G / T_B)
+
+ΔEX_G = EX_G − EX_B     (accuracy change, GraphRAG vs Baseline)
+ΔT_G  = T_G − T_B       (token cost change, GraphRAG vs Baseline)
+```
+
+Both halves are *percentage* changes (relative to the Baseline value), not raw differences — that's what makes this an elasticity instead of a plain subtraction. It's also why EX_B and EX_G **must** be in the same scale (both percent, or both 0–1) — mixing scales would silently wreck the ratio.
+
+### Reading the sign — the whole point of the metric
+
+The sign of TEP tells you whether accuracy and token cost moved **together** or **apart**:
+
+- **TEP < 0 — moved in opposite directions.** The hoped-for outcome: GraphRAG's token cost went down *while* accuracy went up (or, symmetrically, cost went up while accuracy went up even more — either way, you're not paying for your gain). *"Skenario ideal: GraphRAG meningkatkan EX dan menurunkan Token Consumption dibanding baseline."*
+- **TEP ≈ 0 — barely moved either way.** Within a small band (±0.05, agreed with the researcher on 2026-08-15 — the guide itself never pins an exact number here, unlike its other thresholds). Token savings happened without meaningfully hurting or helping accuracy. *"Efisiensi token tercapai tanpa trade-off penurunan EX yang signifikan."*
+- **TEP > 0 — moved together.** Usually the unwelcome case here: token cost went down *and* accuracy went down with it — the pruning cost you something. *"Ada trade-off: penurunan token disertai penurunan EX."*
+
+### Worked example (straight from the guide)
+
+`EX_B = 60%, EX_G = 68%, T_B = 2000, T_G = 1400`
+
+```
+ΔEX_G = 68 − 60 = 8
+ΔT_G  = 1400 − 2000 = −600
+TEP_G = (8/60) / (−600/2000) = 0.1333 / (−0.3) = −0.444
+```
+
+TEP < 0 → GraphRAG got *more* accurate *and* cheaper at the same time. This is the number the implementation was checked against directly (`compute_tep(60, 68, 2000, 1400)` reproduces `-0.444` exactly).
+
+### Why division-by-zero is treated as an error, not a workaround
+
+If `T_G` and `T_B` come out exactly equal (`ΔT_G = 0`), or `EX_B` / `T_B` is `0`, the formula divides by zero. The guide doesn't say what TEP should mean in that situation, so `compute_tep()` raises a clear error instead of quietly returning `inf`/`nan` — a query that hit that edge case is a signal something's off with the run, not a number to interpret.
+
+### Where it fits in the bigger picture
+
+TEP is the payoff metric of **Dimension 1 (Efficiency)** — it's computed *last*, only after Token Consumption and EX have both already been reported side by side for Baseline and GraphRAG (guide's required output order: token table → EX table → TEP). It's the number that turns "GraphRAG uses fewer tokens" and "GraphRAG has different accuracy" into one combined verdict on whether the trade was worth it.
