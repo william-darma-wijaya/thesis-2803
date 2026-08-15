@@ -1,0 +1,20 @@
+# Requirements untuk evaluation pipeline (src/metrics/, src/dimensions/) — dijalankan
+# secara lokal, bukan di Kaggle. Pipeline utama (src/core, src/retrieval, src/generation,
+# src/experiments) jalan di Kaggle Notebook dengan torch/sentence-transformers/
+# bitsandbytes/networkx/tqdm yang sudah pre-installed di sana — tidak dicantumkan
+# di sini karena bukan environment yang sama.
+
+# Tokenizer untuk Qwen2.5-Coder-7B-Instruct (WAJIB, jangan ganti tokenizer lain)
+transformers>=4.40.0
+
+# SQL parsing (opsional, kalau tidak pakai parser dari official SPIDER eval script)
+sqlglot>=23.0.0
+
+# Data handling
+pandas>=2.0.0
+numpy>=1.24.0
+
+# SQLite eksekusi sudah built-in Python (sqlite3), tidak perlu install
+
+# Untuk testing
+pytest>=7.0.0

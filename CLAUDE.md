@@ -21,18 +21,51 @@ Token efficiency GraphRAG berasal dari selektivitas retrieval — bukan dari sel
 ## Struktur File
 
 ```
-text2sql_pipeline/
-├── config.py       — semua hyperparameter dan path (sumber kebenaran tunggal)
-├── schema.py       — parsing tables.json Spider → DataFrame → NetworkX graph (column-level)
-├── retrieval.py    — GraphRAG: two-stage semantic linking, graph traversal, path pruning, context builder
-├── baseline.py     — Baseline: table-level graph, table-level semantic linking, context builder
-├── few_shot.py     — few-shot index: pre-compute training set embeddings, dynamic retrieval
-├── generation.py   — prompt builder, SQL cleaner, model loading (4-bit quantized), greedy decode
-├── pipeline.py     — orchestration utama, CLI entry point, Spider evaluation
-├── sweep.py        — hyperparameter sweep: top_k_tables × top_k_columns (tanpa LLM)
-├── ablation.py     — ablation study: few-shot k={0,1,3,5} × {baseline, graphrag}
-└── CLAUDE.md       — file ini
+thesis-2803/
+├── src/
+│   ├── core/
+│   │   ├── config.py       — semua hyperparameter dan path (sumber kebenaran tunggal)
+│   │   └── schema.py       — parsing tables.json Spider → DataFrame → NetworkX graph (column-level)
+│   ├── retrieval/
+│   │   ├── retrieval.py    — GraphRAG: two-stage semantic linking, graph traversal, path pruning, context builder
+│   │   └── baseline.py     — Baseline: table-level graph, table-level semantic linking, context builder
+│   ├── generation/
+│   │   ├── generation.py   — prompt builder, SQL cleaner, model loading (4-bit quantized), greedy decode
+│   │   └── few_shot.py     — few-shot index: pre-compute training set embeddings, dynamic retrieval
+│   ├── experiments/
+│   │   ├── pipeline.py     — orchestration utama, CLI entry point, Spider evaluation
+│   │   ├── sweep.py        — hyperparameter sweep: top_k_tables × top_k_columns (tanpa LLM)
+│   │   ├── ablation.py     — ablation study: few-shot k={0,1,3,5} × {baseline, graphrag}
+│   │   └── run_all_dimensions.py — entry point evaluasi: baca raw_logs, jalankan 6 dimensi analisis
+│   ├── utils/               — helper evaluasi: schema_utils.py (load/validasi db_schema), sql_execution.py (eksekusi SQLite aman)
+│   ├── metrics/             — metrik skripsi level query: sla.py, esm_ex_cm.py, token_consumption.py, tep.py, qvt.py
+│   └── dimensions/          — 6 dimensi analisis (agregasi + interpretasi dari metrics/): dim1_efficiency.py … dim6_ablation.py
+├── external/
+│   └── spider_eval/        — official SPIDER evaluation.py + process_sql.py (di-wget manual, dipakai juga oleh src/metrics/)
+├── data/
+│   ├── raw_logs/            — INPUT dimensi analisis: baseline_log.json, graphrag_log.json (skema di context/EVALUATION_ANALYSIS_GUIDE.md Bagian 2) — diproduksi oleh `pipeline.py`'s `run_comparison()` (via `--baseline`), BELUM oleh `ablation.py`, lihat TBD di bawah
+│   ├── db_schema/           — schema per db_id untuk validasi SLA
+│   └── qvt_variations/      — dataset paraphrase NL question untuk metrik QVT (Dimensi 4)
+├── context/
+│   ├── EVALUATION_ANALYSIS_GUIDE.md — source of truth formula & alur berpikir untuk src/metrics/ dan src/dimensions/ (JANGAN ubah formula/threshold di situ tanpa konfirmasi peneliti)
+│   └── IMPLEMENTATION_DECISIONS.md — catatan SEMUA keputusan peneliti saat implementasi (konflik guide vs kode/tooling resmi SPIDER, dan alasannya) — baca ini sebelum mengubah perilaku src/metrics/ yang terasa "aneh"
+├── notebooks/               — EDA notebooks + notebooks/compiled/ (Kaggle-ready compiled notebook)
+│   └── eval_pipeline.ipynb  — notebook GraphRAG vs Baseline side-by-side (ESM/EX via Spider eval + schema recall/precision). Ditulis SEBELUM refactor foldering — import & path masih flat layout (`from config import ...`, `evaluation.py` di cwd), belum disesuaikan ke `src.*`/`external/spider_eval/`
+├── outputs/
+│   ├── plots/               — EDA plot PNGs
+│   ├── predictions/         — predictions.txt, baseline_predictions.txt, ablation_*_predictions_k*.txt, ablation_*_prompts_k*.jsonl
+│   ├── logs/                — baseline_log.txt
+│   └── tables/              — sweep_results.csv, ablation_results.csv, baseline_results.csv, comparison_report.txt
+├── requirements.txt          — dependency untuk src/metrics/ & src/dimensions/ (jalan lokal, bukan Kaggle — lihat komentar di file)
+└── CLAUDE.md                — file ini (tetap di root)
 ```
+
+Semua modul di `src/` dipanggil sebagai `src.<paket>.<modul>` (mis. `from src.core.config import PipelineConfig`). Entry point CLI (`pipeline.py`, `sweep.py`, `ablation.py`, `baseline.py`, `run_all_dimensions.py`) masih bisa dijalankan langsung dengan `python src/experiments/pipeline.py` dkk — setiap entry point punya bootstrap `sys.path.insert(...)` di baris import supaya import `src.*`-nya tetap resolve meski dijalankan sebagai script, bukan module.
+
+**Status `src/utils/`, `src/metrics/`, `src/dimensions/`:** hasil merge dari `evaluation_pipeline/`, sebuah folder template yang tadinya dibuat Claude tanpa melihat codebase ini (dari sesi brainstorming metrik/dimensi terpisah). Formula dan alur sudah final dari proposal (lihat `context/EVALUATION_ANALYSIS_GUIDE.md`).
+- **Sudah diimplementasi (bukan lagi stub):** `src/utils/schema_utils.py` (load_db_schema, is_valid_schema_element, get_table_names), `src/metrics/sla.py` PENUH (`extract_ground_truth_schema()` untuk gold_schema pakai SQL parser resmi SPIDER; `compute_sla()`/`aggregate_sla()` untuk precision/recall/F1 table-level & column-level, macro-average per query — sudah divalidasi cocok dengan contoh angka di guide 1.1 poin (d) persis), `src/metrics/esm_ex_cm.py` penuh (`evaluate_single_query()`, `build_kmaps()`, `build_schema_for_db()`, `aggregate_esm/ex/cm()` — wrapper in-process ke `external/spider_eval/evaluation.py`+`process_sql.py`, sudah divalidasi lewat sanity test terhadap DB SQLite sintetis). `src/experiments/pipeline.py`'s `run_comparison()` sekarang memanggil semuanya per-query dan menulis `data/raw_logs/{graphrag,baseline}_log.json` sesuai skema di guide Bagian 2. `run_single()`/`run_single_baseline()` juga sudah menghitung token_input/token_output (pakai `generate_sql_with_token_count()`, pola yang sama dengan `ablation.py`).
+- **Masih stub:** `src/metrics/token_consumption.py`, `src/metrics/tep.py`, `src/metrics/qvt.py` (belum ada satupun implementasi — QVT juga belum ada data `data/qvt_variations/`), dan seluruh `src/dimensions/*.py` (agregasi + interpretasi dari raw_logs — metrik SLA/ESM/EX/CM yang dibutuhkan Dimensi 1/2/3/5 sudah siap dipanggil, tapi kode agregasinya sendiri belum ditulis).
+- **Semua keputusan implementasi** (konflik guide vs kode yang sudah ada, konflik guide vs keterbatasan tooling resmi SPIDER, dan open items yang belum diputuskan) ada di **`context/IMPLEMENTATION_DECISIONS.md`** — termasuk formula Token Consumption, EX order-sensitivity, label difficulty, casing CM clause, keterbatasan `union_all`, dan isu `LEFT JOIN`/`RIGHT JOIN` yang belum di-resolve.
 
 ---
 
@@ -137,6 +170,7 @@ Semua parameter ada di `PipelineConfig` dataclass. **Jangan hardcode nilai di fi
 | `max_new_tokens` | `200` | Final | Budget generasi LLM |
 | `temperature` | `0.0` | Final | Greedy decoding, deterministik |
 | `load_in_4bit` | `True` | Final | Kuantisasi NF4 |
+| `token_output_weight` | `3.0` | Final | α/μ dalam T = T_in + α×T_out — fixed dari proposal subbab 3.8.2.5, diupdate dari 1.0 (lihat riwayat resolusi konflik di "Evaluasi Metrik") |
 
 Parameter bertanda **TBD** akan diupdate setelah sweep dan ablation selesai.
 
@@ -148,18 +182,18 @@ Cross design 2×4 — jalankan terpisah 2x untuk menghindari OOM:
 
 **Run 1 — Baseline RAG:**
 ```bash
-python ablation.py --mode baseline --k-values 0 1 3 5 --sample 1.0
+python src/experiments/ablation.py --mode baseline --k-values 0 1 3 5 --sample 1.0
 ```
 
 **Run 2 — GraphRAG:**
 ```bash
-python ablation.py --mode graphrag --k-values 0 1 3 5 --sample 1.0
+python src/experiments/ablation.py --mode graphrag --k-values 0 1 3 5 --sample 1.0
 ```
 
 Output per run:
-- `ablation_{mode}_predictions_k{k}.txt` — SQL predictions → masuk ke Spider `evaluation.py` untuk EM/EX
-- `ablation_{mode}_prompts_k{k}.jsonl` — per sample: i, db_id, question, tokens_in, tokens_out, token_consumption, prompt, pred_sql
-- `ablation_results.csv` — avg_recall, avg_precision, avg_prompt_tokens (T_in), avg_output_tokens (T_out), avg_token_consumption (T) per mode×k → dasar perhitungan TEP
+- `outputs/predictions/ablation_{mode}_predictions_k{k}.txt` — SQL predictions → masuk ke Spider `external/spider_eval/evaluation.py` untuk EM/EX
+- `outputs/predictions/ablation_{mode}_prompts_k{k}.jsonl` — per sample: i, db_id, question, tokens_in, tokens_out, token_consumption, prompt, pred_sql
+- `outputs/tables/ablation_results.csv` — avg_recall, avg_precision, avg_prompt_tokens (T_in), avg_output_tokens (T_out), avg_token_consumption (T) per mode×k → dasar perhitungan TEP
 
 | | k=0 | k=1 | k=3 | k=5 |
 |---|---|---|---|---|
@@ -174,18 +208,41 @@ Tujuan ablation: cari **elbow point** — nilai k di mana penambahan few-shot ex
 
 | Metrik | Tool | Keterangan |
 |---|---|---|
-| Exact Set Match (ESM) | Spider `evaluation.py --etype match` | |
-| Execution Accuracy (EX) | Spider `evaluation.py --etype exec` | |
-| Component Match (CM) | Spider `evaluation.py` | |
-| Token Consumption | `avg_token_consumption` di `ablation_results.csv` | T = T_in + α×T_out. T_in = prompt tokens, T_out = generated SQL tokens, α = `token_output_weight` di config.py (default 1.0 untuk local model). Diukur inline per sample setelah generate_sql. |
+| Exact Set Match (ESM) | Spider `external/spider_eval/evaluation.py --etype match` | |
+| Execution Accuracy (EX) | Spider `external/spider_eval/evaluation.py --etype exec` | |
+| Component Match (CM) | Spider `external/spider_eval/evaluation.py` | |
+| Token Consumption | `avg_token_consumption` di `ablation_results.csv` | T = T_in + α×T_out. T_in = prompt tokens, T_out = generated SQL tokens, α = `token_output_weight` di config.py (**3.0**, fixed dari proposal). Diukur inline per sample setelah generate_sql. |
 | TEP (Token Elasticity of Performance) | Custom metric, hitung post-hoc | TEP_G = (ΔEX_G/EX_B) / (ΔT_G/T_B) — elastisitas performa GraphRAG relatif terhadap konsumsi token vs Baseline. ΔEX_G = EX_G − EX_B, ΔT_G = T_G − T_B. Hitung dari `ablation_results.csv` + EX dari Spider eval. |
 | QVT (Query Variance Testing) | Custom metric | Stabilitas output terhadap variasi pertanyaan |
+| Schema Linking Accuracy (SLA) | `src/metrics/sla.py` (skeleton) | Precision/recall/F1 retrieval vs gold schema, table-level & column-level terpisah |
 
-Spider evaluation scripts harus didownload manual:
+Definisi lengkap + algoritma step-by-step untuk keenam metrik di atas (termasuk SLA
+dan breakdown 6 dimensi analisis skripsi) ada di **`context/EVALUATION_ANALYSIS_GUIDE.md`**
+— itu source of truth-nya, tabel di atas cuma ringkasan. Implementasi metrik ada di
+`src/metrics/`, agregasi + interpretasi per dimensi ada di `src/dimensions/` (keduanya
+masih skeleton).
+
+✅ **Konflik formula Token Consumption (μ vs α) dan keputusan EX order-sensitivity
+sudah diselesaikan** — lihat `context/IMPLEMENTATION_DECISIONS.md` poin 1 dan 5
+untuk detail konflik + alasan lengkap. Ringkas: `token_output_weight` = **3.0**
+(bukan 1.0), dan EX tetap pakai `eval_exec_match()` resmi SPIDER apa adanya
+(order-sensitive, beda dari algoritma literal di guide 1.3(c) langkah 3).
+
+Spider evaluation scripts harus didownload manual ke `external/spider_eval/`:
 ```bash
+mkdir -p external/spider_eval && cd external/spider_eval
 wget https://raw.githubusercontent.com/taoyds/spider/master/evaluation.py
 wget https://raw.githubusercontent.com/taoyds/spider/master/process_sql.py
 ```
+
+### Atribusi kode: SPIDER resmi vs custom
+
+**Ingat ini setiap kali menulis dokumentasi/penjelasan/komentar untuk apapun yang menyentuh evaluasi** (`src/metrics/`, `src/dimensions/`, `context/*.md`) — selalu tandai jelas mana yang mana:
+
+- **Source code resmi SPIDER** — benar-benar berasal dari `external/spider_eval/evaluation.py` / `process_sql.py` (di-download dari repo resmi `taoyds/spider` di GitHub), dipanggil apa adanya. Contoh: `Evaluator.eval_exact_match()`, `Evaluator.eval_partial_match()`, `eval_exec_match()`, `eval_hardness()`, `Schema`, `get_sql()`, `build_foreign_key_map_from_json()`, `rebuild_sql_val()`/`rebuild_sql_col()`.
+- **Kode custom untuk skripsi ini** — ditulis khusus untuk project ini, MEMBUNGKUS atau MEMPERLUAS kode resmi di atas (SPIDER sendiri tidak menyediakan ini secara publik). Contoh: `evaluate_single_query()`, `build_kmaps()`, `build_schema_for_db()`, `_from_clause_match()`, `_set_op_clause_match()`, `aggregate_esm/ex/cm()` (semua di `esm_ex_cm.py`); `extract_ground_truth_schema()`, `_collect_col_ids()`, `_col_id_to_table_column()`, `compute_sla()`, `aggregate_sla()` (semua di `sla.py`) — SLA sendiri BUKAN metrik resmi SPIDER, itu spesifik untuk proposal skripsi ini.
+
+Jangan biarkan pembaca (termasuk sesi Claude Code berikutnya) salah asumsi sesuatu itu "dari SPIDER" padahal ditulis sendiri, atau sebaliknya — penting untuk akurasi bab metodologi yang menyebut "reuse resmi SPIDER evaluation script".
 
 ---
 
@@ -225,6 +282,7 @@ data_path = Path("/kaggle/input/datasets/alrette/spiderdataset/spider_data")
 - Nilai final `few_shot_k` → tunggu hasil ablation study
 - Definisi final baseline: saat ini table-level retrieval, mungkin diubah ke full-schema bypass — diskusikan dulu dengan kelompok
 - `max_new_tokens`: di `config.py` = 200, di beberapa tempat tertulis 256 — perlu diseragamkan
+- `data/raw_logs/{baseline,graphrag}_log.json` sudah diproduksi oleh `run_comparison()` di `pipeline.py` (via `python src/experiments/pipeline.py --baseline`) — **belum** oleh `ablation.py` (masih pakai jalur lama tanpa evaluasi ESM/EX/CM per query). Belum pernah dijalankan end-to-end di Kaggle (torch tidak tersedia di environment dev lokal) — logika inti sudah divalidasi lewat sanity test terhadap SQLite sintetis, tapi belum divalidasi terhadap Spider dev set asli
 
 ---
 
@@ -232,23 +290,23 @@ data_path = Path("/kaggle/input/datasets/alrette/spiderdataset/spider_data")
 
 ```bash
 # GraphRAG — full dev set
-python pipeline.py --skip-sweep
+python src/experiments/pipeline.py --skip-sweep
 
 # GraphRAG — dengan sweep otomatis dulu
-python pipeline.py
+python src/experiments/pipeline.py
 
 # Baseline — table-level retrieval
-python baseline.py --sample 1.0
+python src/retrieval/baseline.py --sample 1.0
 
 # Full schema bypass (eksperimen, belum jadi mode resmi)
-python pipeline.py --full-schema
+python src/experiments/pipeline.py --full-schema
 
 # Ablation few-shot
-python ablation.py --k-values 0 1 3 5
+python src/experiments/ablation.py --k-values 0 1 3 5
 
 # Hyperparameter sweep saja (tanpa LLM, cepat)
-python sweep.py --sample 0.2
+python src/experiments/sweep.py --sample 0.2
 
 # Perbandingan GraphRAG vs Baseline
-python pipeline.py --baseline
+python src/experiments/pipeline.py --baseline
 ```

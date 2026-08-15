@@ -1,0 +1,28 @@
+[
+  {
+    "query_id": "dev_0001",
+    "db_id": "concert_singer",
+    "difficulty": "medium",
+    "gold_sql": "SELECT name FROM singer WHERE age > 20",
+    "predicted_sql": "SELECT singer.name FROM singer WHERE singer.age > 20",
+    "gold_schema": ["singer.name", "singer.age"],
+    "predicted_schema": ["singer.name", "singer.age"],
+    "token_input": 842,
+    "token_output": 37,
+    "esm_result": 1,
+    "ex_result": 1,
+    "cm_per_clause": {
+      "select": 1,
+      "from": 1,
+      "where": 1,
+      "group_by": 1,
+      "order_by": 1,
+      "having": 1,
+      "keywords": 1,
+      "union": 1,
+      "union_all": 1,
+      "intersect": 1,
+      "except": 1
+    }
+  }
+]

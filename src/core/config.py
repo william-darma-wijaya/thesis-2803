@@ -11,7 +11,7 @@ from pathlib import Path
 class PipelineConfig:
     # --- Paths ---
     data_path: Path = Path("/kaggle/input/datasets/alrette/spiderdataset/spider_data")
-    predictions_file: Path = Path("predictions.txt")
+    predictions_file: Path = Path("outputs/predictions/predictions.txt")
 
     @property
     def tables_json(self) -> Path:
@@ -72,10 +72,10 @@ class PipelineConfig:
     use_full_schema_bypass: bool = False
 
     # --- Token consumption ---
-    # α in T = T_in + α × T_out.
-    # Set to 1.0 for local models (input and output consume equal compute).
-    # Set to 3.0 or 5.0 to mirror commercial API pricing ratios.
-    token_output_weight: float = 1.0
+    # α in T = T_in + α × T_out (called μ in the thesis proposal, subbab 3.8.2.5).
+    # Fixed at 3.0 per proposal — do not change without an explicit decision from
+    # the researcher (see context/EVALUATION_ANALYSIS_GUIDE.md Bagian 1.5).
+    token_output_weight: float = 3.0
 
     # --- Reproducibility ---
     seed: int = 42

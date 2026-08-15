@@ -14,19 +14,19 @@ Architecture difference:
                                lower precision.
 
 Usage:
-    python baseline.py                           # default 20% dev-set sample
-    python baseline.py --sample 0.5             # 50% dev set
-    python baseline.py --sample 1.0             # full dev set
-    python baseline.py --skip-sweep             # skip top-k sweep
-    python baseline.py --compare                # run BOTH modes & print comparison
+    python src/retrieval/baseline.py                           # default 20% dev-set sample
+    python src/retrieval/baseline.py --sample 0.5             # 50% dev set
+    python src/retrieval/baseline.py --sample 1.0             # full dev set
+    python src/retrieval/baseline.py --skip-sweep             # skip top-k sweep
+    python src/retrieval/baseline.py --compare                # run BOTH modes & print comparison
 
 The script can also be imported and called from pipeline.py via run_baseline().
 
 Output files:
-    baseline_predictions.txt    — SQL predictions (Spider format)
-    baseline_log.txt            — per-sample detail log
-    baseline_results.csv        — recall / precision per sample
-    comparison_report.txt       — side-by-side summary (only with --compare)
+    outputs/predictions/baseline_predictions.txt    — SQL predictions (Spider format)
+    outputs/logs/baseline_log.txt                   — per-sample detail log
+    outputs/tables/baseline_results.csv             — recall / precision per sample
+    outputs/tables/comparison_report.txt            — side-by-side summary (only with --compare)
 """
 
 import argparse
@@ -45,9 +45,11 @@ import torch
 from sentence_transformers import SentenceTransformer, util
 from tqdm import tqdm
 
-from config import PipelineConfig
-from generation import build_prompt, generate_sql, load_model_and_tokenizer
-from schema import build_schema_graph, load_spider_schema
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.core.config import PipelineConfig
+from src.generation.generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
+from src.core.schema import build_schema_graph, load_spider_schema
 
 logging.basicConfig(
     level=logging.INFO,
@@ -324,7 +326,7 @@ def evaluate_table_linking(
     Returns:
         (recall, precision) — floats in [0, 1]
     """
-    from retrieval import _SQL_STOPWORDS
+    from src.retrieval.retrieval import _SQL_STOPWORDS
 
     # Build known schema names from the table-level graph for this database
     known_tables: set[str] = set()
@@ -385,13 +387,18 @@ def run_single_baseline(
     tokenizer,
     cfg: PipelineConfig,
     table_index: TableSchemaIndex,
-) -> tuple[str, float, float]:
+) -> tuple[str, float, float, list, int, int]:
     """
     Run the full BASELINE pipeline for one question:
         embed → link tables → trace paths → build context → generate SQL.
 
     Returns:
-        (pred_sql, recall, precision)
+        (pred_sql, recall, precision, table_nodes, n_in, n_out)
+        table_nodes : selected table node ids (used for raw_logs predicted_schema —
+                      baseline sends ALL columns of these tables, no pruning)
+        n_in, n_out : prompt/output token counts (T_in/T_out), same
+                      generate_sql_with_token_count() pattern as pipeline.py's
+                      run_single() and ablation.py's _run_k()
     """
     if cfg.use_full_schema_bypass:
         # Bypass: feed all tables in the database
@@ -414,7 +421,7 @@ def run_single_baseline(
             table_nodes = trace_table_paths(graph, detected)
 
     if not table_nodes:
-        return "SELECT 1", 0.0, 0.0
+        return "SELECT 1", 0.0, 0.0, [], 0, 0
 
     recall, precision = evaluate_table_linking(gold_sql, table_nodes, graph, db_id)
     schema_context = build_table_schema_context(graph, table_nodes)
@@ -424,9 +431,10 @@ def run_single_baseline(
         "numbers": re.findall(r"\d+", question),
     }
     prompt = build_prompt(question, schema_context, extracted_values, few_shot_block="")
-    pred_sql = generate_sql(prompt, model, tokenizer, cfg)
+    pred_sql, n_out = generate_sql_with_token_count(prompt, model, tokenizer, cfg)
+    n_in = len(tokenizer.encode(prompt))
 
-    return pred_sql, recall, precision
+    return pred_sql, recall, precision, table_nodes, n_in, n_out
 
 
 # ---------------------------------------------------------------------------
@@ -489,10 +497,11 @@ def _print_summary(results: list[BaselineResult], label: str = "Baseline (table/
 # ---------------------------------------------------------------------------
 
 def _run_spider_eval(pred_file: Path, cfg: PipelineConfig) -> None:
-    evaluator = Path("evaluation.py")
+    evaluator = Path("external/spider_eval/evaluation.py")
     if not evaluator.exists():
         logger.warning(
-            "evaluation.py not found — skipping Spider eval.\n"
+            "external/spider_eval/evaluation.py not found — skipping Spider eval.\n"
+            "  mkdir -p external/spider_eval && cd external/spider_eval\n"
             "  wget https://raw.githubusercontent.com/taoyds/spider/master/evaluation.py\n"
             "  wget https://raw.githubusercontent.com/taoyds/spider/master/process_sql.py"
         )
@@ -507,12 +516,12 @@ def _run_spider_eval(pred_file: Path, cfg: PipelineConfig) -> None:
     print("\n" + "=" * 60)
     print("  SPIDER EVALUATION (Exact Match)")
     print("=" * 60)
-    subprocess.run(["python", "evaluation.py"] + base_args + ["--etype", "match"], check=False)
+    subprocess.run(["python", "external/spider_eval/evaluation.py"] + base_args + ["--etype", "match"], check=False)
 
     print("\n" + "=" * 60)
     print("  SPIDER EVALUATION (Execution Accuracy)")
     print("=" * 60)
-    subprocess.run(["python", "evaluation.py"] + base_args + ["--etype", "exec"], check=False)
+    subprocess.run(["python", "external/spider_eval/evaluation.py"] + base_args + ["--etype", "exec"], check=False)
 
 
 # ---------------------------------------------------------------------------
@@ -522,9 +531,9 @@ def _run_spider_eval(pred_file: Path, cfg: PipelineConfig) -> None:
 def run_baseline(
     cfg: PipelineConfig,
     sample_ratio: float = 1.0,
-    pred_path: Path = Path("baseline_predictions.txt"),
-    log_path:  Path = Path("baseline_log.txt"),
-    csv_path:  Path = Path("baseline_results.csv"),
+    pred_path: Path = Path("outputs/predictions/baseline_predictions.txt"),
+    log_path:  Path = Path("outputs/logs/baseline_log.txt"),
+    csv_path:  Path = Path("outputs/tables/baseline_results.csv"),
     run_eval:  bool = True,
 ) -> list[BaselineResult]:
     """
@@ -584,7 +593,7 @@ def run_baseline(
             gold_sql = item["query"]
 
             try:
-                pred_sql, recall, precision = run_single_baseline(
+                pred_sql, recall, precision, _table_nodes, _n_in, _n_out = run_single_baseline(
                     question, gold_sql, db_id,
                     table_graph, embed_model, llm, tokenizer, cfg,
                     table_index=table_cache[db_id],
@@ -642,9 +651,9 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float = 0.2) -> None:
     baseline_results = run_baseline(
         cfg=cfg,
         sample_ratio=sample_ratio,
-        pred_path=Path("baseline_predictions.txt"),
-        log_path=Path("baseline_log.txt"),
-        csv_path=Path("baseline_results.csv"),
+        pred_path=Path("outputs/predictions/baseline_predictions.txt"),
+        log_path=Path("outputs/logs/baseline_log.txt"),
+        csv_path=Path("outputs/tables/baseline_results.csv"),
         run_eval=True,
     )
 
@@ -654,10 +663,10 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float = 0.2) -> None:
     logger.info("=" * 60)
 
     # Import lazily to avoid circular imports when baseline is used standalone
-    from pipeline import main as run_graphrag_main, PipelineResult, run_single
+    from src.experiments.pipeline import main as run_graphrag_main, PipelineResult, run_single
 
     schema_df = load_spider_schema(cfg.tables_json)
-    from schema import build_schema_graph
+    from src.core.schema import build_schema_graph
     graph = build_schema_graph(schema_df)
 
     with open(cfg.dev_json, "r", encoding="utf-8") as f:
@@ -672,7 +681,7 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float = 0.2) -> None:
     embed_model = SentenceTransformer(cfg.embedding_model)
     llm, tokenizer = load_model_and_tokenizer(cfg)
 
-    from retrieval import build_schema_index
+    from src.retrieval.retrieval import build_schema_index
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_data))
     schema_cache = {
         db_id: build_schema_index(graph, db_id, embed_model)
@@ -680,7 +689,7 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float = 0.2) -> None:
     }
 
     graphrag_results: list[PipelineResult] = []
-    with open("graphrag_predictions.txt", "w", encoding="utf-8") as pf:
+    with open("outputs/predictions/graphrag_predictions.txt", "w", encoding="utf-8") as pf:
         for i, item in enumerate(tqdm(dev_data, desc="GraphRAG — generating")):
             db_id, question, gold_sql = item["db_id"], item["question"], item["query"]
             try:
@@ -722,7 +731,7 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float = 0.2) -> None:
     report_str = "\n".join(report)
     print(report_str)
 
-    report_path = Path("comparison_report.txt")
+    report_path = Path("outputs/tables/comparison_report.txt")
     report_path.write_text(report_str, encoding="utf-8")
     logger.info("Comparison report saved → %s", report_path)
 
