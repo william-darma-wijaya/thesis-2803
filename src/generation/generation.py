@@ -166,7 +166,19 @@ def _clean_sql(sql: str) -> str:
                 kw_match = re.search(
                     r"(?i)\b(WHERE|GROUP|ORDER|HAVING|LIMIT)\b.*", from_part, re.DOTALL
                 )
-                from_part = f"{table_name} {kw_match.group(0)}" if kw_match else table_name
+                if kw_match:
+                    # The alias token (if any) between the table name and this
+                    # clause is being dropped below (from_part becomes just
+                    # table_name + this clause) -- so any "alias.column"
+                    # references inside the clause itself must be stripped
+                    # too, the same way select_part already is above.
+                    # Otherwise a query like "FROM employees e WHERE
+                    # e.salary > 1000" loses its alias declaration but keeps
+                    # "e.salary", producing invalid SQL.
+                    clause = _TABLE_PREFIX.sub("", kw_match.group(0))
+                    from_part = f"{table_name} {clause}"
+                else:
+                    from_part = table_name
 
             sql = f"{select_part} FROM {from_part}"
 
