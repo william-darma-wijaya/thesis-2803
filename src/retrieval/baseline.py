@@ -377,6 +377,15 @@ def evaluate_table_linking(
 # Core per-sample step
 # ---------------------------------------------------------------------------
 
+def _all_table_nodes(graph: nx.Graph, db_id: str) -> list[str]:
+    """All table node ids for `db_id` — used whenever retrieval is bypassed
+    or disabled (full-schema bypass, top_k_tables=0, or no tables detected)."""
+    return [
+        n for n, d in graph.nodes(data=True)
+        if d.get("database") == db_id and d.get("type") == "table"
+    ]
+
+
 def run_single_baseline(
     question: str,
     gold_sql: str,
@@ -402,21 +411,23 @@ def run_single_baseline(
     """
     if cfg.use_full_schema_bypass:
         # Bypass: feed all tables in the database
-        table_nodes = [
-            n for n, d in graph.nodes(data=True)
-            if d.get("database") == db_id and d.get("type") == "table"
-        ]
+        table_nodes = _all_table_nodes(graph, db_id)
+    elif cfg.top_k_tables == 0:
+        # Two-stage disabled -- consider all tables. Same semantics as
+        # retrieve_candidate_tables() in src/retrieval/retrieval.py's
+        # GraphRAG path (see config.py's top_k_tables docstring: "Set to 0
+        # to disable ... all tables are considered"). Previously this arm
+        # silently substituted top_k=3 instead, diverging from GraphRAG's
+        # documented behavior for the same config value.
+        table_nodes = _all_table_nodes(graph, db_id)
     else:
         detected = semantic_linking_table_level(
             table_index, question, embed_model,
-            top_k=cfg.top_k_tables if cfg.top_k_tables > 0 else 3,
+            top_k=cfg.top_k_tables,
         )
         if not detected:
             # Fallback: use all tables
-            table_nodes = [
-                n for n, d in graph.nodes(data=True)
-                if d.get("database") == db_id and d.get("type") == "table"
-            ]
+            table_nodes = _all_table_nodes(graph, db_id)
         else:
             table_nodes = trace_table_paths(graph, detected)
 
