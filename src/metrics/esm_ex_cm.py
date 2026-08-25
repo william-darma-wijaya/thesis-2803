@@ -64,6 +64,8 @@ from evaluation import (  # noqa: E402  (import after sys.path bootstrap, intent
 )
 from process_sql import Schema, get_schema, get_sql  # noqa: E402
 
+from src.utils.sql_normalize import normalize_join_keywords_for_parsing
+
 # Lowercase snake_case dipertahankan sengaja (guide menulis nama klausa uppercase,
 # mis. "SELECT"/"GROUP BY") -- konsisten dengan field lain di raw_logs yang semua
 # lowercase snake_case. Keputusan didokumentasikan di
@@ -192,15 +194,26 @@ def _evaluate_single_query_inner(
                               # tiap query butuh instance sendiri supaya tidak ada
                               # kebocoran state antar query.
 
-    g_sql = get_sql(schema, gold_sql)
+    # normalize_join_keywords_for_parsing() HANYA mempengaruhi salinan yang
+    # di-parse di sini -- gold_sql/predicted_sql ASLI (tidak dinormalisasi)
+    # tetap yang dioper ke eval_exec_match() di bawah (baris ~251). Lihat
+    # src/utils/sql_normalize.py dan context/IMPLEMENTATION_DECISIONS.md
+    # poin 11 untuk kenapa pemisahan ini wajib (LEFT/RIGHT/FULL JOIN mengubah
+    # hasil eksekusi, execution_safe_only=False di sini aman justru KARENA
+    # hasil normalisasi ini tidak pernah dieksekusi).
+    g_sql = get_sql(schema, normalize_join_keywords_for_parsing(gold_sql))
     difficulty = evaluator.eval_hardness(g_sql)
 
     try:
-        p_sql = get_sql(schema, predicted_sql)
+        p_sql = get_sql(schema, normalize_join_keywords_for_parsing(predicted_sql))
     except Exception:
         # predicted SQL dari LLM sangat mungkin tidak valid secara grammar Spider
         # (beda dengan "tidak valid secara SQLite" yang ditangani terpisah di EX).
         # Fallback ke sql kosong -- persis pola yang dipakai official evaluate().
+        # (Celah JOIN-keyword -- LEFT/RIGHT/FULL/INNER/CROSS JOIN -- sudah
+        # ditangani lewat normalize_join_keywords_for_parsing() di atas;
+        # fallback ini sekarang murni untuk SQL yang benar-benar tidak valid
+        # secara grammar Spider, bukan untuk kasus join-type lagi.)
         p_sql = _empty_sql()
 
     # Normalisasi nilai literal & alias kolom lewat foreign key (mis. kolom yang

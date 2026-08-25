@@ -53,6 +53,7 @@ from src.retrieval.retrieval import (
 )
 from src.core.schema import build_schema_graph, load_spider_schema
 from src.metrics import esm_ex_cm
+from src.utils.sql_normalize import normalize_sql_file_for_parsing
 from src.metrics.sla import extract_ground_truth_schema
 from src.utils.schema_utils import load_db_schema
 
@@ -202,21 +203,62 @@ def run_official_evaluation(cfg: PipelineConfig) -> None:
         )
         return
 
-    common_args = [
-        "--gold", str(cfg.gold_sql),
-        "--pred", str(cfg.predictions_file),
-        "--db", str(cfg.db_dir),
-        "--table", str(cfg.tables_json),
-    ]
+    # process_sql.py resmi SPIDER cuma mengenali join-type keyword 'join'
+    # polos (JOIN_KEYWORDS di process_sql.py baris 32) -- predicted/gold SQL
+    # yang pakai INNER/CROSS/LEFT/RIGHT/FULL JOIN bikin get_sql() crash di
+    # dalam evaluation.py CLI juga (jalur subprocess ini pakai parser yang
+    # sama dengan jalur in-process esm_ex_cm.py). Normalize dulu sebelum
+    # dioper ke CLI -- lihat src/utils/sql_normalize.py dan
+    # context/IMPLEMENTATION_DECISIONS.md poin 11.
+    #
+    # --etype match TIDAK PERNAH mengeksekusi SQL (dikonfirmasi evaluation.py
+    # baris ~546: eval_exec_match cuma dipanggil kalau etype in
+    # ["all","exec"]), jadi aman normalisasi PENUH (execution_safe_only=False).
+    # --etype exec BENAR-BENAR mengeksekusi string dari file ini (evaluate()
+    # tidak punya pemisahan raw-vs-normalized seperti jalur in-process) --
+    # WAJIB execution_safe_only=True (cuma INNER/CROSS JOIN, yang 100% setara
+    # hasil eksekusi), supaya LEFT/RIGHT/FULL JOIN tidak diam-diam berubah
+    # semantik saat benar-benar dieksekusi. Predicted/gold LEFT/RIGHT/FULL
+    # JOIN karena itu TETAP gagal parse di jalur --etype exec ini -- known
+    # residual limitation, lihat IMPLEMENTATION_DECISIONS.md poin 11.
+    eval_dir = cfg.predictions_file.parent
+
+    match_gold = normalize_sql_file_for_parsing(
+        cfg.gold_sql, eval_dir / "_normalized_match_gold.txt",
+        has_db_id_suffix=True, execution_safe_only=False,
+    )
+    match_pred = normalize_sql_file_for_parsing(
+        cfg.predictions_file, eval_dir / "_normalized_match_pred.txt",
+        has_db_id_suffix=False, execution_safe_only=False,
+    )
+    exec_gold = normalize_sql_file_for_parsing(
+        cfg.gold_sql, eval_dir / "_normalized_exec_gold.txt",
+        has_db_id_suffix=True, execution_safe_only=True,
+    )
+    exec_pred = normalize_sql_file_for_parsing(
+        cfg.predictions_file, eval_dir / "_normalized_exec_pred.txt",
+        has_db_id_suffix=False, execution_safe_only=True,
+    )
+
+    common_args = ["--db", str(cfg.db_dir), "--table", str(cfg.tables_json)]
+
     print("\n" + "=" * 60)
     print("🎯 OFFICIAL SPIDER EVALUATION (Exact Match)")
     print("=" * 60)
-    subprocess.run(["python", "external/spider_eval/evaluation.py"] + common_args + ["--etype", "match"], check=False)
+    subprocess.run(
+        ["python", "external/spider_eval/evaluation.py",
+         "--gold", str(match_gold), "--pred", str(match_pred)] + common_args + ["--etype", "match"],
+        check=False,
+    )
 
     print("\n" + "=" * 60)
     print("🎯 OFFICIAL SPIDER EVALUATION (Execution Accuracy)")
     print("=" * 60)
-    subprocess.run(["python", "external/spider_eval/evaluation.py"] + common_args + ["--etype", "exec"], check=False)
+    subprocess.run(
+        ["python", "external/spider_eval/evaluation.py",
+         "--gold", str(exec_gold), "--pred", str(exec_pred)] + common_args + ["--etype", "exec"],
+        check=False,
+    )
 
 
 def print_schema_linking_summary(results: list[PipelineResult]) -> None:
