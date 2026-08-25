@@ -1,6 +1,6 @@
 # Metrics — Explained Simply
 
-> Companion to `EVALUATION_ANALYSIS_GUIDE.md` — that file has the formulas, algorithms, and thresholds. This file explains *what the numbers actually mean*, one metric at a time, in plain terms. Currently covers: **SLA, Token Consumption, TEP**. The rest (ESM, EX, CM, QVT) will be added here later as we get to each one.
+> Companion to `EVALUATION_ANALYSIS_GUIDE.md` — that file has the formulas, algorithms, and thresholds. This file explains *what the numbers actually mean*, one metric at a time, in plain terms. Currently covers: **SLA, Token Consumption, TEP, QVT**. The rest (ESM, EX, CM) will be added here later as we get to each one.
 >
 > Throughout: 🔧 marks something that's the **actual official SPIDER benchmark source code** (from `external/spider_eval/`, downloaded from the official `taoyds/spider` GitHub repo) — not written for this thesis. ✍️ marks code **written specifically for this thesis** (usually wrapping or extending the 🔧 pieces). See `CLAUDE.md` → "Atribusi kode: SPIDER resmi vs custom" for the full rule.
 
@@ -169,3 +169,68 @@ If `T_G` and `T_B` come out exactly equal (`ΔT_G = 0`), or `EX_B` / `T_B` is `0
 ### Where it fits in the bigger picture
 
 TEP is the payoff metric of **Dimension 1 (Efficiency)** — it's computed *last*, only after Token Consumption and EX have both already been reported side by side for Baseline and GraphRAG (guide's required output order: token table → EX table → TEP). It's the number that turns "GraphRAG uses fewer tokens" and "GraphRAG has different accuracy" into one combined verdict on whether the trade was worth it.
+
+---
+
+## QVT (Query Variance Testing)
+
+> Code: `src/metrics/qvt.py`. Formula: guide Section 1.6.
+>
+> ✍️ **100% custom to this thesis** — SPIDER's benchmark evaluates one fixed question per gold SQL, it has no concept of "the same question asked differently." QVT and the whole idea of paraphrase robustness testing is specific to this thesis's proposal.
+>
+> ⚠️ **Implemented but not yet usable end-to-end** — see the "What's still missing" note near the bottom before assuming this metric can be run today.
+
+### What it checks
+
+Every other metric so far asks "did the system get *this exact question* right?" QVT asks a different question: **if you ask for the same thing in a different way, does the system keep giving you a working answer — or does it get lucky on one phrasing and fall apart on the next?**
+
+Think of it like quizzing someone on the same fact five different ways. Getting it right once could just mean they memorized *that specific wording*. Getting it right across all five phrasings means they actually understood what was being asked.
+
+### Where the "different phrasings" come from
+
+SPIDER's dev set has exactly one NL question per gold SQL — there's no built-in paraphrase data. So QVT needs a **separate, hand-prepared dataset**: for a chosen gold SQL, someone writes (or generates) several reworded versions of the same question, runs each one through the pipeline, and checks whether the result is still correct. That data lives in `data/qvt_variations/` — see the "still missing" note below, this is the part that doesn't exist yet.
+
+"Correct," for QVT specifically, is measured with **EX** (Execution Accuracy) — not ESM. This was a deliberate choice (`IMPLEMENTATION_DECISIONS.md` poin 10): QVT cares whether the *functional answer* stayed right, not whether the SQL kept the exact same shape — and paraphrasing a question is exactly the kind of thing that nudges an LLM toward a differently-structured-but-still-correct query (e.g. a subquery instead of a join). Grading that with a structure-sensitive metric like ESM would make a perfectly robust system look unstable just because its SQL style shifted.
+
+### The two-layer score
+
+**Layer 1 — per gold SQL.** For one gold SQL with `m` paraphrased variations, count how many of those `m` came back correct:
+
+```
+score_i = (number of variations that scored EX=1) / m
+```
+
+Example: a gold SQL has 5 paraphrases, 3 of them produce correct SQL → `score = 3/5 = 0.6`.
+
+**Layer 2 — across the whole dataset.** Average the layer-1 scores across every gold SQL that has one:
+
+```
+QVT = mean(score_i)  — averaged only over gold SQLs that passed the filter below
+```
+
+### The filter — the step everyone forgets
+
+Here's the part the guide calls out as the single most common implementation mistake: **if every single paraphrase of a gold SQL fails, that gold SQL doesn't get a score of 0 — it gets thrown out of the average entirely.**
+
+Why: a gold SQL where *all* variations failed usually means the pipeline never had a shot at that question at all (wrong schema retrieved, question too hard, etc.) — that's a different kind of failure than "got some phrasings right, some wrong," and averaging it in as a flat 0 would conflate "somewhat inconsistent" with "completely unable," dragging the whole QVT score down for the wrong reason. So it's dropped, not zeroed.
+
+Worked example straight from the guide: gold SQL `Q_2` has 4 paraphrases, all 4 fail → `Q_2` is **excluded** from the QVT average — not counted as `score_2 = 0`.
+
+### Reading the practical effect of the filter
+
+This makes the `M` in the formula (the count you divide by) **not the total number of gold SQLs in the dataset** — it's only the ones that passed the filter. So QVT technically answers "**among gold SQLs the system can answer at all, how consistently does it answer them across phrasings**" — it's not a measure of raw success rate (that's what EX/ESM on the un-paraphrased dev set already covers).
+
+### Implementation note: how the code enforces this
+
+`compute_qvt_per_query()` does layer 1: it counts correct variations for one gold SQL, and if that count is `0`, it returns the result marked `included=False` instead of `score=0.0` — that flag is what keeps it out of the average. `aggregate_qvt()` does layer 2: it takes the mean of only the `included=True` scores. If literally every gold SQL in the batch gets filtered out (every paraphrase of every question failed), it raises an error instead of silently reporting `QVT = 0` — that situation means something is badly wrong with the run, not that QVT is a real, meaningful zero.
+
+### What's still missing (as of this writing)
+
+The scoring logic above is implemented and checked against the guide's worked example, but QVT **cannot actually be computed yet** for two reasons:
+
+1. **`data/qvt_variations/` is empty.** Nothing has generated the paraphrase questions, run them through the pipeline, or scored them with EX yet — that data has to exist before `compute_qvt_per_query()` has anything to work on. Preparing/grouping this dataset is on the researcher's plate (see `RESEARCHER_TODO.md`).
+2. **`dim4_robustness.py` (Dimension 4) is still a stub.** Nothing yet loads `data/qvt_variations/`, groups it by gold SQL, calls `compute_qvt_per_query()`/`aggregate_qvt()` for Baseline and GraphRAG, computes `ΔQVT = QVT_G − QVT_B`, or applies the guide's ±2% interpretation threshold.
+
+### Where it fits in the bigger picture
+
+QVT is the headline metric of **Dimension 4 (Robustness & Consistency)**, always read alongside ESM (per gold SQL: is a query that's *inconsistent* across phrasings also one that scores badly on ESM in general?). The guide's interpretation bands (once `ΔQVT` can actually be computed): `ΔQVT ≥ +2%` means GraphRAG meaningfully improved consistency, `−2% to +2%` means robustness held steady, `< −2%` means GraphRAG's pruning made the system *less* stable across phrasings — a warning sign that the schema pruning is cutting too close to the bone.
