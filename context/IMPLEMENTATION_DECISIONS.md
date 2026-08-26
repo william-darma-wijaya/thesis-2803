@@ -164,6 +164,22 @@ Penerapan beda per jalur, karena constraint arsitektur beda:
 
 ---
 
+## 12. Dimensi 2 baris ke-4 ("EX rendah, ESM rendah"): dibaca directional (turun/turun), bukan threshold absolut baru
+
+**Konflik/ambiguitas:** guide Bagian 3 Dimensi 2 mensyaratkan 4 kombinasi klasifikasi ESM×EX (WAJIB, "tabel ini persis"). Tiga baris pertama jelas *directional* — "naik"/"turun" berarti GraphRAG dibanding Baseline (delta). Baris ke-4 ditulis "EX rendah, ESM rendah" — kata "rendah" (bukan "turun"), tanpa angka threshold (beda dari Dimensi 5 yang eksplisit 80%/65%), dan tanpa kejelasan itu nilai absolut milik siapa (GraphRAG? Baseline? keduanya?). Dibaca literal-directional, 3 baris pertama cuma menutup 3 dari 4 kemungkinan arah delta (naik/turun, turun/naik, naik/naik) — kuadran ke-4 (turun/turun) tidak eksplisit ada di tabel manapun kecuali baris ke-4 ini dimaksudkan untuk itu.
+
+**Keputusan (2026-08-26):** baris ke-4 dibaca directional juga — **EX turun DAN ESM turun** (melengkapi kuadran ke-4, pasangan alami baris "EX naik, ESM naik" = "kondisi paling ideal"). TIDAK memperkenalkan threshold absolut baru untuk "rendah".
+
+**Alasan:** membaca semua 4 baris dengan semantik yang sama (directional) menghasilkan klasifikasi 4-kuadran yang lengkap dan internally consistent tanpa perlu mengarang angka threshold baru yang tidak ada di manapun di guide untuk tabel spesifik ini (melanggar aturan anti-halusinasi Bagian 4 poin 1 kalau dipaksakan). Interpretasi threshold-absolut juga berisiko tumpang-tindih dengan baris 1-3 (mis. EX naik tapi nilai absolutnya tetap rendah), yang tidak dijelaskan guide cara resolusinya.
+
+**Catatan implementasi:** label yang ditampilkan ke pengguna tetap teks literal guide, `"EX rendah, ESM rendah"` — bukan diganti jadi `"EX turun, ESM turun"` — supaya tetap traceable ke tabel resmi proposal, walau logika pemicunya (kode) memakai perbandingan delta turun/turun.
+
+**Edge case ditemukan saat implementasi (belum ada di guide):** kalau salah satu delta persis 0 (EX naik tapi ESM sama sekali tidak berubah, dst.), tidak ada satupun dari 4 kombinasi resmi yang cocok. Diputuskan: laporkan sebagai "tidak terklasifikasi" dengan delta mentahnya ditampilkan, BUKAN dipaksakan ke salah satu dari 4 kategori resmi.
+
+**Lokasi implementasi:** `src/dimensions/dim2_structure.py`'s `_classify()`. Juga di kesempatan yang sama, `DIFFICULTY_LEVELS`/grouping-per-difficulty diextract dari `dim1_efficiency.py` (yang sebelumnya sengaja lokal, lihat catatan di file itu) ke `src/utils/raw_logs.py` (`group_by_difficulty()`) karena `dim2_structure.py` butuh pola identik — sesuai rencana "extract saat pemanggil kedua muncul" yang sudah dicatat di `dim1_efficiency.py` sebelumnya.
+
+---
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER

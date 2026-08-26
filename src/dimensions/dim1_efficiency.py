@@ -23,29 +23,19 @@ diekstrak satu-satu.
 Modul ini murni orkestrasi/agregasi -- tidak menghitung apapun yang belum ada
 implementasinya di src/metrics/. `aggregate_token_consumption()` sengaja tidak
 tahu soal difficulty (lihat docstring-nya sendiri), jadi grouping-per-difficulty
-dilakukan di sini, bukan diextract ke helper bersama dulu -- dim2 nanti butuh
-pola yang sama persis, ekstrak baru saat itu terjadi (bukan sekarang, baru satu
-pemanggil).
+dilakukan lewat src.utils.raw_logs.group_by_difficulty() (diextract dari sini
+setelah dim2_structure.py butuh pola yang sama persis -- lihat
+context/IMPLEMENTATION_DECISIONS.md poin 12).
 """
 
 from dataclasses import asdict
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from src.core.config import PipelineConfig
 from src.metrics.esm_ex_cm import QueryEvalResult, aggregate_ex
 from src.metrics.token_consumption import compute_token_consumption, aggregate_token_consumption
 from src.metrics.tep import compute_tep
-
-DIFFICULTY_LEVELS = ["easy", "medium", "hard", "extra"]
-
-
-def _group_by_difficulty(logs: List[dict]) -> Dict[str, List[dict]]:
-    groups: Dict[str, List[dict]] = {level: [] for level in DIFFICULTY_LEVELS}
-    for entry in logs:
-        d = entry.get("difficulty")
-        if d in groups:
-            groups[d].append(entry)
-    return groups
+from src.utils.raw_logs import DIFFICULTY_LEVELS, group_by_difficulty
 
 
 def _token_consumption_stats(logs: List[dict], mu: float) -> Optional[dict]:
@@ -75,7 +65,7 @@ def _ex_percent(logs: List[dict]) -> Optional[float]:
 
 
 def _condition_stats(logs: List[dict], mu: float) -> dict:
-    groups = _group_by_difficulty(logs)
+    groups = group_by_difficulty(logs)
     return {
         "token_consumption": {
             "overall": _token_consumption_stats(logs, mu),
