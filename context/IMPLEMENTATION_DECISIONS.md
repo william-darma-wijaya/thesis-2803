@@ -212,6 +212,21 @@ Penerapan beda per jalur, karena constraint arsitektur beda:
 
 ---
 
+## 15. Dimensi 6: algoritma greedy step-wise untuk k_final, threshold 2 poin persen per langkah
+
+**Konflik/ambiguitas:** guide Bagian 3 Dimensi 6 minta "baca pola transisi EX vs k" dan eksplisit melarang "cuma ambil EX tertinggi mentah-mentah", tapi tidak memberi angka untuk apa yang dihitung "signifikan" saat EX naik dari satu k ke k berikutnya, dan tidak memberi algoritma presisi untuk menentukan `k_final` dari pola itu — cuma tiga deskripsi kualitatif (diminishing returns, konsisten, context overload).
+
+**Keputusan (2026-08-26):**
+1. **Algoritma:** greedy/step-wise, bukan perbandingan ke EX maksimum global. Mulai dari `k` terkecil, terus maju ke `k` berikutnya SELAMA lompatan EX ke situ >= `STEP_THRESHOLD`. Begitu satu langkah gagal signifikan (termasuk kalau EX-nya turun), berhenti di `k` SEBELUM langkah itu — TIDAK lanjut lagi walau ada langkah signifikan lagi setelahnya (diverifikasi lewat sanity test: `{0:50, 1:51, 3:90, 5:91}` tetap berhenti di k=0 meski lompatan 1→3 sangat besar, karena langkah 0→1 sudah gagal signifikan duluan).
+2. **`STEP_THRESHOLD = 2.0` poin persen** — dipilih supaya konsisten dengan threshold ΔQVT yang sudah WAJIB di guide Dimensi 4 (±2%), bukan angka baru yang berdiri sendiri tanpa preseden di guide manapun.
+3. Pola "EX naik signifikan di semua transisi sampai k terbesar" (belum plateau dalam rentang k yang diuji) diberi label jujur `terus_naik_signifikan` — bukan salah satu dari 3 pola resmi guide, karena guide memang tidak mendeskripsikan skenario ini secara eksplisit.
+
+**Alasan:** algoritma greedy/step-wise ini secara langsung merepresentasikan cara guide menjelaskan pola-polanya ("naik signifikan dari k=0→k=1 LALU stabil" — deskripsi berurutan per-langkah, bukan perbandingan ke titik global), dan secara alami menghasilkan ketiga pola resmi guide sebagai kasus khusus dari SATU aturan yang sama, tanpa perlu tiga pengecekan terpisah yang bisa saling kontradiksi.
+
+**Lokasi implementasi:** `src/dimensions/dim6_ablation.py`'s `run_dimension_6()`. **Catatan:** modul ini murni interpretasi — `ex_per_k` harus diisi dari hasil run nyata `ablation.py` + evaluation resmi, yang belum pernah dijalankan (lihat `RESEARCHER_TODO.md`). Kode ini sendiri sudah diverifikasi lewat fixture sintetis untuk keempat pola (termasuk `single_k` dan guard `ex_per_k` kosong), sama seperti Dimensi 1/2/3/5 sebelumnya.
+
+---
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER

@@ -1,6 +1,6 @@
 # Dimensions — Explained Simply
 
-> Companion to `EVALUATION_ANALYSIS_GUIDE.md` Bagian 3 and to `context/METRICS_EXPLAINED.md` — one level up from that file. `METRICS_EXPLAINED.md` explains what a single metric's *number* means (SLA, Token Consumption, TEP, QVT). This file explains what a whole **dimension** — a specific *combination* of those metrics, assembled to answer one research question — tells you that no single metric alone would. Currently covers: **Dimension 1, Dimension 2, Dimension 3, Dimension 5**. The rest (Dimensions 4, 6) will be added here as we get to each one.
+> Companion to `EVALUATION_ANALYSIS_GUIDE.md` Bagian 3 and to `context/METRICS_EXPLAINED.md` — one level up from that file. `METRICS_EXPLAINED.md` explains what a single metric's *number* means (SLA, Token Consumption, TEP, QVT). This file explains what a whole **dimension** — a specific *combination* of those metrics, assembled to answer one research question — tells you that no single metric alone would. Currently covers: **Dimension 1, Dimension 2, Dimension 3, Dimension 5, Dimension 6**. Dimension 4 will be added once it's implemented.
 >
 > Every dimension in this project is 100% custom orchestration code (`src/dimensions/`) — it doesn't touch SPIDER's official tooling directly, it just combines numbers that `src/metrics/` already produced (and those modules' own 🔧/✍️ attribution is explained in `METRICS_EXPLAINED.md`, not repeated here).
 
@@ -166,3 +166,38 @@ If SLA F1 falls under 80%, the diagnosis goes one level deeper, the same way it 
 ### Where it fits in the bigger picture
 
 The guide frames Dimension 5 as conditional — worth running specifically when Dimension 2 turns up its worst-case outcome (both ESM and EX down). That trigger is a judgment call for whoever is running the analysis, not something the code itself checks — `run_dimension_5()` is a self-contained diagnostic tool that can be pointed at any condition's results whenever the question "where is this actually breaking?" needs an answer, whether or not Dimension 2 flagged it first.
+
+---
+
+## Dimension 6 (Few-Shot Ablation)
+
+> Code: `src/dimensions/dim6_ablation.py`, `run_dimension_6()`. Alur: guide Bagian 3, "Dimensi 6". Metric used: EX, at four different few-shot example counts.
+
+### The question this dimension actually answers
+
+Every dimension so far compares Baseline against GraphRAG. Dimension 6 steps outside that comparison entirely and asks a setup question that has to be answered *before* the other five dimensions can be run fairly: **how many worked examples should the model be shown before it answers a question?** The pipeline can hand the LLM 0, 1, 3, or 5 example question-and-SQL pairs as a reference before the real question — more examples generally cost more tokens, but don't necessarily buy proportionally more accuracy. Dimension 6 exists to pick one number and settle on it, so that Baseline and GraphRAG are later compared using the *same* number of examples rather than each getting whatever happened to look best for it individually.
+
+### Why this has to happen before the others, in principle
+
+If Baseline used 5 examples and GraphRAG used 1, and GraphRAG came out ahead, you'd have no way to know whether that's because of GraphRAG's actual retrieval strategy or just because it happened to get a different amount of help. Dimension 6 removes that confound by finding one `k` (the example count) that gets used everywhere else. In practice, this project built its metrics and dimension code before running this experiment — which is fine for building and testing the code, but the *real* `k_final` this dimension would settle on doesn't exist yet, because the underlying experiment (`ablation.py`) hasn't been run for real yet either (see `RESEARCHER_TODO.md`).
+
+### Reading the pattern: a step-by-step rule, not a single "best" number
+
+The guide is explicit about what *not* to do here: don't just look at the four EX numbers and pick whichever `k` happened to score highest. A `k` could score highest by a hair's width while costing far more tokens than the runner-up — that's not a meaningful win, just noise plus expense.
+
+Instead, this walks through `k` in order — 0, then 1, then 3, then 5 — asking one question at each step: *did moving up to this next `k` buy a meaningful amount of extra accuracy?* As long as the answer keeps being "yes," it keeps climbing. The moment a step's gain gets small — or EX actually drops — it stops right there and settles on the `k` it had *before* that weak step. It never resumes climbing after that, even if, by coincidence, a much larger `k` further out happens to spike back up — a fluke like that isn't worth chasing, and settling early is the whole point of "diminishing returns" in the first place.
+
+That single rule naturally produces all of the guide's named patterns as different outcomes of the same walk, rather than needing three separate special-case checks:
+
+- **Big jump early, then flat** → the walk climbs through the first big step, then stops at the next weak one. This is "diminishing returns" — the model mostly needed just that first example.
+- **Small steps the whole way, right from the start** → the very first step already fails to be a meaningful gain, so the walk never leaves `k=0`. This reads as "the system barely depends on example count at all" — and since more examples aren't buying anything, there's no reason to pay for them.
+- **A step where EX actually drops** → the walk stops right before the drop. This is "context overload" — past some point, more examples are actively confusing the model rather than helping it.
+- **Keeps climbing meaningfully all the way to `k=5`** → the walk never finds a weak step within the range tested. The guide doesn't name this case explicitly (its examples assume a plateau shows up somewhere in {0,1,3,5}), so this implementation labels it honestly as "still climbing" rather than forcing it into one of the three named patterns — the honest reading is that `k=5` is the best available answer *within what was tested*, not that the search is necessarily finished.
+
+### What counts as "a meaningful gain," and where that number comes from
+
+The guide never states a number for how big a step needs to be to count as "significant." Rather than invent an arbitrary one, this reuses **2 percentage points** — the same threshold the guide already fixes elsewhere, for how much `ΔQVT` has to move to count as a meaningful change in Dimension 4. Reusing an existing, guide-sanctioned number keeps the whole analysis internally consistent instead of introducing a second, unrelated notion of "significant" with no shared basis.
+
+### Where it fits in the bigger picture
+
+Dimension 6 is unusual among the six in being a **prerequisite**, not a downstream analysis — its output (`k_final`) is meant to feed back into how Dimensions 1–5 are run, not to be read alongside them as one more comparison. The guide's own execution-order note (Bagian 0.1) says as much: ideally this runs *first*, before any Baseline-vs-GraphRAG numbers are taken as final, even though — for this project specifically — the code for Dimensions 1–5 was written and tested before this experiment had real data to run on.
