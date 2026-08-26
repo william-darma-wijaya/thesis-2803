@@ -49,7 +49,8 @@ thesis-2803/
 ├── context/
 │   ├── EVALUATION_ANALYSIS_GUIDE.md — source of truth formula & alur berpikir untuk src/metrics/ dan src/dimensions/ (JANGAN ubah formula/threshold di situ tanpa konfirmasi peneliti)
 │   ├── IMPLEMENTATION_DECISIONS.md — catatan SEMUA keputusan peneliti saat implementasi (konflik guide vs kode/tooling resmi SPIDER, dan alasannya) — baca ini sebelum mengubah perilaku src/metrics/ yang terasa "aneh"
-│   ├── METRICS_EXPLAINED.md — companion EVALUATION_ANALYSIS_GUIDE.md dalam bahasa non-formula: apa arti tiap angka metrik, bukan cuma formulanya (SLA, Token Consumption, TEP sejauh ini — sisanya ditambah seiring progres)
+│   ├── METRICS_EXPLAINED.md — companion EVALUATION_ANALYSIS_GUIDE.md dalam bahasa non-formula: apa arti tiap angka METRIK, bukan cuma formulanya (SLA, Token Consumption, TEP, QVT sejauh ini — ESM/EX/CM ditambah seiring progres)
+│   ├── DIMENSIONS_EXPLAINED.md — satu level di atas METRICS_EXPLAINED.md: apa yang disimpulkan satu DIMENSI (kombinasi beberapa metrik) yang tidak kelihatan dari satu metrik saja (Dimensi 1 sejauh ini — sisanya ditambah seiring progres)
 │   └── RESEARCHER_TODO.md — checklist hal yang jadi tanggung jawab PENELITI (bukan Claude Code): data yang harus disiapkan/dikumpulkan manual, eksperimen yang harus dijalankan (butuh GPU/Kaggle), keputusan yang perlu didiskusikan dulu. **Baca file ini setiap kali peneliti bertanya "hal apa yang belum kita siapkan?"** atau pertanyaan sejenis soal kesiapan/prasyarat
 ├── notebooks/               — EDA notebooks + notebooks/compiled/ (Kaggle-ready compiled notebook)
 │   └── eval_pipeline.ipynb  — notebook GraphRAG vs Baseline side-by-side (ESM/EX via Spider eval + schema recall/precision). Ditulis SEBELUM refactor foldering — import & path masih flat layout (`from config import ...`, `evaluation.py` di cwd), belum disesuaikan ke `src.*`/`external/spider_eval/`
