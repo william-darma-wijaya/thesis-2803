@@ -1,6 +1,6 @@
 # Dimensions — Explained Simply
 
-> Companion to `EVALUATION_ANALYSIS_GUIDE.md` Bagian 3 and to `context/METRICS_EXPLAINED.md` — one level up from that file. `METRICS_EXPLAINED.md` explains what a single metric's *number* means (SLA, Token Consumption, TEP, QVT). This file explains what a whole **dimension** — a specific *combination* of those metrics, assembled to answer one research question — tells you that no single metric alone would. Currently covers: **Dimension 1, Dimension 2, Dimension 3**. The rest (Dimensions 4–6) will be added here as we get to each one.
+> Companion to `EVALUATION_ANALYSIS_GUIDE.md` Bagian 3 and to `context/METRICS_EXPLAINED.md` — one level up from that file. `METRICS_EXPLAINED.md` explains what a single metric's *number* means (SLA, Token Consumption, TEP, QVT). This file explains what a whole **dimension** — a specific *combination* of those metrics, assembled to answer one research question — tells you that no single metric alone would. Currently covers: **Dimension 1, Dimension 2, Dimension 3, Dimension 5**. The rest (Dimensions 4, 6) will be added here as we get to each one.
 >
 > Every dimension in this project is 100% custom orchestration code (`src/dimensions/`) — it doesn't touch SPIDER's official tooling directly, it just combines numbers that `src/metrics/` already produced (and those modules' own 🔧/✍️ attribution is explained in `METRICS_EXPLAINED.md`, not repeated here).
 
@@ -127,3 +127,42 @@ Unlike Dimensions 1 and 2, this one doesn't split its numbers by Easy/Medium/Har
 ### Where it fits in the bigger picture
 
 Dimension 3 hands its finding — which specific clause degraded the most, and by how much — forward as diagnostic input to **Dimension 5** (Bottleneck Analysis): a `WHERE`-heavy failure pattern points toward a different root cause (detail loss during generation) than a `FROM`/`JOIN`-heavy one (relational confusion, possibly a retrieval problem). It's the piece that turns "something got worse" (Dimension 2) into "here's specifically what got worse," which is what makes the bottleneck diagnosis in Dimension 5 possible to actually act on.
+
+---
+
+## Dimension 5 (Bottleneck: Retrieval vs. Generation)
+
+> Code: `src/dimensions/dim5_bottleneck.py`, `run_dimension_5()`. Alur & tabel diagnostik: guide Bagian 3, "Dimensi 5". Metrics used: SLA (retrieval quality) and EX (generation quality) — both explained individually in `context/METRICS_EXPLAINED.md`.
+
+### The question this dimension actually answers
+
+Dimensions 2 and 3 tell you *that* something broke and *which part of the SQL* broke. Dimension 5 asks a different, earlier question: **did the pipeline break because it fetched the wrong information, or because it had the right information and still wrote the wrong SQL?** That's the difference between a retrieval problem and a generation problem — and they call for completely different fixes. If retrieval is the problem, you'd tune the schema-linking step. If generation is the problem, retrieval is already doing its job and the fix belongs somewhere in the LLM's prompting or the model itself.
+
+### Why this dimension is shaped differently from the others
+
+Dimensions 1–3 are all **comparisons** — Baseline vs. GraphRAG, side by side. Dimension 5 is a **diagnosis of one pipeline at a time**. You point it at a single condition's results (typically GraphRAG, since that's the system actually being investigated) and it tells you where *that* pipeline's weak point is. Nothing stops you from running it on Baseline too, for comparison, but the diagnosis itself doesn't require a Baseline number to make sense — a pipeline can be unhealthy in absolute terms, independent of how the other one is doing.
+
+### Reading the 2×2 diagnostic grid
+
+Two health checks feed into it: **SLA F1** (did retrieval find the right schema? threshold: 80%) and **EX** (did the final SQL actually work? threshold: 65%). Crossing them gives four possible stories:
+
+- **Both healthy** → the pipeline is working end to end.
+- **Retrieval healthy, EX unhealthy** → **generation is the bottleneck.** The model was handed the right schema and still couldn't write correct SQL — the problem is downstream of retrieval.
+- **Retrieval unhealthy, EX unhealthy** → **retrieval is the bottleneck.** The model never had a fair shot — if it's working from a wrong or incomplete schema, blaming its SQL-writing ability would be missing the actual cause.
+- **Retrieval unhealthy, EX healthy** → an unusual case — the guide's own read is that this is probably a run full of simple questions the model could still answer correctly even from partial schema, or it got lucky. Worth a second look if it comes up, rather than treated as a normal outcome.
+
+### Why SLA gets computed at *both* zoom levels, with two separate diagnoses
+
+This is the one place in the whole analysis where a single metric — SLA — gets *two* independent numbers (table-level and column-level, see `METRICS_EXPLAINED.md`), and both get run through the **full** diagnostic grid separately, rather than picking one to decide the "official" answer.
+
+Why that matters: it's entirely possible for a pipeline to find the right *table* every time, while still missing most of the specific *columns* it actually needs from that table — table-level SLA would call that healthy, column-level SLA would call it a retrieval bottleneck. Those aren't two measurements of the same fact reported at different precisions — they're two genuinely different claims, and collapsing them into one number by picking a side would quietly throw away real information about the shape of the failure.
+
+A concrete version of this actually surfaces in testing: a pipeline that always retrieves the correct table, but only ever grabs one of the three columns actually needed from it, scores a perfect 100% at the table level ("pipeline sehat") while scoring only 50% at the column level ("jarang terjadi, kemungkinan query sederhana") — two different diagnoses, from the same run, both correct at their own level of resolution. When this happens, the result plainly shows both diagnoses side by side rather than forcing a single verdict — the guide doesn't say which level should win when they disagree, so nothing here invents an answer it doesn't have.
+
+### When SLA is unhealthy: recall matters more than precision
+
+If SLA F1 falls under 80%, the diagnosis goes one level deeper, the same way it does in `METRICS_EXPLAINED.md`'s SLA section: **low recall is the more serious problem.** Missing a column you actually needed (low recall) means the model is working with an incomplete picture and structurally can't write the right SQL. Grabbing some extra unnecessary columns (low precision) is untidy but survivable — the model usually still has everything it needs, just with some noise mixed in.
+
+### Where it fits in the bigger picture
+
+The guide frames Dimension 5 as conditional — worth running specifically when Dimension 2 turns up its worst-case outcome (both ESM and EX down). That trigger is a judgment call for whoever is running the analysis, not something the code itself checks — `run_dimension_5()` is a self-contained diagnostic tool that can be pointed at any condition's results whenever the question "where is this actually breaking?" needs an answer, whether or not Dimension 2 flagged it first.

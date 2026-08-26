@@ -194,6 +194,24 @@ Penerapan beda per jalur, karena constraint arsitektur beda:
 
 ---
 
+## 14. Dimensi 5: signature raw_logs + satu kondisi, SLA dua level dengan diagnosis independen
+
+**Konflik/ambiguitas (a) — signature:** stub asli `run_dimension_5(f1_score_sla: float, ex_score: float, precision: float, recall: float)` menerima angka yang SUDAH teragregasi, beda dari pola Dimensi 1-3 (`run_dimension_N(baseline_logs, graphrag_logs)` — agregasi dilakukan DI DALAM fungsi, dari raw_logs mentah).
+
+**Keputusan:** ubah signature jadi `run_dimension_5(logs: List[dict], condition_label: str = "GraphRAG") -> dict` — raw_logs mentah untuk SATU kondisi (bukan sepasang baseline+graphrag seperti Dimensi 1-3), agregasi SLA & EX dilakukan di dalam fungsi.
+
+**Alasan:** guide sendiri menulis Dimensi 5 sebagai diagnostik untuk "kondisi yang dianalisis" (satu kondisi, bukan perbandingan berpasangan seperti Dimensi 1-3) — beda sifat dari dimensi lain, jadi signature-nya secara alami beda juga. Konsisten dengan pola raw_logs-in yang sudah dipakai Dimensi 1-3, mengurangi kerja manual pre-agregasi yang nanti harus dilakukan `run_all_dimensions.py` (masih belum diimplementasi).
+
+**Konflik/ambiguitas (b) — level SLA mana yang dipakai:** guide cuma menulis "F1-Score SLA" tanpa spesifik level (table atau column) — beda dari Dimensi 1.1 sendiri yang eksplisit membedakan dua level ini sebagai granularitas terpisah. Threshold 80% berlaku sama untuk berapa pun level yang dipilih, tapi tingkat keketatan (seberapa sering trigger) bisa sangat beda antara table-level (longgar) vs column-level (ketat).
+
+**Keputusan:** hitung KEDUANYA, jalankan klasifikasi 4-kuadran PENUH (termasuk breakdown precision/recall) secara independen untuk masing-masing level — bukan cuma satu level yang dipakai untuk keputusan akhir. Kalau kedua level menghasilkan diagnosis yang beda, keduanya ditampilkan apa adanya + flag `levels_agree=False`, TIDAK ada aturan resolusi yang dikarang untuk memutuskan mana yang "benar".
+
+**Alasan:** peneliti secara eksplisit meminta dua diagnosis independen (bukan satu level mendominasi), setelah didiskusikan opsi alternatif ("column-level saja yang menentukan, table-level cuma info tambahan"). Guide tidak mendefinisikan cara resolusi kalau dua level tidak sepakat — memaksakan resolusi (mis. "pakai yang lebih ketat") akan jadi aturan baru yang tidak ada dasarnya di guide (melanggar aturan anti-halusinasi Bagian 4 poin 1). Diverifikasi lewat sanity test: skenario di mana GraphRAG dapat tabel yang benar tapi cuma 1 dari 3 kolom yang dibutuhkan menghasilkan table-level F1=100% ("pipeline sehat") vs column-level F1=50% ("jarang terjadi, kemungkinan query sederhana") — dua diagnosis yang sungguh berbeda untuk data yang sama persis, membuktikan skenario ini bukan cuma teoretis.
+
+**Lokasi implementasi:** `src/dimensions/dim5_bottleneck.py` (`_diagnose_level()` dipanggil dua kali dari `run_dimension_5()`, sekali per level, `levels_agree` dihitung dari perbandingan string diagnosis).
+
+---
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER
