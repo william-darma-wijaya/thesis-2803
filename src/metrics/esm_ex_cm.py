@@ -319,7 +319,14 @@ def evaluate_single_query(
         )
         return QueryEvalResult(
             esm=0, ex=0,
-            cm_per_clause={clause: 0 for clause in CLAUSES},
+            # "union_all" TETAP None di sini, bukan 0 -- lihat docstring
+            # aggregate_cm(): union_all SELALU None (parser resmi tidak bisa
+            # bedakan UNION vs UNION ALL, bukan "biasanya gagal"). Menulis 0 di
+            # fallback total-failure ini akan mencemari agregat union_all
+            # dengan query yang gagal karena alasan LAIN sama sekali (bukan
+            # soal union_all), keputusan didokumentasikan di
+            # context/IMPLEMENTATION_DECISIONS.md poin 13.
+            cm_per_clause={clause: (None if clause == "union_all" else 0) for clause in CLAUSES},
             difficulty="unknown",
         )
 

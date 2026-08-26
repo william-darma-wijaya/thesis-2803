@@ -180,6 +180,20 @@ Penerapan beda per jalur, karena constraint arsitektur beda:
 
 ---
 
+## 13. `union_all` di exception fallback: tetap `None`, bukan `0` (bug fix)
+
+**Konflik/ambiguitas:** `aggregate_cm()`'s docstring dan jalur evaluasi normal (`_evaluate_single_query_inner()`, baris 278) konsisten: `cm_per_clause["union_all"]` SELALU `None` — parser resmi SPIDER tidak bisa membedakan `UNION` dari `UNION ALL` secara struktural (poin 8 di atas), jadi tidak ada satupun jalur kode yang bisa menghasilkan angka 0/1 yang valid untuknya. Tapi outer exception handler di `evaluate_single_query()` (fallback untuk query yang gagal total dievaluasi) sebelumnya menulis `cm_per_clause={clause: 0 for clause in CLAUSES}` — termasuk `union_all: 0`, kontradiksi langsung dengan kontrak "selalu None" itu.
+
+**Ditemukan saat:** investigasi dependency `src/dimensions/dim3_component.py` (2026-08-26) — Dimensi 3 secara spesifik mencari "klausa dengan penurunan skor terbesar", jadi kontaminasi ini bukan cuma soal kerapian data tapi berpotensi langsung menyesatkan kesimpulan Dimensi 3 kalau ada cukup banyak query yang gagal total dievaluasi karena alasan lain (bukan soal `UNION ALL`).
+
+**Keputusan (2026-08-26):** fallback exception sekarang menulis `cm_per_clause={clause: (None if clause == "union_all" else 0) for clause in CLAUSES}` — `union_all` tetap `None` bahkan di jalur kegagalan total, klausa lain tetap `0` (itu tetap valid: query yang gagal total memang gagal juga di klausa-klausa itu).
+
+**Alasan:** `None` dan `0` punya makna yang beda secara fundamental di sini — `0` berarti "sudah dicek, salah", `None` berarti "tidak bisa dicek sama sekali, oleh siapapun, kapanpun". Menulis `0` untuk `union_all` di fallback pura-pura mengukur sesuatu yang sebenarnya tidak pernah benar-benar diukur, dan karena `aggregate_cm()` cuma merata-ratakan nilai non-`None`, tiap query yang gagal total (karena alasan APAPUN, tidak ada hubungannya dengan `UNION ALL`) diam-diam menurunkan skor `union_all` — mengubahnya jadi proxy "berapa banyak query yang crash", bukan indikator kebenaran `UNION ALL`.
+
+**Lokasi implementasi:** `src/metrics/esm_ex_cm.py`'s `evaluate_single_query()`, exception handler (sebelumnya baris ~320-324). Diverifikasi lewat sanity check: `aggregate_cm()` atas campuran hasil normal + hasil fallback tetap melaporkan `union_all: None`, tidak tercemar oleh entri fallback.
+
+---
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER

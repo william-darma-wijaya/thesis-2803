@@ -1,6 +1,6 @@
 # Dimensions — Explained Simply
 
-> Companion to `EVALUATION_ANALYSIS_GUIDE.md` Bagian 3 and to `context/METRICS_EXPLAINED.md` — one level up from that file. `METRICS_EXPLAINED.md` explains what a single metric's *number* means (SLA, Token Consumption, TEP, QVT). This file explains what a whole **dimension** — a specific *combination* of those metrics, assembled to answer one research question — tells you that no single metric alone would. Currently covers: **Dimension 1, Dimension 2**. The rest (Dimensions 3–6) will be added here as we get to each one.
+> Companion to `EVALUATION_ANALYSIS_GUIDE.md` Bagian 3 and to `context/METRICS_EXPLAINED.md` — one level up from that file. `METRICS_EXPLAINED.md` explains what a single metric's *number* means (SLA, Token Consumption, TEP, QVT). This file explains what a whole **dimension** — a specific *combination* of those metrics, assembled to answer one research question — tells you that no single metric alone would. Currently covers: **Dimension 1, Dimension 2, Dimension 3**. The rest (Dimensions 4–6) will be added here as we get to each one.
 >
 > Every dimension in this project is 100% custom orchestration code (`src/dimensions/`) — it doesn't touch SPIDER's official tooling directly, it just combines numbers that `src/metrics/` already produced (and those modules' own 🔧/✍️ attribution is explained in `METRICS_EXPLAINED.md`, not repeated here).
 
@@ -90,3 +90,40 @@ One edge case worth knowing about: if EX and ESM's deltas come out to *exactly* 
 ### Where it fits in the bigger picture
 
 Dimension 2 is the natural follow-up to Dimension 1 — if the token/accuracy trade-off in Dimension 1 looked concerning, Dimension 2 tells you whether that's a structural problem, a literal-value problem, or nothing to worry about. And its worst-case outcome (both down) is the direct trigger for Dimension 5 — the two dimensions are meant to be read as a pipeline, not independently.
+
+---
+
+## Dimension 3 (SQL Components)
+
+> Code: `src/dimensions/dim3_component.py`, `run_dimension_3()`. Alur: guide Bagian 3, "Dimensi 3". Metric used: CM (Component Match) — explained individually in `context/METRICS_EXPLAINED.md`.
+
+### The question this dimension actually answers
+
+Dimension 2 tells you *whether* GraphRAG's SQL got structurally worse, in one combined verdict. Dimension 3 answers the natural next question: **worse at *what*, specifically?** A SQL query has several moving parts — `SELECT`, `WHERE`, `JOIN`, `GROUP BY`, and so on — and a model can be rock-solid at some of them while quietly falling apart at others. Averaging everything into one ESM number hides exactly which part is the weak link. Dimension 3 breaks it back apart, clause by clause, so the weak link is visible.
+
+### Why this isn't just Dimension 2 again
+
+Think of ESM (Dimension 2) as a pass/fail exam grade, and CM (this dimension) as the per-question breakdown behind that grade. Two systems can both score "70% ESM" for completely different reasons — one might be acing `SELECT`/`FROM` and consistently fumbling `WHERE`; another might be the opposite. Dimension 2 alone can't tell those two failure modes apart. Dimension 3 exists specifically to make that distinction visible, because *where* the SQL breaks down points to a different root cause than *whether* it broke down.
+
+### Reading the table: which clause dropped the most
+
+The core output is a simple side-by-side table — Baseline vs. GraphRAG, one row per clause — with the *delta* (GraphRAG minus Baseline) called out for each. The one clause with the single biggest drop gets a plain-language note attached, but only for two specific clauses the guide names explicitly:
+
+- **Biggest drop in `WHERE`** → read as: the pruned context is hurting the model's ability to filter correctly — it's losing track of the specific conditions a question is asking for.
+- **Biggest drop in `FROM`/`JOIN`** → read as: the model is losing track of *how tables relate to each other* — a more structural kind of confusion, since it's about the shape of the query, not just a filter detail.
+
+If the biggest drop lands on any of the other nine clauses (`SELECT`, `GROUP BY`, `HAVING`, `ORDER BY`, etc.), the implementation deliberately does **not** invent a parallel explanation for it — it just reports the number. The guide only hands down these two specific interpretations and explicitly warns against over-generalizing beyond them, so making up a plausible-sounding story for, say, a `HAVING` drop would be exactly the kind of guessing the guide is trying to prevent.
+
+### `union_all`: a column that's honestly blank, not a column that failed
+
+One clause, `union_all`, never gets a real score at all — it always shows `N/A`. This isn't a bug or a gap in the data; it's an honest limitation being reported honestly. SPIDER's official SQL parser has no way to tell `UNION` apart from `UNION ALL` in the text it reads — both parse into the exact same internal shape — so there is no way, ever, for any query, to compute whether `union_all` "matched." Showing `N/A` says "we genuinely can't check this one," which is a very different and much more honest statement than showing `0%`, which would say "we checked, and it consistently failed."
+
+That distinction turned out to matter in practice, not just in theory. While building this dimension, a real bug was found and fixed: when a query failed so badly it couldn't be evaluated *at all* (a total crash, unrelated to `UNION ALL` specifically), the fallback code was accidentally writing `0` for `union_all` instead of leaving it blank. Since `union_all`'s score is only ever averaged from non-blank entries, every one of those crashed queries — regardless of why they crashed — was quietly dragging `union_all`'s reported number down. In effect, `union_all`'s score had accidentally become a measurement of "how many queries failed for unrelated reasons," dressed up as if it meant something about `UNION ALL` correctness. That's now fixed (`context/IMPLEMENTATION_DECISIONS.md` poin 13) — a crashed query now correctly still shows `union_all` as unmeasurable, not as a fabricated failure.
+
+### Why there's no per-difficulty breakdown here
+
+Unlike Dimensions 1 and 2, this one doesn't split its numbers by Easy/Medium/Hard/Extra — that's a deliberate reading of the guide, which asks for the per-clause breakdown "for B and G" without the "(agregat + per difficulty)" qualifier it explicitly attaches to the other dimensions. The per-clause split *is* the granularity this dimension is for; stacking a difficulty split on top wasn't something the guide asked for here.
+
+### Where it fits in the bigger picture
+
+Dimension 3 hands its finding — which specific clause degraded the most, and by how much — forward as diagnostic input to **Dimension 5** (Bottleneck Analysis): a `WHERE`-heavy failure pattern points toward a different root cause (detail loss during generation) than a `FROM`/`JOIN`-heavy one (relational confusion, possibly a retrieval problem). It's the piece that turns "something got worse" (Dimension 2) into "here's specifically what got worse," which is what makes the bottleneck diagnosis in Dimension 5 possible to actually act on.
