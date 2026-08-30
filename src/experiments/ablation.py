@@ -44,6 +44,7 @@ from src.retrieval.retrieval import (
     trace_schema_paths,
 )
 from src.core.schema import build_schema_graph, load_spider_schema
+from src.utils.sql_normalize import normalize_sql_file_for_parsing
 
 logging.basicConfig(
     level=logging.INFO,
@@ -291,20 +292,45 @@ def _run_ablation_evals(results: list[AblationResult], cfg: PipelineConfig) -> N
         )
         return
 
-    base_args = [
-        "--gold",  str(cfg.gold_sql),
-        "--db",    str(cfg.db_dir),
-        "--table", str(cfg.tables_json),
-    ]
+    # process_sql.py resmi SPIDER cuma mengenali join-type keyword 'join'
+    # polos -- predicted/gold SQL yang pakai INNER/CROSS/LEFT/RIGHT/FULL JOIN
+    # bikin get_sql() crash di dalam evaluation.py CLI ini juga. Normalize
+    # dulu sebelum dioper ke CLI -- lihat src/utils/sql_normalize.py dan
+    # context/IMPLEMENTATION_DECISIONS.md poin 11.
+    #
+    # Gold file sama untuk semua run (satu dev set), jadi dinormalisasi
+    # SEKALI per etype di luar loop, bukan diulang per (mode, k). --etype
+    # match aman dinormalisasi PENUH (tidak pernah mengeksekusi SQL apapun).
+    # --etype exec WAJIB cuma INNER/CROSS JOIN (execution_safe_only=True) --
+    # LEFT/RIGHT/FULL JOIN karena itu tetap gagal parse di jalur exec ini,
+    # known residual limitation (lihat IMPLEMENTATION_DECISIONS.md poin 11).
+    eval_dir = cfg.predictions_file.parent
+    normalized_gold = {
+        "match": normalize_sql_file_for_parsing(
+            cfg.gold_sql, eval_dir / "_normalized_match_gold.txt",
+            has_db_id_suffix=True, execution_safe_only=False,
+        ),
+        "exec": normalize_sql_file_for_parsing(
+            cfg.gold_sql, eval_dir / "_normalized_exec_gold.txt",
+            has_db_id_suffix=True, execution_safe_only=True,
+        ),
+    }
+
+    base_args = ["--db", str(cfg.db_dir), "--table", str(cfg.tables_json)]
     for r in sorted(results, key=lambda x: (x.mode, x.k)):
         for etype in ["match", "exec"]:
             label = "Exact Match" if etype == "match" else "Execution Accuracy"
             print("\n" + "=" * 70)
             print(f"  SPIDER EVAL — mode={r.mode}  k={r.k}  {label}")
             print("=" * 70)
+            normalized_pred = normalize_sql_file_for_parsing(
+                r.predictions_file,
+                eval_dir / f"_normalized_{etype}_{r.predictions_file.stem}.txt",
+                has_db_id_suffix=False, execution_safe_only=(etype == "exec"),
+            )
             subprocess.run(
                 ["python", "external/spider_eval/evaluation.py"] + base_args +
-                ["--pred", str(r.predictions_file), "--etype", etype],
+                ["--gold", str(normalized_gold[etype]), "--pred", str(normalized_pred), "--etype", etype],
                 check=False,
             )
 

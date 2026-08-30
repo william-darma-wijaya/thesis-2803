@@ -132,10 +132,133 @@ Format tiap entri: **Konflik/ambiguitas** → **Keputusan** → **Alasan** → *
 
 **Alasan:**
 1. QVT mengukur *stabilitas jawaban fungsional* terhadap parafrase (guide 1.6 poin (a): "apakah model tetap menghasilkan SQL yang benar" secara hasil, bukan secara struktur persis) — EX cocok dengan tujuan ini, ESM tidak (ESM sensitif ke struktur, bukan hasil).
-2. Open item A di file ini (parser resmi SPIDER tidak bisa parse `LEFT JOIN`/`RIGHT JOIN` — `KeyError: 'left'`) akan menghantam ESM/CM lebih parah khusus untuk QVT: parafrase pertanyaan (mis. "siswa yang tidak punya nilai" vs "siswa dengan nilai") kemungkinan besar justru MEMICU LLM memilih idiom SQL berbeda seperti `LEFT JOIN` — variasi yang secara fungsional benar akan otomatis gagal ESM/CM murni karena parser-nya crash, bukan karena SQL-nya salah. EX (`eval_exec_match()`) tidak butuh parsing sama sekali (langsung eksekusi SQLite), jadi tidak kena isu ini.
+2. Open item A di file ini (parser resmi SPIDER tidak bisa parse `LEFT JOIN`/`RIGHT JOIN` — `KeyError: 'left'`) akan menghantam ESM/CM lebih parah khusus untuk QVT: parafrase pertanyaan (mis. "siswa yang tidak punya nilai" vs "siswa dengan nilai") kemungkinan besar justru MEMICU LLM memilih idiom SQL berbeda seperti `LEFT JOIN` — variasi yang secara fungsional benar akan otomatis gagal ESM/CM murni karena parser-nya crash, bukan karena SQL-nya salah.
+   **⚠️ Koreksi (2026-08-25, lihat poin 11):** klaim "EX tidak butuh parsing sama sekali, jadi tidak kena isu ini" di draf keputusan ini SALAH untuk cara `eval_exec_match()` dipanggil di `esm_ex_cm.py` — fungsi itu memang mengeksekusi string mentah, TAPI juga memakai `p_sql`/`g_sql` (dict hasil parse) untuk membangun pemetaan kolom hasil eksekusi (`pred['select'][1]`). Jadi EX **juga** ikut rusak oleh parser gap ini sebelum poin 11 di-implementasi (`p_val_units` jadi kosong saat parse gagal → perbandingan hasil eksekusi selalu `False`). Alasan #1 di atas (EX cocok dengan tujuan QVT) tetap berlaku dan keputusan EX-untuk-QVT tidak berubah — tapi setelah poin 11, EX untuk QVT (jalur in-process lewat `evaluate_single_query()`) juga otomatis mendapat fix parsingnya, bukan cuma "kebetulan tidak kena bug".
 3. Trade-off yang diterima: EX mewarisi isu order-sensitivity yang sudah didokumentasikan di poin 5 di atas — tapi itu bukan risiko baru, sudah accepted risk untuk EX di seluruh skripsi ini.
 
 **Lokasi implementasi:** `src/metrics/qvt.py` (docstring modul menegaskan kontrak data `"is_correct"` = hasil EX; `compute_qvt_per_query()`/`aggregate_qvt()` sendiri cuma mengonsumsi field itu, tidak menghitung EX/ESM sendiri). **Belum ada** kode yang benar-benar mengisi `data/qvt_variations/*.json` (generator/runner untuk itu belum ditulis) — sesi berikutnya yang membangun generator itu WAJIB memanggil `src.metrics.esm_ex_cm.evaluate_single_query()` dan mengambil field `.ex`, bukan `.esm`, supaya konsisten dengan keputusan ini.
+
+---
+
+## 11. Parser JOIN-keyword gap (open item A): normalisasi teks sebelum parsing, dua tier untuk jalur in-process vs subprocess
+
+**Konflik/ambiguitas:** menyelesaikan open item A (di bawah). `process_sql.py`'s `JOIN_KEYWORDS = ('join', 'on', 'as')` (baris 32) cuma mengenali token `join` polos. Diverifikasi langsung menjalankan `get_sql()`: **`INNER JOIN`, `CROSS JOIN`, `LEFT [OUTER] JOIN`, `RIGHT [OUTER] JOIN`, `FULL [OUTER] JOIN` SEMUA crash** (`KeyError: 'inner'`/`'cross'`/`'left'`/`'right'`/`'full'`) — bukan cuma `LEFT`/`RIGHT` seperti dugaan awal open item A, `INNER JOIN` (join type paling umum di SQL biasa) juga ikut crash.
+
+**Temuan kunci yang mengubah pendekatan:** struktur hasil parse `'from': {'table_units': [...], 'conds': condition}` (`process_sql.py` baris 15) **tidak pernah merekam join type sama sekali**. Jadi ESM/CM tidak kehilangan informasi apapun kalau join-type keyword dinormalisasi jadi `JOIN` polos SEBELUM di-parse — normalisasi teks di titik ini aman untuk *parsing*, beda dengan menormalisasi teks yang akan *dieksekusi* (itu tetap tidak aman untuk `LEFT`/`RIGHT`/`FULL JOIN`, karena join-join itu mempertahankan baris ber-`NULL` yang benar-benar mengubah result set — poin ini konsisten dengan catatan teknis open item A yang lama).
+
+**Koreksi:** klaim lama "EX biasanya ikut 0" di open item A ternyata bukan cuma "biasanya" — **EX SELALU ikut gagal** untuk join type yang crash, karena `eval_exec_match()` (`evaluation.py:614`) memakai `pred['select'][1]` (dict hasil parse) untuk membangun pemetaan kolom hasil eksekusi; kalau parse gagal dan jatuh ke `_empty_sql()` (`"select": [False, []]`), pemetaan itu kosong dan perbandingan hasil eksekusi selalu `False`. Fix di bawah otomatis memulihkan EX juga, bukan cuma ESM/CM.
+
+**Keputusan (2026-08-25):** buat modul baru `src/utils/sql_normalize.py` sebagai **satu-satunya sumber kebenaran** untuk normalisasi ini — `normalize_join_keywords_for_parsing(sql, execution_safe_only)` untuk string langsung, `normalize_sql_file_for_parsing(...)` untuk file (dipakai jalur subprocess). Dua tier, BUKAN satu normalisasi buta untuk semua kasus:
+- `execution_safe_only=True` → cuma `INNER`/`CROSS JOIN` dinormalisasi (100% setara hasil eksekusi, aman dipakai bahkan di teks yang benar-benar akan dieksekusi).
+- `execution_safe_only=False` (default) → SEMUA join type dinormalisasi. Hanya aman kalau hasilnya CUMA dipakai untuk parsing, TIDAK PERNAH untuk teks yang akan dieksekusi.
+
+Penerapan beda per jalur, karena constraint arsitektur beda:
+- **Jalur in-process** (`src/metrics/esm_ex_cm.py`'s `_evaluate_single_query_inner()`) — Python call langsung, jadi raw-string-untuk-eksekusi vs normalized-string-untuk-parsing bisa dipisah bersih sebagai dua argumen berbeda. `get_sql()` di baris ~195/199 menerima salinan ternormalisasi PENUH (`execution_safe_only=False`); `eval_exec_match()` di baris ~251 TETAP menerima `predicted_sql`/`gold_sql` mentah, tidak diubah sama sekali. **Fix penuh, semua join type, termasuk EX.**
+- **Jalur subprocess** (`pipeline.py`'s `run_official_evaluation()`, `ablation.py`'s `_run_ablation_evals()`, notebook `eval_pipeline.ipynb` Bagian 10) — `evaluation.py` CLI resmi membaca SATU file `--pred`/`--gold` dan memakai string yang SAMA untuk parsing MAUPUN eksekusi (dikonfirmasi `evaluation.py`'s `evaluate()`, baris ~501-547: `p_str = p[0]` di-`get_sql()` DAN dioper mentah ke `eval_exec_match(db, p_str, ...)`) — tidak ada cara memisahkan keduanya tanpa mengubah script resmi. Karena itu:
+  - `--etype match` (dikonfirmasi baris ~546: `eval_exec_match` cuma dipanggil kalau `etype in ["all","exec"]`, jadi `match` TIDAK PERNAH mengeksekusi apapun) → file dinormalisasi PENUH, aman.
+  - `--etype exec` → file HANYA dinormalisasi `execution_safe_only=True` (INNER/CROSS saja). **`LEFT`/`RIGHT`/`FULL JOIN` TETAP gagal parse di jalur subprocess-exec ini** — residual limitation yang diterima, bukan bug baru. Kalau nanti mau di-fix juga, satu-satunya cara adalah patch `external/spider_eval/process_sql.py` langsung, yang melanggar konvensi "kode resmi apa adanya" — **belum diputuskan, tanyakan ke peneliti dulu** kalau ini jadi prioritas.
+
+**Alasan:** kode resmi SPIDER (`external/spider_eval/`) tetap byte-identical/tidak disentuh (konvensi atribusi di `CLAUDE.md`) — normalisasi selalu terjadi di teks INPUT sebelum masuk ke kode resmi, bukan modifikasi kode resminya. Satu fungsi regex dipakai semua call site (diminta peneliti) supaya tidak ada logic normalisasi yang duplikat/drift antar file.
+
+**Lokasi implementasi:** `src/utils/sql_normalize.py` (baru), `src/metrics/esm_ex_cm.py` (`_evaluate_single_query_inner()`, baris ~195-204), `src/experiments/pipeline.py` (`run_official_evaluation()`), `src/experiments/ablation.py` (`_run_ablation_evals()`), `notebooks/eval_pipeline.ipynb` Bagian 10 (`run_spider_eval()`, cell markdown diupdate dengan catatan residual limitation).
+
+---
+
+## 12. Dimensi 2 baris ke-4 ("EX rendah, ESM rendah"): dibaca directional (turun/turun), bukan threshold absolut baru
+
+**Konflik/ambiguitas:** guide Bagian 3 Dimensi 2 mensyaratkan 4 kombinasi klasifikasi ESM×EX (WAJIB, "tabel ini persis"). Tiga baris pertama jelas *directional* — "naik"/"turun" berarti GraphRAG dibanding Baseline (delta). Baris ke-4 ditulis "EX rendah, ESM rendah" — kata "rendah" (bukan "turun"), tanpa angka threshold (beda dari Dimensi 5 yang eksplisit 80%/65%), dan tanpa kejelasan itu nilai absolut milik siapa (GraphRAG? Baseline? keduanya?). Dibaca literal-directional, 3 baris pertama cuma menutup 3 dari 4 kemungkinan arah delta (naik/turun, turun/naik, naik/naik) — kuadran ke-4 (turun/turun) tidak eksplisit ada di tabel manapun kecuali baris ke-4 ini dimaksudkan untuk itu.
+
+**Keputusan (2026-08-26):** baris ke-4 dibaca directional juga — **EX turun DAN ESM turun** (melengkapi kuadran ke-4, pasangan alami baris "EX naik, ESM naik" = "kondisi paling ideal"). TIDAK memperkenalkan threshold absolut baru untuk "rendah".
+
+**Alasan:** membaca semua 4 baris dengan semantik yang sama (directional) menghasilkan klasifikasi 4-kuadran yang lengkap dan internally consistent tanpa perlu mengarang angka threshold baru yang tidak ada di manapun di guide untuk tabel spesifik ini (melanggar aturan anti-halusinasi Bagian 4 poin 1 kalau dipaksakan). Interpretasi threshold-absolut juga berisiko tumpang-tindih dengan baris 1-3 (mis. EX naik tapi nilai absolutnya tetap rendah), yang tidak dijelaskan guide cara resolusinya.
+
+**Catatan implementasi:** label yang ditampilkan ke pengguna tetap teks literal guide, `"EX rendah, ESM rendah"` — bukan diganti jadi `"EX turun, ESM turun"` — supaya tetap traceable ke tabel resmi proposal, walau logika pemicunya (kode) memakai perbandingan delta turun/turun.
+
+**Edge case ditemukan saat implementasi (belum ada di guide):** kalau salah satu delta persis 0 (EX naik tapi ESM sama sekali tidak berubah, dst.), tidak ada satupun dari 4 kombinasi resmi yang cocok. Diputuskan: laporkan sebagai "tidak terklasifikasi" dengan delta mentahnya ditampilkan, BUKAN dipaksakan ke salah satu dari 4 kategori resmi.
+
+**Lokasi implementasi:** `src/dimensions/dim2_structure.py`'s `_classify()`. Juga di kesempatan yang sama, `DIFFICULTY_LEVELS`/grouping-per-difficulty diextract dari `dim1_efficiency.py` (yang sebelumnya sengaja lokal, lihat catatan di file itu) ke `src/utils/raw_logs.py` (`group_by_difficulty()`) karena `dim2_structure.py` butuh pola identik — sesuai rencana "extract saat pemanggil kedua muncul" yang sudah dicatat di `dim1_efficiency.py` sebelumnya.
+
+---
+
+## 13. `union_all` di exception fallback: tetap `None`, bukan `0` (bug fix)
+
+**Konflik/ambiguitas:** `aggregate_cm()`'s docstring dan jalur evaluasi normal (`_evaluate_single_query_inner()`, baris 278) konsisten: `cm_per_clause["union_all"]` SELALU `None` — parser resmi SPIDER tidak bisa membedakan `UNION` dari `UNION ALL` secara struktural (poin 8 di atas), jadi tidak ada satupun jalur kode yang bisa menghasilkan angka 0/1 yang valid untuknya. Tapi outer exception handler di `evaluate_single_query()` (fallback untuk query yang gagal total dievaluasi) sebelumnya menulis `cm_per_clause={clause: 0 for clause in CLAUSES}` — termasuk `union_all: 0`, kontradiksi langsung dengan kontrak "selalu None" itu.
+
+**Ditemukan saat:** investigasi dependency `src/dimensions/dim3_component.py` (2026-08-26) — Dimensi 3 secara spesifik mencari "klausa dengan penurunan skor terbesar", jadi kontaminasi ini bukan cuma soal kerapian data tapi berpotensi langsung menyesatkan kesimpulan Dimensi 3 kalau ada cukup banyak query yang gagal total dievaluasi karena alasan lain (bukan soal `UNION ALL`).
+
+**Keputusan (2026-08-26):** fallback exception sekarang menulis `cm_per_clause={clause: (None if clause == "union_all" else 0) for clause in CLAUSES}` — `union_all` tetap `None` bahkan di jalur kegagalan total, klausa lain tetap `0` (itu tetap valid: query yang gagal total memang gagal juga di klausa-klausa itu).
+
+**Alasan:** `None` dan `0` punya makna yang beda secara fundamental di sini — `0` berarti "sudah dicek, salah", `None` berarti "tidak bisa dicek sama sekali, oleh siapapun, kapanpun". Menulis `0` untuk `union_all` di fallback pura-pura mengukur sesuatu yang sebenarnya tidak pernah benar-benar diukur, dan karena `aggregate_cm()` cuma merata-ratakan nilai non-`None`, tiap query yang gagal total (karena alasan APAPUN, tidak ada hubungannya dengan `UNION ALL`) diam-diam menurunkan skor `union_all` — mengubahnya jadi proxy "berapa banyak query yang crash", bukan indikator kebenaran `UNION ALL`.
+
+**Lokasi implementasi:** `src/metrics/esm_ex_cm.py`'s `evaluate_single_query()`, exception handler (sebelumnya baris ~320-324). Diverifikasi lewat sanity check: `aggregate_cm()` atas campuran hasil normal + hasil fallback tetap melaporkan `union_all: None`, tidak tercemar oleh entri fallback.
+
+---
+
+## 14. Dimensi 5: signature raw_logs + satu kondisi, SLA dua level dengan diagnosis independen
+
+**Konflik/ambiguitas (a) — signature:** stub asli `run_dimension_5(f1_score_sla: float, ex_score: float, precision: float, recall: float)` menerima angka yang SUDAH teragregasi, beda dari pola Dimensi 1-3 (`run_dimension_N(baseline_logs, graphrag_logs)` — agregasi dilakukan DI DALAM fungsi, dari raw_logs mentah).
+
+**Keputusan:** ubah signature jadi `run_dimension_5(logs: List[dict], condition_label: str = "GraphRAG") -> dict` — raw_logs mentah untuk SATU kondisi (bukan sepasang baseline+graphrag seperti Dimensi 1-3), agregasi SLA & EX dilakukan di dalam fungsi.
+
+**Alasan:** guide sendiri menulis Dimensi 5 sebagai diagnostik untuk "kondisi yang dianalisis" (satu kondisi, bukan perbandingan berpasangan seperti Dimensi 1-3) — beda sifat dari dimensi lain, jadi signature-nya secara alami beda juga. Konsisten dengan pola raw_logs-in yang sudah dipakai Dimensi 1-3, mengurangi kerja manual pre-agregasi yang nanti harus dilakukan `run_all_dimensions.py` (masih belum diimplementasi).
+
+**Konflik/ambiguitas (b) — level SLA mana yang dipakai:** guide cuma menulis "F1-Score SLA" tanpa spesifik level (table atau column) — beda dari Dimensi 1.1 sendiri yang eksplisit membedakan dua level ini sebagai granularitas terpisah. Threshold 80% berlaku sama untuk berapa pun level yang dipilih, tapi tingkat keketatan (seberapa sering trigger) bisa sangat beda antara table-level (longgar) vs column-level (ketat).
+
+**Keputusan:** hitung KEDUANYA, jalankan klasifikasi 4-kuadran PENUH (termasuk breakdown precision/recall) secara independen untuk masing-masing level — bukan cuma satu level yang dipakai untuk keputusan akhir. Kalau kedua level menghasilkan diagnosis yang beda, keduanya ditampilkan apa adanya + flag `levels_agree=False`, TIDAK ada aturan resolusi yang dikarang untuk memutuskan mana yang "benar".
+
+**Alasan:** peneliti secara eksplisit meminta dua diagnosis independen (bukan satu level mendominasi), setelah didiskusikan opsi alternatif ("column-level saja yang menentukan, table-level cuma info tambahan"). Guide tidak mendefinisikan cara resolusi kalau dua level tidak sepakat — memaksakan resolusi (mis. "pakai yang lebih ketat") akan jadi aturan baru yang tidak ada dasarnya di guide (melanggar aturan anti-halusinasi Bagian 4 poin 1). Diverifikasi lewat sanity test: skenario di mana GraphRAG dapat tabel yang benar tapi cuma 1 dari 3 kolom yang dibutuhkan menghasilkan table-level F1=100% ("pipeline sehat") vs column-level F1=50% ("jarang terjadi, kemungkinan query sederhana") — dua diagnosis yang sungguh berbeda untuk data yang sama persis, membuktikan skenario ini bukan cuma teoretis.
+
+**Lokasi implementasi:** `src/dimensions/dim5_bottleneck.py` (`_diagnose_level()` dipanggil dua kali dari `run_dimension_5()`, sekali per level, `levels_agree` dihitung dari perbandingan string diagnosis).
+
+---
+
+## 15. Dimensi 6: algoritma greedy step-wise untuk k_final, threshold 2 poin persen per langkah
+
+**Konflik/ambiguitas:** guide Bagian 3 Dimensi 6 minta "baca pola transisi EX vs k" dan eksplisit melarang "cuma ambil EX tertinggi mentah-mentah", tapi tidak memberi angka untuk apa yang dihitung "signifikan" saat EX naik dari satu k ke k berikutnya, dan tidak memberi algoritma presisi untuk menentukan `k_final` dari pola itu — cuma tiga deskripsi kualitatif (diminishing returns, konsisten, context overload).
+
+**Keputusan (2026-08-26):**
+1. **Algoritma:** greedy/step-wise, bukan perbandingan ke EX maksimum global. Mulai dari `k` terkecil, terus maju ke `k` berikutnya SELAMA lompatan EX ke situ >= `STEP_THRESHOLD`. Begitu satu langkah gagal signifikan (termasuk kalau EX-nya turun), berhenti di `k` SEBELUM langkah itu — TIDAK lanjut lagi walau ada langkah signifikan lagi setelahnya (diverifikasi lewat sanity test: `{0:50, 1:51, 3:90, 5:91}` tetap berhenti di k=0 meski lompatan 1→3 sangat besar, karena langkah 0→1 sudah gagal signifikan duluan).
+2. **`STEP_THRESHOLD = 2.0` poin persen** — dipilih supaya konsisten dengan threshold ΔQVT yang sudah WAJIB di guide Dimensi 4 (±2%), bukan angka baru yang berdiri sendiri tanpa preseden di guide manapun.
+3. Pola "EX naik signifikan di semua transisi sampai k terbesar" (belum plateau dalam rentang k yang diuji) diberi label jujur `terus_naik_signifikan` — bukan salah satu dari 3 pola resmi guide, karena guide memang tidak mendeskripsikan skenario ini secara eksplisit.
+
+**Alasan:** algoritma greedy/step-wise ini secara langsung merepresentasikan cara guide menjelaskan pola-polanya ("naik signifikan dari k=0→k=1 LALU stabil" — deskripsi berurutan per-langkah, bukan perbandingan ke titik global), dan secara alami menghasilkan ketiga pola resmi guide sebagai kasus khusus dari SATU aturan yang sama, tanpa perlu tiga pengecekan terpisah yang bisa saling kontradiksi.
+
+**Lokasi implementasi:** `src/dimensions/dim6_ablation.py`'s `run_dimension_6()`. **Catatan:** modul ini murni interpretasi — `ex_per_k` harus diisi dari hasil run nyata `ablation.py` + evaluation resmi, yang belum pernah dijalankan (lihat `RESEARCHER_TODO.md`). Kode ini sendiri sudah diverifikasi lewat fixture sintetis untuk keempat pola (termasuk `single_k` dan guard `ex_per_k` kosong), sama seperti Dimensi 1/2/3/5 sebelumnya.
+
+---
+
+## 16. Validasi terhadap Spider dev set asli (2026-08-26): lulus, satu limitation data upstream ditemukan dan diterima apa adanya
+
+**Konteks:** dataset SPIDER resmi lengkap (1034 dev queries, database SQLite per db_id) ditambahkan ke `data/spider_data/` (di luar git, lihat `.gitignore`). Ini kesempatan pertama untuk memvalidasi `src/metrics/esm_ex_cm.py` dan `src/metrics/sla.py` terhadap data Spider ASLI, bukan cuma sanity test SQLite sintetis (catatan "belum pernah divalidasi terhadap dev set asli" yang sebelumnya ada di beberapa tempat — poin 4, `CLAUDE.md` — SEKARANG SUDAH TIDAK BERLAKU, lihat hasil di bawah).
+
+**Metodologi validasi:** round-trip test — `predicted_sql = gold_sql` untuk seluruh 1034 query dev set, jalankan lewat `evaluate_single_query()` (harus esm=1, ex=1 kalau parser/eval sehat) dan `compute_sla()` self-comparison (harus f1=1.0).
+
+**Hasil:**
+- **0 exception, 0 kegagalan ESM** dari 1034 query — parser resmi SPIDER (termasuk fix JOIN-keyword di poin 11) menangani seluruh kompleksitas SQL asli (subquery bersarang, multi-join, GROUP BY/HAVING) tanpa masalah.
+- **42 "kegagalan" SLA — BUKAN bug, asumsi test yang salah.** Semuanya query `COUNT(*)`/`SELECT *` tanpa referensi kolom spesifik apapun — `extract_ground_truth_schema()` BENAR mengembalikan set kosong untuk kasus ini, dan `compute_sla()` memang didesain sengaja (keputusan lama, bukan baru) mengembalikan F1=0.0 untuk perbandingan set-kosong-vs-set-kosong (bukan "1.0 by convention"). Test round-trip saya yang salah asumsi, bukan kode yang salah — tidak ada perubahan kode.
+- **2 kegagalan EX — ditemukan limitation data asli, BUKAN bug kode kita.** Satu baris di `data/spider_data/database/wta_1/wta_1.sqlite` (`player_id=212305`, kolom `last_name` berisi byte `b'Treyes Albarrac\xe3\x8dN'`, bukan UTF-8 valid — kemungkinan artefak konversi encoding saat dataset resmi dibuat) bikin `sqlite3`'s `fetchall()` throw `UnicodeDecodeError`. `eval_exec_match()` RESMI SPIDER (`external/spider_eval/evaluation.py`) menangkapnya lewat bare `except: return False` di sisi predicted — jadi query APAPUN yang menyentuh baris ini otomatis EX=0, walau SQL-nya benar. Terverifikasi affects persis 2/1034 query (0.19%), keduanya menyentuh tabel `players` di `wta_1` tanpa filter yang mengecualikan baris itu.
+
+**Keputusan:** DIDOKUMENTASIKAN, TIDAK diperbaiki — baik di kode maupun di file database.
+
+**Alasan:** dampaknya sangat kecil (0.19% dev set), dan "perbaikan" apapun (patch `eval_exec_match()` resmi, atau edit langsung byte yang rusak di file `.sqlite`) berarti hasil EX kita tidak lagi 100% comparable dengan paper/sistem lain yang mengevaluasi di dataset resmi SPIDER yang TIDAK dimodifikasi. Prinsip yang sama dengan keputusan EX order-sensitivity di poin 5 — comparability dengan literatur lebih diprioritaskan daripada memperbaiki keterbatasan kecil yang bukan berasal dari kode kita sendiri.
+
+**Lokasi:** tidak ada perubahan kode. Script validasi (`validate_real_spider.py`) dijalankan sekali dari scratchpad session, tidak masuk repo (bukan bagian permanen dari test suite).
+
+---
+
+## 17. Bug fix: `_set_op_clause_match()` mengambil sub-query union/intersect/except SETELAH termutasi eval_exact_match() utama
+
+**Ditemukan:** saat validasi Dimensi 3 terhadap data Spider dev set asli (lihat poin 16) — tabel CM per klausa menunjukkan `intersect`/`except` cuma ~96-97%, bukan 100%, padahal `predicted_sql = gold_sql` persis (round-trip test, harusnya selalu match). Diinvestigasi lebih dalam: dari 40 query dev set asli yang benar-benar pakai `INTERSECT`, **38 (95%) salah skor 0**; dari 31 query yang pakai `EXCEPT`, **29 (94%) salah skor 0** — walau predicted==gold persis.
+
+**Root cause (diverifikasi langsung via reproduksi terisolasi):** `Evaluator.eval_exact_match()` resmi SPIDER memutasi in-place SEMUA list nested di dalam dict yang dioper kepadanya (bukan cuma level teratas seperti `select`/`where` — juga merambat ke sub-dict `union`/`intersect`/`except` yang tersimpan di dalam struktur SQL yang sama). `_set_op_clause_match()` (di `esm_ex_cm.py`) dipanggil SETELAH `eval_exact_match(p_sql, g_sql)` utama, dan sebelumnya mengambil sub-query lewat `pred_sql.get(key)`/`gold_sql.get(key)` — yaitu referensi ke dict yang SAMA yang baru saja termutasi. Perbandingan `eval_exact_match()` rekursif di dalam `_set_op_clause_match()` jadi membandingkan data yang sudah "termakan" sebagian, menghasilkan false-negative sistematis. Dikonfirmasi lewat reproduksi terisolasi: comparing pristine (belum tersentuh) deep copy dari sub-query yang SAMA persis memberi hasil match=True, comparing sub-query yang diambil setelah eval_exact_match() utama memberi hasil match=False -- pembeda satu-satunya adalah timing pengambilan referensi, bukan isi data.
+
+**Keputusan (2026-08-26):** ambil deep copy (`copy.deepcopy`) dari `p_sql`/`g_sql`'s sub-dict `union`/`intersect`/`except` SEBELUM `eval_exact_match()` utama dipanggil (bukan sesudahnya), simpan di variabel lokal (`p_set_ops`/`g_set_ops`), dan oper salinan pristine itu ke `_set_op_clause_match()` — bukan mengambil ulang dari `p_sql`/`g_sql` yang sudah termutasi. `_set_op_clause_match()`'s signature diubah dari `(pred_sql, gold_sql, key, evaluator)` jadi `(pred_sub, gold_sub, evaluator)` supaya caller wajib mengoper sub-query yang sudah diekstrak, bukan dict induk + key (mencegah kesalahan yang sama terulang di masa depan).
+
+**Alasan:** ini murni bug di kode custom thesis (bukan official SPIDER — official evaluator TIDAK punya fungsi untuk klausa union/intersect/except terpisah, `_set_op_clause_match()` seluruhnya ditulis untuk thesis ini, lihat CLAUDE.md "Atribusi kode"), jadi bebas diperbaiki langsung tanpa menyentuh `external/spider_eval/`. Dampaknya nyata: 6.9% dari dev set asli (71/1034 query) memakai UNION/INTERSECT/EXCEPT, dan hampir semuanya salah dilaporkan di CM sebelum fix ini.
+
+**Verifikasi:** setelah fix, seluruh 40 query INTERSECT dan 31 query EXCEPT di dev set asli match sempurna (0 kegagalan, turun dari 38 dan 29). Regression check: skenario LEFT JOIN dan union_all fallback (poin 11, 13) tetap berfungsi normal setelah perubahan ini.
+
+**Lokasi implementasi:** `src/metrics/esm_ex_cm.py` — `_set_op_clause_match()` (signature + docstring), `_evaluate_single_query_inner()` (penambahan `p_set_ops`/`g_set_ops` deep copy sebelum `eval_exact_match()` utama, dan 3 call site union/intersect/except diupdate).
 
 ---
 
@@ -143,10 +266,12 @@ Format tiap entri: **Konflik/ambiguitas** → **Keputusan** → **Alasan** → *
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER
 
+✅ **Diselesaikan (2026-08-25) — lihat poin 11 di atas.** Ditemukan bahwa `INNER`/`CROSS JOIN` juga crash (bukan cuma `LEFT`/`RIGHT`), dan EX (bukan cuma ESM/CM) juga ikut rusak. Semua dinormalisasi ke `JOIN` polos HANYA untuk salinan teks yang di-parse — jalur in-process (`esm_ex_cm.py`) dapat fix penuh untuk semua join type; jalur subprocess (`evaluation.py` CLI) dapat fix penuh untuk `--etype match` tapi cuma `INNER`/`CROSS` untuk `--etype exec` (residual limitation, lihat poin 11 untuk alasan arsitekturnya). Teks asli di bawah dipertahankan sebagai catatan historis.
+
 **Temuan (2026-08-08):** `process_sql.py`'s `parse_from()` cuma mengenali token `join` (bare), tidak ada branch untuk `left`/`right`/`inner`. Predicted SQL yang pakai keyword-keyword itu GAGAL di-parse (`KeyError: 'left'` dkk, sudah diverifikasi langsung), jatuh ke fallback `_empty_sql()` yang sama dengan predicted SQL yang benar-benar rusak → ESM=0 otomatis, EX biasanya ikut 0 (karena `p_val_units` jadi kosong).
 
 **Dampak potensial:** karena Qwen2.5-Coder (atau LLM manapun) sangat mungkin menghasilkan `LEFT JOIN` secara alami (idiom SQL yang sangat umum, kadang justru pilihan yang lebih tepat secara semantik untuk pertanyaan "which X have no Y"), ini berpotensi jadi sumber false-negative yang LEBIH besar dan lebih sistematis daripada isu order-sensitivity di poin 5.
 
 **Catatan teknis:** `INNER JOIN` → `JOIN` aman dinormalisasi sebelum parsing (100% setara secara semantik di SQL standar). `LEFT JOIN`/`RIGHT JOIN` TIDAK aman dinormalisasi ke `JOIN` biasa — keduanya mempertahankan baris yang tidak match dengan `NULL`, beda perilaku dari inner join, jadi normalisasi buta akan mengubah semantik yang diukur, bukan cuma perbaikan kompatibilitas parser.
 
-**Status:** belum diputuskan mau diapakan (dibiarkan sebagai known limitation vs investigasi seberapa sering LLM benar-benar memakai keyword ini di praktik). **Tanyakan ke peneliti sebelum mengambil tindakan apapun di sini.**
+**Status (historis, sebelum poin 11):** belum diputuskan mau diapakan (dibiarkan sebagai known limitation vs investigasi seberapa sering LLM benar-benar memakai keyword ini di praktik).

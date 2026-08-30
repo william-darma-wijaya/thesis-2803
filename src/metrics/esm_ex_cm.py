@@ -40,6 +40,7 @@ parsial. Termasuk kasus klausa kosong di kedua sisi (pred_total=label_total=0
 di-special-case manual.
 """
 
+import copy
 import logging
 import sys
 from pathlib import Path
@@ -63,6 +64,8 @@ from evaluation import (  # noqa: E402  (import after sys.path bootstrap, intent
     rebuild_sql_col,
 )
 from process_sql import Schema, get_schema, get_sql  # noqa: E402
+
+from src.utils.sql_normalize import normalize_join_keywords_for_parsing
 
 # Lowercase snake_case dipertahankan sengaja (guide menulis nama klausa uppercase,
 # mis. "SELECT"/"GROUP BY") -- konsisten dengan field lain di raw_logs yang semua
@@ -154,7 +157,7 @@ def _from_clause_match(pred_sql: dict, gold_sql: dict) -> int:
     return int(sorted(pred_tables) == sorted(gold_tables))
 
 
-def _set_op_clause_match(pred_sql: dict, gold_sql: dict, key: str, evaluator: Evaluator) -> int:
+def _set_op_clause_match(pred_sub: Optional[dict], gold_sub: Optional[dict], evaluator: Evaluator) -> int:
     """
     Guide minta union/intersect/except dinilai sebagai klausa terpisah, tapi
     official evaluator cuma punya satu skor gabungan "IUEN" (Intersect/Union/
@@ -166,13 +169,24 @@ def _set_op_clause_match(pred_sql: dict, gold_sql: dict, key: str, evaluator: Ev
     eval_exact_match() pada sub-query masing-masing (intersect/union/except
     sendiri berupa sql dict penuh, jadi valid untuk exact-match check yang sama).
 
+    PENTING (lihat context/IMPLEMENTATION_DECISIONS.md poin 17): pred_sub/
+    gold_sub HARUS berupa salinan independen (deep copy) yang diambil SEBELUM
+    eval_exact_match() utama dipanggil di _evaluate_single_query_inner(), BUKAN
+    hasil `pred_sql.get(key)`/`gold_sql.get(key)` yang diambil SESUDAHNYA.
+    eval_exact_match() memutasi in-place semua list di dalam dict yang dioper
+    kepadanya -- termasuk merambat ke sub-dict union/intersect/except bersarang
+    di dalam p_sql/g_sql -- jadi mengambil sub-query SETELAH panggilan utama
+    akan memberikan data yang sudah "termakan", menghasilkan false-negative
+    (predicted_sql == gold_sql persis tapi tetap dilaporkan tidak match) untuk
+    SEMUA query yang pakai UNION/INTERSECT/EXCEPT. Diverifikasi ini bukan
+    skenario langka: 38/40 query INTERSECT dan 29/31 query EXCEPT di Spider dev
+    set asli salah skor 0 sebelum fix ini.
+
     `evaluator` di sini adalah instance yang SAMA yang dipakai untuk cek ESM
     utama di evaluate_single_query() -- aman dipakai ulang di sini karena
     evaluator.partial_scores (side effect dari eval_exact_match) sudah
     diambil/disalin ke variabel lokal SEBELUM fungsi ini dipanggil.
     """
-    pred_sub = pred_sql.get(key)
-    gold_sub = gold_sql.get(key)
     if gold_sub is None and pred_sub is None:
         return 1
     if gold_sub is None or pred_sub is None:
@@ -192,15 +206,26 @@ def _evaluate_single_query_inner(
                               # tiap query butuh instance sendiri supaya tidak ada
                               # kebocoran state antar query.
 
-    g_sql = get_sql(schema, gold_sql)
+    # normalize_join_keywords_for_parsing() HANYA mempengaruhi salinan yang
+    # di-parse di sini -- gold_sql/predicted_sql ASLI (tidak dinormalisasi)
+    # tetap yang dioper ke eval_exec_match() di bawah (baris ~251). Lihat
+    # src/utils/sql_normalize.py dan context/IMPLEMENTATION_DECISIONS.md
+    # poin 11 untuk kenapa pemisahan ini wajib (LEFT/RIGHT/FULL JOIN mengubah
+    # hasil eksekusi, execution_safe_only=False di sini aman justru KARENA
+    # hasil normalisasi ini tidak pernah dieksekusi).
+    g_sql = get_sql(schema, normalize_join_keywords_for_parsing(gold_sql))
     difficulty = evaluator.eval_hardness(g_sql)
 
     try:
-        p_sql = get_sql(schema, predicted_sql)
+        p_sql = get_sql(schema, normalize_join_keywords_for_parsing(predicted_sql))
     except Exception:
         # predicted SQL dari LLM sangat mungkin tidak valid secara grammar Spider
         # (beda dengan "tidak valid secara SQLite" yang ditangani terpisah di EX).
         # Fallback ke sql kosong -- persis pola yang dipakai official evaluate().
+        # (Celah JOIN-keyword -- LEFT/RIGHT/FULL/INNER/CROSS JOIN -- sudah
+        # ditangani lewat normalize_join_keywords_for_parsing() di atas;
+        # fallback ini sekarang murni untuk SQL yang benar-benar tidak valid
+        # secara grammar Spider, bukan untuk kasus join-type lagi.)
         p_sql = _empty_sql()
 
     # Normalisasi nilai literal & alias kolom lewat foreign key (mis. kolom yang
@@ -214,6 +239,16 @@ def _evaluate_single_query_inner(
     p_valid_col_units = build_valid_col_units(p_sql["from"]["table_units"], schema)
     p_sql = rebuild_sql_val(p_sql)
     p_sql = rebuild_sql_col(p_valid_col_units, p_sql, kmap)
+
+    # Ambil salinan independen (deep copy) dari sub-query union/intersect/except
+    # SEKARANG, SEBELUM eval_exact_match() utama dipanggil di bawah -- fungsi itu
+    # memutasi in-place p_sql/g_sql, termasuk merambat ke sub-dict bersarang ini.
+    # Kalau _set_op_clause_match() nanti mengambil sub-query dari p_sql/g_sql
+    # yang SAMA setelah termutasi, hasilnya false-negative walau predicted_sql
+    # == gold_sql persis. Lihat context/IMPLEMENTATION_DECISIONS.md poin 17 dan
+    # docstring _set_op_clause_match() untuk detail lengkap + bukti empiris.
+    p_set_ops = {op: copy.deepcopy(p_sql.get(op)) for op in ("union", "intersect", "except")}
+    g_set_ops = {op: copy.deepcopy(g_sql.get(op)) for op in ("union", "intersect", "except")}
 
     # URUTAN INI PENTING -- EX harus dihitung SEBELUM ESM, bukan sesudahnya.
     # eval_exact_match() (lewat eval_partial_match() -> eval_sel()/eval_where()/dst)
@@ -259,9 +294,9 @@ def _evaluate_single_query_inner(
         # itu yang dipakai eval_exact_match() sendiri untuk keputusan akhir.
         cm_per_clause[clause] = int(partial_scores[official_key]["f1"])
     cm_per_clause["from"] = _from_clause_match(p_sql, g_sql)
-    cm_per_clause["union"] = _set_op_clause_match(p_sql, g_sql, "union", evaluator)
-    cm_per_clause["intersect"] = _set_op_clause_match(p_sql, g_sql, "intersect", evaluator)
-    cm_per_clause["except"] = _set_op_clause_match(p_sql, g_sql, "except", evaluator)
+    cm_per_clause["union"] = _set_op_clause_match(p_set_ops["union"], g_set_ops["union"], evaluator)
+    cm_per_clause["intersect"] = _set_op_clause_match(p_set_ops["intersect"], g_set_ops["intersect"], evaluator)
+    cm_per_clause["except"] = _set_op_clause_match(p_set_ops["except"], g_set_ops["except"], evaluator)
     cm_per_clause["union_all"] = None  # tidak didukung parser resmi -- lihat docstring modul
 
     return QueryEvalResult(esm=int(esm), ex=ex, cm_per_clause=cm_per_clause, difficulty=difficulty)
@@ -306,7 +341,14 @@ def evaluate_single_query(
         )
         return QueryEvalResult(
             esm=0, ex=0,
-            cm_per_clause={clause: 0 for clause in CLAUSES},
+            # "union_all" TETAP None di sini, bukan 0 -- lihat docstring
+            # aggregate_cm(): union_all SELALU None (parser resmi tidak bisa
+            # bedakan UNION vs UNION ALL, bukan "biasanya gagal"). Menulis 0 di
+            # fallback total-failure ini akan mencemari agregat union_all
+            # dengan query yang gagal karena alasan LAIN sama sekali (bukan
+            # soal union_all), keputusan didokumentasikan di
+            # context/IMPLEMENTATION_DECISIONS.md poin 13.
+            cm_per_clause={clause: (None if clause == "union_all" else 0) for clause in CLAUSES},
             difficulty="unknown",
         )
 
