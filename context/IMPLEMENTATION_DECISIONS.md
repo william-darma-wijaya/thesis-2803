@@ -227,6 +227,41 @@ Penerapan beda per jalur, karena constraint arsitektur beda:
 
 ---
 
+## 16. Validasi terhadap Spider dev set asli (2026-08-26): lulus, satu limitation data upstream ditemukan dan diterima apa adanya
+
+**Konteks:** dataset SPIDER resmi lengkap (1034 dev queries, database SQLite per db_id) ditambahkan ke `data/spider_data/` (di luar git, lihat `.gitignore`). Ini kesempatan pertama untuk memvalidasi `src/metrics/esm_ex_cm.py` dan `src/metrics/sla.py` terhadap data Spider ASLI, bukan cuma sanity test SQLite sintetis (catatan "belum pernah divalidasi terhadap dev set asli" yang sebelumnya ada di beberapa tempat — poin 4, `CLAUDE.md` — SEKARANG SUDAH TIDAK BERLAKU, lihat hasil di bawah).
+
+**Metodologi validasi:** round-trip test — `predicted_sql = gold_sql` untuk seluruh 1034 query dev set, jalankan lewat `evaluate_single_query()` (harus esm=1, ex=1 kalau parser/eval sehat) dan `compute_sla()` self-comparison (harus f1=1.0).
+
+**Hasil:**
+- **0 exception, 0 kegagalan ESM** dari 1034 query — parser resmi SPIDER (termasuk fix JOIN-keyword di poin 11) menangani seluruh kompleksitas SQL asli (subquery bersarang, multi-join, GROUP BY/HAVING) tanpa masalah.
+- **42 "kegagalan" SLA — BUKAN bug, asumsi test yang salah.** Semuanya query `COUNT(*)`/`SELECT *` tanpa referensi kolom spesifik apapun — `extract_ground_truth_schema()` BENAR mengembalikan set kosong untuk kasus ini, dan `compute_sla()` memang didesain sengaja (keputusan lama, bukan baru) mengembalikan F1=0.0 untuk perbandingan set-kosong-vs-set-kosong (bukan "1.0 by convention"). Test round-trip saya yang salah asumsi, bukan kode yang salah — tidak ada perubahan kode.
+- **2 kegagalan EX — ditemukan limitation data asli, BUKAN bug kode kita.** Satu baris di `data/spider_data/database/wta_1/wta_1.sqlite` (`player_id=212305`, kolom `last_name` berisi byte `b'Treyes Albarrac\xe3\x8dN'`, bukan UTF-8 valid — kemungkinan artefak konversi encoding saat dataset resmi dibuat) bikin `sqlite3`'s `fetchall()` throw `UnicodeDecodeError`. `eval_exec_match()` RESMI SPIDER (`external/spider_eval/evaluation.py`) menangkapnya lewat bare `except: return False` di sisi predicted — jadi query APAPUN yang menyentuh baris ini otomatis EX=0, walau SQL-nya benar. Terverifikasi affects persis 2/1034 query (0.19%), keduanya menyentuh tabel `players` di `wta_1` tanpa filter yang mengecualikan baris itu.
+
+**Keputusan:** DIDOKUMENTASIKAN, TIDAK diperbaiki — baik di kode maupun di file database.
+
+**Alasan:** dampaknya sangat kecil (0.19% dev set), dan "perbaikan" apapun (patch `eval_exec_match()` resmi, atau edit langsung byte yang rusak di file `.sqlite`) berarti hasil EX kita tidak lagi 100% comparable dengan paper/sistem lain yang mengevaluasi di dataset resmi SPIDER yang TIDAK dimodifikasi. Prinsip yang sama dengan keputusan EX order-sensitivity di poin 5 — comparability dengan literatur lebih diprioritaskan daripada memperbaiki keterbatasan kecil yang bukan berasal dari kode kita sendiri.
+
+**Lokasi:** tidak ada perubahan kode. Script validasi (`validate_real_spider.py`) dijalankan sekali dari scratchpad session, tidak masuk repo (bukan bagian permanen dari test suite).
+
+---
+
+## 17. Bug fix: `_set_op_clause_match()` mengambil sub-query union/intersect/except SETELAH termutasi eval_exact_match() utama
+
+**Ditemukan:** saat validasi Dimensi 3 terhadap data Spider dev set asli (lihat poin 16) — tabel CM per klausa menunjukkan `intersect`/`except` cuma ~96-97%, bukan 100%, padahal `predicted_sql = gold_sql` persis (round-trip test, harusnya selalu match). Diinvestigasi lebih dalam: dari 40 query dev set asli yang benar-benar pakai `INTERSECT`, **38 (95%) salah skor 0**; dari 31 query yang pakai `EXCEPT`, **29 (94%) salah skor 0** — walau predicted==gold persis.
+
+**Root cause (diverifikasi langsung via reproduksi terisolasi):** `Evaluator.eval_exact_match()` resmi SPIDER memutasi in-place SEMUA list nested di dalam dict yang dioper kepadanya (bukan cuma level teratas seperti `select`/`where` — juga merambat ke sub-dict `union`/`intersect`/`except` yang tersimpan di dalam struktur SQL yang sama). `_set_op_clause_match()` (di `esm_ex_cm.py`) dipanggil SETELAH `eval_exact_match(p_sql, g_sql)` utama, dan sebelumnya mengambil sub-query lewat `pred_sql.get(key)`/`gold_sql.get(key)` — yaitu referensi ke dict yang SAMA yang baru saja termutasi. Perbandingan `eval_exact_match()` rekursif di dalam `_set_op_clause_match()` jadi membandingkan data yang sudah "termakan" sebagian, menghasilkan false-negative sistematis. Dikonfirmasi lewat reproduksi terisolasi: comparing pristine (belum tersentuh) deep copy dari sub-query yang SAMA persis memberi hasil match=True, comparing sub-query yang diambil setelah eval_exact_match() utama memberi hasil match=False -- pembeda satu-satunya adalah timing pengambilan referensi, bukan isi data.
+
+**Keputusan (2026-08-26):** ambil deep copy (`copy.deepcopy`) dari `p_sql`/`g_sql`'s sub-dict `union`/`intersect`/`except` SEBELUM `eval_exact_match()` utama dipanggil (bukan sesudahnya), simpan di variabel lokal (`p_set_ops`/`g_set_ops`), dan oper salinan pristine itu ke `_set_op_clause_match()` — bukan mengambil ulang dari `p_sql`/`g_sql` yang sudah termutasi. `_set_op_clause_match()`'s signature diubah dari `(pred_sql, gold_sql, key, evaluator)` jadi `(pred_sub, gold_sub, evaluator)` supaya caller wajib mengoper sub-query yang sudah diekstrak, bukan dict induk + key (mencegah kesalahan yang sama terulang di masa depan).
+
+**Alasan:** ini murni bug di kode custom thesis (bukan official SPIDER — official evaluator TIDAK punya fungsi untuk klausa union/intersect/except terpisah, `_set_op_clause_match()` seluruhnya ditulis untuk thesis ini, lihat CLAUDE.md "Atribusi kode"), jadi bebas diperbaiki langsung tanpa menyentuh `external/spider_eval/`. Dampaknya nyata: 6.9% dari dev set asli (71/1034 query) memakai UNION/INTERSECT/EXCEPT, dan hampir semuanya salah dilaporkan di CM sebelum fix ini.
+
+**Verifikasi:** setelah fix, seluruh 40 query INTERSECT dan 31 query EXCEPT di dev set asli match sempurna (0 kegagalan, turun dari 38 dan 29). Regression check: skenario LEFT JOIN dan union_all fallback (poin 11, 13) tetap berfungsi normal setelah perubahan ini.
+
+**Lokasi implementasi:** `src/metrics/esm_ex_cm.py` — `_set_op_clause_match()` (signature + docstring), `_evaluate_single_query_inner()` (penambahan `p_set_ops`/`g_set_ops` deep copy sebelum `eval_exact_match()` utama, dan 3 call site union/intersect/except diupdate).
+
+---
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER
