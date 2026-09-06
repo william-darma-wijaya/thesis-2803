@@ -64,16 +64,21 @@
 
 ## 3. Keputusan yang perlu didiskusikan
 
-- [ ] **Definisi final Baseline** — saat ini table-level retrieval
-  (`src/retrieval/baseline.py`), tapi `CLAUDE.md` mencatat kemungkinan diganti
-  ke full-schema bypass. Perlu didiskusikan dengan kelompok sebelum
-  raw_logs/ablation dijalankan secara final (ganti definisi belakangan berarti
-  semua run sebelumnya harus diulang).
-- [ ] **`LEFT JOIN`/`RIGHT JOIN` di parser resmi SPIDER** — `process_sql.py`
-  tidak bisa parse keyword ini (`KeyError: 'left'`), berdampak ke ESM/CM (bukan
-  EX). Belum diputuskan mau dibiarkan sebagai known limitation atau
-  diinvestigasi seberapa sering LLM benar-benar memakainya. Detail lengkap +
-  dampak di `IMPLEMENTATION_DECISIONS.md`, "Belum diputuskan" bagian A.
+- [x] **Definisi final Baseline** — DIPUTUSKAN 2026-09-06: **table-level
+  retrieval** (`src/retrieval/baseline.py`) adalah baseline skripsi, FINAL.
+  Full-schema bypass (`--full-schema`) tetap ada sebagai mode ablation, bukan
+  baseline. Dicatat di `IMPLEMENTATION_DECISIONS.md` poin 18 + `CLAUDE.md`.
+- [x] **JOIN-keyword di parser resmi SPIDER** — SELESAI 2026-08-25
+  (`IMPLEMENTATION_DECISIONS.md` poin 11, `src/utils/sql_normalize.py`):
+  `INNER`/`CROSS`/`LEFT`/`RIGHT`/`FULL JOIN` semua dinormalisasi ke `JOIN`
+  sebelum parsing. Jalur in-process (`esm_ex_cm.py`) fix penuh untuk semua
+  join type termasuk EX; jalur subprocess `--etype exec` cuma `INNER`/`CROSS`
+  (residual limitation, lihat poin 11). Diagnostic tambahan (2026-09-06,
+  `IMPLEMENTATION_DECISIONS.md` poin 20): blok CONFOUND DIAGNOSTICS di
+  `comparison_report.txt` menghitung prediksi outer-JOIN yang `ESM=1` tapi
+  `EX=0` — kandidat di mana normalisasi parsing menutupi beda semantik nyata.
+  **Yang mungkin masih perlu keputusan peneliti** (setelah run Kaggle asli):
+  apakah angka norm-masked itu cukup besar untuk perlu mitigasi tambahan.
 
 ## 4. Validasi yang belum dilakukan
 

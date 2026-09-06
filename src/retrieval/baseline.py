@@ -18,7 +18,10 @@ Usage:
     python src/retrieval/baseline.py --sample 0.5             # 50% dev set
     python src/retrieval/baseline.py --sample 1.0             # full dev set
     python src/retrieval/baseline.py --skip-sweep             # skip top-k sweep
-    python src/retrieval/baseline.py --compare                # run BOTH modes & print comparison
+
+For a side-by-side GraphRAG-vs-Baseline comparison with per-query ESM/EX/CM and
+data/raw_logs/*.json, use `python src/experiments/pipeline.py --baseline`
+instead — this module only runs the baseline arm on its own.
 
 The script can also be imported and called from pipeline.py via run_baseline().
 
@@ -26,7 +29,6 @@ Output files:
     outputs/predictions/baseline_predictions.txt    — SQL predictions (Spider format)
     outputs/logs/baseline_log.txt                   — per-sample detail log
     outputs/tables/baseline_results.csv             — recall / precision per sample
-    outputs/tables/comparison_report.txt            — side-by-side summary (only with --compare)
 """
 
 import argparse
@@ -49,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.core.config import PipelineConfig
 from src.generation.generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
-from src.core.schema import build_schema_graph, load_spider_schema
+from src.core.schema import load_spider_schema
 
 logging.basicConfig(
     level=logging.INFO,
@@ -318,10 +320,16 @@ def evaluate_table_linking(
     """
     Compute recall and precision of the table-level schema linking step.
 
-    Uses schema-aware matching (same strategy as evaluate_schema_linking in
-    retrieval.py): tokens are validated against known schema names and SQL
-    stopwords are filtered out, preventing spurious matches on tokens like
-    'id', 'name', or 'type' that appear in SQL as literals or aliases.
+    ⚠️ INTERNAL PROGRESS PROXY — NOT the reportable Schema Linking Accuracy.
+    Same limitation as evaluate_schema_linking() in retrieval.py: unqualified
+    table + column name strings in one mixed set, no table.column qualification.
+    Fine as a relative tuning signal; do NOT report as SLA. The reportable
+    metric is src/metrics/sla.py (parser-based, table/column split, validated).
+    See context/IMPLEMENTATION_DECISIONS.md poin 19.
+
+    Uses schema-aware matching: tokens are validated against known schema names
+    and SQL stopwords are filtered out, preventing spurious matches on tokens
+    like 'id', 'name', or 'type' that appear in SQL as literals or aliases.
 
     Returns:
         (recall, precision) — floats in [0, 1]
@@ -645,106 +653,15 @@ def run_baseline(
 
 
 # ---------------------------------------------------------------------------
-# Comparison helper — run BOTH modes and print a side-by-side report
+# NOTE (2026-09-06): the old `run_comparison()` here was removed. It ran an
+# older GraphRAG-vs-Baseline path that produced ONLY recall/precision +
+# subprocess Spider eval — no per-query ESM/EX/CM, no data/raw_logs/*.json.
+# `src/experiments/pipeline.py`'s `run_comparison()` fully supersedes it
+# (per-query ESM/EX/CM, raw_logs, confound diagnostics). Use:
+#     python src/experiments/pipeline.py --baseline
+# This module stays standalone-runnable for the baseline arm on its own via
+# `run_baseline()` below.
 # ---------------------------------------------------------------------------
-
-def run_comparison(cfg: PipelineConfig, sample_ratio: float = 0.2) -> None:
-    """
-    Run both the baseline (table/node) and GraphRAG (column/node) pipelines
-    on the same sample, then print a side-by-side comparison report.
-
-    Useful for ablation / thesis comparison without leaving Python.
-    """
-    # ── Baseline ──────────────────────────────────────────────────────────
-    logger.info("=" * 60)
-    logger.info("COMPARISON — running BASELINE (table/node) …")
-    logger.info("=" * 60)
-    baseline_results = run_baseline(
-        cfg=cfg,
-        sample_ratio=sample_ratio,
-        pred_path=Path("outputs/predictions/baseline_predictions.txt"),
-        log_path=Path("outputs/logs/baseline_log.txt"),
-        csv_path=Path("outputs/tables/baseline_results.csv"),
-        run_eval=True,
-    )
-
-    # ── GraphRAG ──────────────────────────────────────────────────────────
-    logger.info("=" * 60)
-    logger.info("COMPARISON — running GRAPHRAG (column/node) …")
-    logger.info("=" * 60)
-
-    # Import lazily to avoid circular imports when baseline is used standalone
-    from src.experiments.pipeline import main as run_graphrag_main, PipelineResult, run_single
-
-    schema_df = load_spider_schema(cfg.tables_json)
-    from src.core.schema import build_schema_graph
-    graph = build_schema_graph(schema_df)
-
-    with open(cfg.dev_json, "r", encoding="utf-8") as f:
-        dev_data = json.load(f)
-
-    if sample_ratio < 1.0:
-        n = max(1, int(len(dev_data) * sample_ratio))
-        rng = np.random.default_rng(cfg.seed)
-        indices = rng.choice(len(dev_data), size=n, replace=False)
-        dev_data = [dev_data[i] for i in sorted(indices)]
-
-    embed_model = SentenceTransformer(cfg.embedding_model)
-    llm, tokenizer = load_model_and_tokenizer(cfg)
-
-    from src.retrieval.retrieval import build_schema_index
-    unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_data))
-    schema_cache = {
-        db_id: build_schema_index(graph, db_id, embed_model)
-        for db_id in tqdm(unique_db_ids, desc="GraphRAG — indexing")
-    }
-
-    graphrag_results: list[PipelineResult] = []
-    with open("outputs/predictions/graphrag_predictions.txt", "w", encoding="utf-8") as pf:
-        for i, item in enumerate(tqdm(dev_data, desc="GraphRAG — generating")):
-            db_id, question, gold_sql = item["db_id"], item["question"], item["query"]
-            try:
-                pred_sql, recall, precision, _, _ = run_single(
-                    question, gold_sql, db_id,
-                    graph, embed_model, llm, tokenizer, cfg,
-                    schema_index=schema_cache[db_id],
-                )
-            except Exception:
-                pred_sql, recall, precision = "SELECT 1", 0.0, 0.0
-            graphrag_results.append(
-                PipelineResult(i + 1, db_id, question, gold_sql, pred_sql, recall, precision)
-            )
-            pf.write(pred_sql.strip() + "\n")
-
-    # ── Print comparison report ────────────────────────────────────────────
-    b_recall    = np.mean([r.recall    for r in baseline_results]) * 100
-    b_precision = np.mean([r.precision for r in baseline_results]) * 100
-    g_recall    = np.mean([r.recall    for r in graphrag_results]) * 100
-    g_precision = np.mean([r.precision for r in graphrag_results]) * 100
-
-    report = [
-        "",
-        "=" * 70,
-        "  COMPARISON REPORT: Baseline (table/node) vs GraphRAG (column/node)",
-        "=" * 70,
-        f"  {'Metric':<20}  {'Baseline':>12}  {'GraphRAG':>12}  {'Delta':>10}",
-        "-" * 70,
-        f"  {'Recall':<20}  {b_recall:>11.2f}%  {g_recall:>11.2f}%  {g_recall - b_recall:>+9.2f}%",
-        f"  {'Precision':<20}  {b_precision:>11.2f}%  {g_precision:>11.2f}%  {g_precision - b_precision:>+9.2f}%",
-        "-" * 70,
-        "  Node granularity    table / node          column / node",
-        "  Embedding target    table name + cols     table.column",
-        "  Linking strategy    single query embed    n-gram phrase match",
-        "  Schema context      all cols in table     pruned cols (path tracing)",
-        "=" * 70,
-        "",
-    ]
-    report_str = "\n".join(report)
-    print(report_str)
-
-    report_path = Path("outputs/tables/comparison_report.txt")
-    report_path.write_text(report_str, encoding="utf-8")
-    logger.info("Comparison report saved → %s", report_path)
 
 
 # ---------------------------------------------------------------------------
@@ -767,15 +684,10 @@ if __name__ == "__main__":
         "--full-schema", action="store_true",
         help="Bypass table linking — feed the entire DB schema to the LLM.",
     )
-    parser.add_argument(
-        "--compare", action="store_true",
-        help="Run BOTH baseline and GraphRAG and print a side-by-side report.",
-    )
     args = parser.parse_args()
 
     cfg = PipelineConfig(use_full_schema_bypass=args.full_schema)
 
-    if args.compare:
-        run_comparison(cfg, sample_ratio=args.sample)
-    else:
-        run_baseline(cfg, sample_ratio=args.sample)
+    # For a side-by-side GraphRAG-vs-Baseline run with per-query ESM/EX/CM and
+    # data/raw_logs/*.json, use `python src/experiments/pipeline.py --baseline`.
+    run_baseline(cfg, sample_ratio=args.sample)

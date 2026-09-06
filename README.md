@@ -96,7 +96,7 @@ All settings live in `config.py` (`PipelineConfig` dataclass):
 | `llm_model` | `Qwen/Qwen2.5-Coder-7B-Instruct` | SQL generation model |
 | `semantic_similarity_threshold` | `0.35` | Min cosine sim for column detection |
 | `max_ngram` | `3` | Max phrase length for query segmentation |
-| `max_new_tokens` | `200` | LLM generation budget |
+| `max_new_tokens` | `256` | LLM generation budget |
 | `use_full_schema_bypass` | `False` | Skip GraphRAG (ablation) |
 
 ---

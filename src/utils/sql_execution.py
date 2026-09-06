@@ -24,33 +24,61 @@ yang minta order-insensitive KECUALI gold SQL punya ORDER BY eksplisit — dan
 mengimplementasikan behavior guide itu (lihat parameter `order_sensitive`).
 Peneliti memilih TETAP pakai eval_exec_match() resmi (angka EX comparable
 dengan "Spider EX" yang dilaporkan paper/sistem lain), menerima false-negative
-risk dari kasus row order beda tapi hasil relasional setara. Karena itu,
-`execute_sql()` dan `compare_execution_results()` di bawah TIDAK dipakai di
-manapun di codebase — JANGAN wire ini ke esm_ex_cm.py atau pipeline manapun
-tanpa instruksi baru dari peneliti yang membalik keputusan di atas.
+risk dari kasus row order beda tapi hasil relasional setara.
+
+UPDATE (2026-09-06): execute_sql() dan compare_execution_results() di bawah
+SEKARANG diimplementasi penuh, TAPI dipakai HANYA oleh diagnostic counter
+read-only di src/experiments/pipeline.py's run_comparison() yang MENGHITUNG
+(bukan mengubah) seberapa sering EX resmi dan perbandingan order-insensitive
+tidak sepakat, per kondisi (GraphRAG vs Baseline), untuk mengukur besar
+confound order-sensitivity. Nilai ex_result di raw_logs TETAP 100% dari
+eval_exec_match() resmi -- keputusan 2026-08-08 di atas TIDAK dibalik. JANGAN
+wire compare_execution_results() ke esm_ex_cm.py atau menjadikannya sumber
+ex_result/ex di manapun tanpa instruksi baru peneliti yang eksplisit membalik
+keputusan itu.
 """
 
 import sqlite3
+from collections import Counter
+from pathlib import Path
 from typing import List, Tuple, Optional
 
 
-def execute_sql(db_path: str, sql: str) -> Optional[List[Tuple]]:
+def execute_sql(db_path: str, sql: str, timeout: float = 30.0) -> Optional[List[Tuple]]:
     """
     Eksekusi satu query SQL di database SQLite pada db_path.
     Return hasil sebagai list of tuples, atau None kalau query gagal
-    (syntax error, kolom tidak ada, dsb).
+    (syntax error, kolom tidak ada, timeout, dsb).
 
-    WAJIB dibungkus try-except (guide 1.3 poin (e)) — jangan biarkan exception
-    merambat ke atas dan crash pipeline. Predicted SQL dari LLM sangat mungkin invalid.
-
-    TODO:
-    - Buka koneksi sqlite3 ke db_path
-    - Jalankan sql via cursor.execute()
-    - fetchall() hasilnya
-    - Kalau ada exception (sqlite3.Error atau exception lain), return None
-    - Tutup koneksi di finally block
+    Dibungkus try-except menyeluruh (guide 1.3 poin (e)) -- exception tidak
+    boleh merambat ke atas. Predicted SQL dari LLM sangat mungkin invalid.
+    Koneksi dibuka read-only supaya query tidak bisa memodifikasi database.
     """
-    raise NotImplementedError
+    conn = None
+    try:
+        # as_uri() menghasilkan file URI yang benar di Windows & POSIX
+        # (file:///C:/... vs file:///kaggle/...); string f"file:{path}" mentah
+        # tidak valid di Windows (backslash + drive letter).
+        try:
+            uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=timeout)
+        except Exception:
+            # Fallback: koneksi biasa (mis. path tidak absolut / as_uri gagal).
+            conn = sqlite3.connect(db_path, timeout=timeout)
+        # Spider DB punya byte non-UTF-8 di beberapa kolom teks; ikuti toleransi
+        # evaluator resmi daripada me-raise.
+        conn.text_factory = lambda b: b.decode("utf-8", errors="ignore")
+        cur = conn.cursor()
+        cur.execute(sql)
+        return cur.fetchall()
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def compare_execution_results(
@@ -62,12 +90,23 @@ def compare_execution_results(
     Bandingkan dua hasil eksekusi SQL, return 1 (match) atau 0 (tidak match).
 
     Referensi guide 1.3 poin (c) langkah 3:
-    - Kalau result_predicted None (query gagal dieksekusi) -> return 0
-    - Kalau order_sensitive=False (default), bandingkan sebagai SET of tuples
-      supaya urutan baris tidak masalah
-    - Kalau order_sensitive=True (gold SQL punya ORDER BY eksplisit), bandingkan
+    - Kalau salah satu None (query gagal dieksekusi) -> return 0
+    - order_sensitive=False (default): bandingkan sebagai MULTISET of rows
+      (Counter) -- urutan baris tidak masalah, tapi jumlah baris duplikat tetap
+      dihitung
+    - order_sensitive=True (mis. gold SQL punya ORDER BY eksplisit): bandingkan
       sebagai LIST berurutan
 
-    TODO: implementasikan logic perbandingan sesuai catatan di atas.
+    Dipakai HANYA oleh diagnostic counter di run_comparison() -- bukan sumber
+    kebenaran EX (lihat catatan header modul).
     """
-    raise NotImplementedError
+    if result_predicted is None or result_gold is None:
+        return 0
+    if order_sensitive:
+        return int(list(result_predicted) == list(result_gold))
+    try:
+        return int(
+            Counter(map(tuple, result_predicted)) == Counter(map(tuple, result_gold))
+        )
+    except TypeError:
+        return int(list(result_predicted) == list(result_gold))

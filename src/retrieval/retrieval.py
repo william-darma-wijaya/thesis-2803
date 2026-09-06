@@ -422,6 +422,18 @@ def build_schema_context(graph: nx.Graph, column_nodes: list[str]) -> str:
 
 # ---------------------------------------------------------------------------
 # Schema evaluation (Recall / Precision vs gold SQL)
+#
+# ⚠️ INTERNAL PROGRESS PROXY — NOT the reportable Schema Linking Accuracy (SLA).
+# `_parse_gold_elements` / `evaluate_schema_linking` below match UNQUALIFIED
+# table + column name strings mixed into ONE set: a column named `name` in two
+# different tables collapses to a single element, and any SQL token that happens
+# to equal any schema name for the db counts as a hit. Good enough as a relative
+# signal while tuning (and for the sweep's F6 ranking), but it will NOT agree
+# with `src/metrics/sla.py`, which is the real metric — parser-based (official
+# SPIDER `process_sql`), table.column-qualified, table-level and column-level
+# reported separately, validated against db_schema, macro-averaged per query.
+# Report SLA numbers in the thesis from `src/metrics/sla.py`, never from here.
+# (Decision: context/IMPLEMENTATION_DECISIONS.md poin 19.)
 # ---------------------------------------------------------------------------
 
 # Pure SQL syntax keywords — never valid schema names.

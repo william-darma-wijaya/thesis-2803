@@ -56,6 +56,16 @@ from src.metrics import esm_ex_cm
 from src.utils.sql_normalize import normalize_sql_file_for_parsing
 from src.metrics.sla import extract_ground_truth_schema
 from src.utils.schema_utils import load_db_schema
+from src.utils.sql_execution import compare_execution_results, execute_sql
+
+# Read-only diagnostics for two documented evaluation confounds
+# (context/IMPLEMENTATION_DECISIONS.md poin 5 = EX order-sensitivity, poin 11 =
+# JOIN-keyword parser gap). These regexes are used ONLY for counting — they
+# never rewrite any SQL that is scored.
+_OUTER_JOIN_RE = re.compile(
+    r"\b(?:(?:LEFT|RIGHT|FULL)(?:\s+OUTER)?|OUTER)\s+JOIN\b", re.IGNORECASE
+)  # same shape as sql_normalize._EXEC_UNSAFE_JOIN_RE, kept in sync deliberately
+_ORDER_BY_RE = re.compile(r"\bORDER\s+BY\b", re.IGNORECASE)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -354,6 +364,123 @@ def _table_nodes_to_predicted_schema(graph, table_nodes: list) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Confound diagnostics (read-only — never touch ESM/EX/CM/raw_logs values)
+# ---------------------------------------------------------------------------
+
+def _new_confound_diag() -> dict:
+    return {
+        "n_samples": 0,
+        # Outer-join usage. Since IMPLEMENTATION_DECISIONS.md poin 11, the
+        # in-process evaluator normalizes LEFT/RIGHT/FULL JOIN -> JOIN *for
+        # parsing only* (raw string still executed for EX). So the old "silent
+        # ESM/CM=0 sink" is gone — but a predicted outer join is now compared
+        # STRUCTURALLY as if it were an inner join. Where that yields ESM=1 but
+        # EX=0, the normalization may be masking a real semantic difference.
+        "outer_join_gold": 0,
+        "outer_join_pred_graphrag": 0,
+        "outer_join_pred_baseline": 0,
+        "outer_join_norm_masked_graphrag": 0,  # pred has outer join, ESM=1, EX=0
+        "outer_join_norm_masked_baseline": 0,
+        # EX order-sensitivity (IMPLEMENTATION_DECISIONS.md poin 5, NOT reversed).
+        # Count queries where official (order-sensitive) EX = 0 but an
+        # order-insensitive multiset comparison of the SAME rows matches gold.
+        # Split out the subset where gold has an explicit ORDER BY (there, row
+        # order legitimately matters, so those are NOT false negatives).
+        "gold_unexecutable": 0,
+        "ex0_orderinsensitive_match_graphrag": 0,
+        "ex0_orderinsensitive_match_baseline": 0,
+        "ex0_orderinsensitive_match_graphrag_gold_orderby": 0,
+        "ex0_orderinsensitive_match_baseline_gold_orderby": 0,
+    }
+
+
+def _update_confound_diag(
+    diag: dict,
+    db_path: str,
+    gold_sql: str,
+    g_pred: str,
+    g_eval,
+    b_pred: str,
+    b_eval,
+) -> None:
+    """
+    Mutate `diag` with one sample's contribution. Never raises — a diagnostic
+    failure must not disturb raw-log production. Executes SQL only for samples
+    where at least one arm already scored EX = 0 (the only ones that can be an
+    order-sensitivity artifact), so the added cost is near-zero on the majority.
+    """
+    try:
+        diag["n_samples"] += 1
+
+        g_outer = bool(_OUTER_JOIN_RE.search(g_pred or ""))
+        b_outer = bool(_OUTER_JOIN_RE.search(b_pred or ""))
+        if _OUTER_JOIN_RE.search(gold_sql or ""):
+            diag["outer_join_gold"] += 1
+        if g_outer:
+            diag["outer_join_pred_graphrag"] += 1
+            if getattr(g_eval, "esm", 0) == 1 and getattr(g_eval, "ex", 0) == 0:
+                diag["outer_join_norm_masked_graphrag"] += 1
+        if b_outer:
+            diag["outer_join_pred_baseline"] += 1
+            if getattr(b_eval, "esm", 0) == 1 and getattr(b_eval, "ex", 0) == 0:
+                diag["outer_join_norm_masked_baseline"] += 1
+
+        g_ex = getattr(g_eval, "ex", 0)
+        b_ex = getattr(b_eval, "ex", 0)
+        if g_ex != 0 and b_ex != 0:
+            return
+        gold_rows = execute_sql(db_path, gold_sql)
+        if gold_rows is None:
+            diag["gold_unexecutable"] += 1
+            return
+        gold_has_order_by = bool(_ORDER_BY_RE.search(gold_sql or ""))
+        for arm, pred, ex in (("graphrag", g_pred, g_ex), ("baseline", b_pred, b_ex)):
+            if ex != 0:
+                continue
+            pred_rows = execute_sql(db_path, pred)
+            if pred_rows is None:
+                continue  # genuinely broken SQL, not an order artifact
+            if compare_execution_results(pred_rows, gold_rows, order_sensitive=False) == 1:
+                diag[f"ex0_orderinsensitive_match_{arm}"] += 1
+                if gold_has_order_by:
+                    diag[f"ex0_orderinsensitive_match_{arm}_gold_orderby"] += 1
+    except Exception:
+        logger.exception("confound diagnostic failed (non-fatal)")
+
+
+def _format_confound_diag(diag: dict) -> str:
+    n = diag["n_samples"] or 1
+    g_fn = diag["ex0_orderinsensitive_match_graphrag"] - diag["ex0_orderinsensitive_match_graphrag_gold_orderby"]
+    b_fn = diag["ex0_orderinsensitive_match_baseline"] - diag["ex0_orderinsensitive_match_baseline_gold_orderby"]
+    return "\n".join([
+        "",
+        "=" * 70,
+        "  CONFOUND DIAGNOSTICS  (read-only — do NOT affect ESM/EX/CM/raw_logs)",
+        "=" * 70,
+        f"  Samples: {diag['n_samples']}",
+        "",
+        "  Outer JOIN usage  (LEFT/RIGHT/FULL — normalized to JOIN for parsing, poin 11)",
+        f"    gold queries with outer JOIN       : {diag['outer_join_gold']:>4}  ({diag['outer_join_gold']/n*100:.1f}%)",
+        f"    GraphRAG predictions               : {diag['outer_join_pred_graphrag']:>4}  "
+        f"(ESM=1 & EX=0, norm may be masking a real diff: {diag['outer_join_norm_masked_graphrag']})",
+        f"    Baseline predictions               : {diag['outer_join_pred_baseline']:>4}  "
+        f"(ESM=1 & EX=0: {diag['outer_join_norm_masked_baseline']})",
+        "",
+        "  EX order-sensitivity  (official EX=0 but order-insensitive row multiset matches gold)",
+        f"    GraphRAG : {diag['ex0_orderinsensitive_match_graphrag']:>4}   "
+        f"(gold has ORDER BY: {diag['ex0_orderinsensitive_match_graphrag_gold_orderby']}, "
+        f"likely false-negative: {g_fn})",
+        f"    Baseline : {diag['ex0_orderinsensitive_match_baseline']:>4}   "
+        f"(gold has ORDER BY: {diag['ex0_orderinsensitive_match_baseline_gold_orderby']}, "
+        f"likely false-negative: {b_fn})",
+        f"    asymmetry (GraphRAG - Baseline) in likely false-negatives : {g_fn - b_fn:+d}",
+        f"    gold SQL unexecutable (excluded)   : {diag['gold_unexecutable']}",
+        "=" * 70,
+        "",
+    ])
+
+
+# ---------------------------------------------------------------------------
 # Seed & model setup
 # ---------------------------------------------------------------------------
 
@@ -571,6 +698,7 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
     spider_schema_cache: dict[str, "esm_ex_cm.Schema"] = {}
     graphrag_raw_logs: list[dict] = []
     baseline_raw_logs: list[dict] = []
+    confound_diag = _new_confound_diag()
 
     # ── Main loop — run both pipelines on the same sample ─────────────────
     graphrag_results: list[PipelineResult] = []
@@ -640,6 +768,13 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
 
                 g_eval = esm_ex_cm.evaluate_single_query(g_pred, gold_sql, db_id, db_path, spider_schema, kmap)
                 b_eval = esm_ex_cm.evaluate_single_query(b_pred, gold_sql, db_id, db_path, spider_schema, kmap)
+
+                # Read-only confound instrumentation (never mutates the values
+                # written to raw_logs below). Self-contained try/except inside.
+                _update_confound_diag(
+                    confound_diag, db_path, gold_sql, g_pred, g_eval, b_pred, b_eval,
+                )
+
                 # difficulty is a property of gold_sql alone, so g_eval and
                 # b_eval always agree on it -- either works, just pick one.
                 difficulty = g_eval.difficulty
@@ -727,10 +862,19 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
         "=" * 70,
         "",
     ]
-    report = "\n".join(report_lines)
+    report = "\n".join(report_lines) + _format_confound_diag(confound_diag)
     print(report)
     Path("outputs/tables/comparison_report.txt").write_text(report, encoding="utf-8")
     logger.info("Comparison report → outputs/tables/comparison_report.txt")
+    logger.info(
+        "Confound diag — outer JOIN gold=%d graphrag=%d baseline=%d | "
+        "EX order-sensitivity ex0-but-set-match graphrag=%d baseline=%d",
+        confound_diag["outer_join_gold"],
+        confound_diag["outer_join_pred_graphrag"],
+        confound_diag["outer_join_pred_baseline"],
+        confound_diag["ex0_orderinsensitive_match_graphrag"],
+        confound_diag["ex0_orderinsensitive_match_baseline"],
+    )
 
     # ── Official Spider eval for both ──────────────────────────────────────
     print("\n" + "=" * 60)
