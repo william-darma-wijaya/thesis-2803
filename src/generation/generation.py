@@ -134,6 +134,16 @@ def _clean_sql(sql: str) -> str:
     """
     sql = sql.replace("```sql", "").replace("```", "").replace("`", "").strip()
 
+    # Cut off anything the model appended after the SQL body. The model often
+    # emits `SELECT ... ` followed by an explanation on a new line with no
+    # terminating `;`. Without this guard the `$` below (DOTALL) would match the
+    # end of the whole string and the prose would be swallowed into the query.
+    # Priority: first `;` wins; otherwise stop at a blank line, a new markdown
+    # fence, or a new `###` section header — whichever comes first.
+    _cut = re.search(r"(?:\n\s*\n|\n\s*```|\n\s*###)", sql)
+    if _cut:
+        sql = sql[: _cut.start()]
+
     # Extract the first SELECT … statement
     match = re.search(r"(SELECT\s+.*?)(?:;|$)", sql, re.DOTALL | re.IGNORECASE)
     sql = match.group(1).strip() if match else sql.strip()

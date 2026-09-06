@@ -64,9 +64,11 @@ Format tiap entri: **Konflik/ambiguitas** → **Keputusan** → **Alasan** → *
 
 **Risiko yang diterima (false negative):** query yang secara relasional/isi setara tapi dikembalikan SQLite dengan urutan baris fisik berbeda (mis. tidak ada `ORDER BY` di kedua query, tapi `JOIN`/`WHERE` disusun beda sehingga query planner SQLite memilih execution plan berbeda) bisa ke-score EX=0 walau sebenarnya benar. Sifatnya plan-dependent/non-deterministic (coba direproduksi manual di dua contoh kecil, tidak selalu muncul — SQLite kadang tetap mengembalikan urutan yang sama meski query berbeda struktur). Kemungkinan lebih sering muncul di database Spider asli yang lebih besar/kompleks daripada di toy example.
 
-**Implikasi untuk skripsi ini secara spesifik:** GraphRAG (context dipangkas) dan Baseline (full schema, tanpa pruning) memberi LLM konteks yang sangat berbeda, jadi LLM kemungkinan menghasilkan gaya SQL yang berbeda (struktur JOIN, subquery vs join eksplisit) di antara dua kondisi bahkan untuk pertanyaan yang sama-sama "benar" — risiko false-negative dari isu ini TIDAK NETRAL antar dua kondisi, berpotensi jadi confound saat membandingkan EX_G vs EX_B. Belum ada mitigasi untuk ini.
+**Implikasi untuk skripsi ini secara spesifik:** GraphRAG (context dipangkas) dan Baseline (full schema, tanpa pruning) memberi LLM konteks yang sangat berbeda, jadi LLM kemungkinan menghasilkan gaya SQL yang berbeda (struktur JOIN, subquery vs join eksplisit) di antara dua kondisi bahkan untuk pertanyaan yang sama-sama "benar" — risiko false-negative dari isu ini TIDAK NETRAL antar dua kondisi, berpotensi jadi confound saat membandingkan EX_G vs EX_B.
 
-**Lokasi implementasi:** `src/metrics/esm_ex_cm.py` (`ex = 1 if eval_exec_match(...) else 0`, dengan komentar panjang menjelaskan keputusan ini persis di baris tersebut). `src/utils/sql_execution.py`'s `compare_execution_results()` (yang akan mengimplementasi order-insensitivity literal sesuai guide) SENGAJA dibiarkan stub, tidak dipakai di manapun — jangan wire tanpa instruksi baru yang membalik keputusan ini.
+**Mitigasi (2026-09-06, keputusan "Document + affected-query counter"):** confound ini sekarang DIUKUR, bukan dibiarkan tanpa data. `src/utils/sql_execution.py`'s `execute_sql()` + `compare_execution_results()` diimplementasi penuh (multiset comparison via `collections.Counter`, koneksi SQLite read-only) dan dipakai HANYA oleh `_update_confound_diag()` di `pipeline.run_comparison()` — counter read-only yang menghitung, per kondisi (GraphRAG vs Baseline): jumlah query dengan EX resmi = 0 tapi multiset baris hasil match gold, dipecah lagi berdasarkan apakah gold SQL punya `ORDER BY` eksplisit (kalau ya → order memang relevan, BUKAN false negative). Hasil ditulis ke blok "CONFOUND DIAGNOSTICS" di `outputs/tables/comparison_report.txt`. **`ex_result`/`ex` di raw_logs TIDAK berubah** — tetap 100% dari `eval_exec_match()` resmi. Keputusan 2026-08-08 di atas TIDAK dibalik; ini murni instrumentasi threat-to-validity. Lihat poin 20.
+
+**Lokasi implementasi:** `src/metrics/esm_ex_cm.py` (`ex = 1 if eval_exec_match(...) else 0`, dengan komentar panjang menjelaskan keputusan ini persis di baris tersebut). `src/utils/sql_execution.py`'s `compare_execution_results()` — **implemented, tapi TIDAK pernah jadi sumber `ex_result`**; cuma dipakai counter diagnostic di poin 20. Jangan wire ke `esm_ex_cm.py` tanpa instruksi baru yang membalik keputusan ini.
 
 ---
 
@@ -259,6 +261,46 @@ Penerapan beda per jalur, karena constraint arsitektur beda:
 **Verifikasi:** setelah fix, seluruh 40 query INTERSECT dan 31 query EXCEPT di dev set asli match sempurna (0 kegagalan, turun dari 38 dan 29). Regression check: skenario LEFT JOIN dan union_all fallback (poin 11, 13) tetap berfungsi normal setelah perubahan ini.
 
 **Lokasi implementasi:** `src/metrics/esm_ex_cm.py` — `_set_op_clause_match()` (signature + docstring), `_evaluate_single_query_inner()` (penambahan `p_set_ops`/`g_set_ops` deep copy sebelum `eval_exact_match()` utama, dan 3 call site union/intersect/except diupdate).
+
+---
+
+## 18. Definisi Baseline: table-level retrieval (FINAL)
+
+**Konflik/ambiguitas:** `CLAUDE.md` + `RESEARCHER_TODO.md` lama mencatat baseline "saat ini table-level retrieval, mungkin diubah ke full-schema bypass — diskusikan dulu". Selama belum diputuskan, tiap run raw_logs/ablation berisiko harus diulang kalau definisi berubah.
+
+**Keputusan (2026-09-06):** Baseline skripsi = **table-level retrieval** (`src/retrieval/baseline.py`: top-k table selection + FK-path expansion + semua kolom tabel terpilih, tanpa pruning). Full-schema bypass (`use_full_schema_bypass` / `--full-schema`) tetap ada sebagai **mode ablation**, BUKAN baseline.
+
+**Alasan:** table-level retrieval adalah kontras yang tepat untuk klaim skripsi (granularitas retrieval: table vs column). Full-schema bypass sebagai baseline utama membuat perbandingan token jadi tidak informatif (bandingan "kirim semua" vs "kirim sedikit" itu trivial).
+
+**Lokasi implementasi:** tidak ada perubahan kode — `src/retrieval/baseline.py` sudah table-level. Dokumen di-update: `CLAUDE.md` ("Hal yang Jangan Diubah Tanpa Diskusi" + TBD list), `context/RESEARCHER_TODO.md` bagian 3 (di-check).
+
+---
+
+## 19. Recall/precision di `retrieval.py`/`baseline.py` = proxy internal, BUKAN SLA
+
+**Konflik/ambiguitas:** `evaluate_schema_linking()` (`src/retrieval/retrieval.py`) dan `evaluate_table_linking()` (`src/retrieval/baseline.py`) menghitung "recall/precision" yang di-print saat run dan dipakai `sweep.py` untuk ranking F6. Tapi keduanya: (1) campur nama table + column jadi SATU set tanpa kualifikasi `table.column` (kolom `name` di dua tabel beda → kolaps jadi satu elemen), (2) ekstrak gold lewat token-matching terhadap known schema names, bukan SQL parser, (3) tidak dipecah table-level vs column-level. Semua itu yang justru diminta guide 1.1 untuk SLA yang benar, dan `src/metrics/sla.py` sudah mengimplementasikannya dengan parser resmi SPIDER.
+
+**Keputusan (2026-09-06, opsi "Document only"):** biarkan fungsi proxy apa adanya (dipakai live di `pipeline.py`/`sweep.py`/`ablation.py` untuk progress + ranking sweep — mengganti perilakunya akan menggeser ranking F6 dan pilihan top-k, jadi TIDAK disentuh sekarang). Tambahkan warning docstring/komentar tegas di kedua fungsi + baris di `CLAUDE.md` bahwa **angka SLA yang dilaporkan di skripsi diambil dari `src/metrics/sla.py`, bukan dari fungsi proxy ini**. Tidak di-rename (ripple ke 4 file).
+
+**Alasan:** proxy cukup sebagai sinyal relatif saat tuning dan konsisten dengan cara `sweep.py` sudah bekerja; risikonya hanya kalau seseorang salah melaporkannya sebagai SLA resmi. Dokumentasi eksplisit menutup risiko itu tanpa mengubah perilaku yang sudah tervalidasi.
+
+**Lokasi implementasi:** komentar blok di `src/retrieval/retrieval.py` (di atas seksi "Schema evaluation"), docstring `evaluate_table_linking()` di `src/retrieval/baseline.py`, baris SLA di tabel "Evaluasi Metrik" `CLAUDE.md`.
+
+---
+
+## 20. Confound diagnostics read-only di `run_comparison()` (tidak mengubah metrik apapun)
+
+**Konteks:** dua confound evaluasi yang sudah didokumentasikan (poin 5 = EX order-sensitivity; poin 11 = normalisasi outer JOIN untuk parsing) butuh data kuantitatif dari run asli, bukan cuma catatan naratif. Peneliti minta "document + affected-query counter", bukan metrik baru / bukan membalik keputusan lama.
+
+**Keputusan (2026-09-06):** `pipeline.run_comparison()` menghitung dan menulis blok **CONFOUND DIAGNOSTICS** ke `outputs/tables/comparison_report.txt`, read-only:
+- **EX order-sensitivity (poin 5):** per kondisi, jumlah query `ex_result==0` (order-sensitive resmi) tapi multiset baris hasil eksekusi match gold (order-insensitive), dipecah subset gold punya `ORDER BY`. "Likely false-negative" = tanpa `ORDER BY`. Plus asimetri GraphRAG−Baseline.
+- **Outer JOIN (poin 11):** frekuensi `LEFT`/`RIGHT`/`FULL JOIN` di gold + prediksi tiap kondisi; dari prediksi outer-JOIN, berapa yang `ESM=1` tapi `EX=0` (kandidat "normalisasi parsing menutupi beda semantik nyata").
+
+`_update_confound_diag()` punya try/except sendiri (gagal → skip sample itu, tidak ganggu raw_logs). Eksekusi SQL cuma dijalankan untuk sample yang minimal satu arm-nya sudah `EX=0` (biaya near-zero untuk mayoritas).
+
+**Yang TIDAK berubah:** `esm_result`/`ex_result`/`cm_per_clause` di `data/raw_logs/*.json` — semua tetap 100% dari `esm_ex_cm.evaluate_single_query()` (evaluator resmi). Poin 5 tidak dibalik. `compare_execution_results()` diimplementasi tapi TIDAK pernah jadi sumber `ex_result`.
+
+**Lokasi implementasi:** `src/experiments/pipeline.py` (`_new_confound_diag()`, `_update_confound_diag()`, `_format_confound_diag()`, dipanggil di `run_comparison()`), `src/utils/sql_execution.py` (`execute_sql()`, `compare_execution_results()` — diimplementasi penuh, dipakai HANYA di sini).
 
 ---
 

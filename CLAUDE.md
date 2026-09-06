@@ -69,7 +69,7 @@ Semua modul di `src/` dipanggil sebagai `src.<paket>.<modul>` (mis. `from src.co
 - **`src/metrics/` — SEMUA sudah diimplementasi penuh** (bukan lagi stub): `sla.py`, `esm_ex_cm.py`, `token_consumption.py`, `tep.py`, `qvt.py`. `src/utils/` juga penuh: `schema_utils.py`, `sql_normalize.py` (fix parser JOIN-keyword, lihat `IMPLEMENTATION_DECISIONS.md` poin 11), `raw_logs.py` (helper grouping per difficulty, dipakai lintas `src/dimensions/`).
 - **`src/dimensions/` — 5 dari 6 dimensi sudah diimplementasi**: Dimensi 1 (Efisiensi), 2 (Struktur SQL), 3 (Komponen SQL), 5 (Bottleneck), 6 (Ablation Few-Shot, interpretasi saja — belum ada data nyata dari `ablation.py`). **Masih stub: Dimensi 4** (Robustness/QVT) — blocked di `data/qvt_variations/` yang masih kosong (lihat `RESEARCHER_TODO.md`).
 - ✅ **Sudah divalidasi terhadap Spider dev set ASLI** (2026-08-26, bukan cuma sanity test SQLite sintetis lagi) — 1034 query dev set real (`data/spider_data/`, di luar git, lihat `.gitignore`), round-trip test lewat `esm_ex_cm.py`/`sla.py`: 0 exception, 0 kegagalan ESM. Satu limitation data upstream ditemukan (1 baris rusak encoding di `wta_1.sqlite`, pengaruh 0.19% dev set) dan didokumentasikan, bukan diperbaiki (lihat `IMPLEMENTATION_DECISIONS.md` poin 16 untuk alasan lengkap). `run_comparison()` di `pipeline.py` yang menulis `data/raw_logs/*.json` dari pipeline GraphRAG/Baseline sungguhan masih belum pernah dijalankan (butuh GPU/Kaggle, lihat `RESEARCHER_TODO.md`) — yang sudah divalidasi adalah lapisan metrics (`src/metrics/`), bukan pipeline retrieval+generation penuh.
-- **Semua keputusan implementasi** (konflik guide vs kode yang sudah ada, konflik guide vs keterbatasan tooling resmi SPIDER, dan open items yang belum diputuskan) ada di **`context/IMPLEMENTATION_DECISIONS.md`** — 17 keputusan tercatat sejauh ini, termasuk formula Token Consumption, EX order-sensitivity, label difficulty, casing CM clause, keterbatasan `union_all`, fix parser JOIN-keyword, hasil validasi dev set asli, dan bug fix `_set_op_clause_match()` (UNION/INTERSECT/EXCEPT salah skor akibat mutasi in-place).
+- **Semua keputusan implementasi** (konflik guide vs kode yang sudah ada, konflik guide vs keterbatasan tooling resmi SPIDER, dan open items yang belum diputuskan) ada di **`context/IMPLEMENTATION_DECISIONS.md`** — 20 keputusan tercatat sejauh ini, termasuk formula Token Consumption, EX order-sensitivity, label difficulty, casing CM clause, keterbatasan `union_all`, fix parser JOIN-keyword, hasil validasi dev set asli, bug fix `_set_op_clause_match()` (UNION/INTERSECT/EXCEPT salah skor akibat mutasi in-place), definisi Baseline final (poin 18), proxy schema-linking vs SLA (poin 19), dan confound diagnostics read-only (poin 20).
 
 ---
 
@@ -171,7 +171,7 @@ Semua parameter ada di `PipelineConfig` dataclass. **Jangan hardcode nilai di fi
 | `few_shot_k` | `3` | TBD | Hasil ablation study |
 | `few_shot_same_db_first` | `True` | Final | Prioritaskan contoh dari DB yang sama |
 | `max_ngram` | `3` | Final | Segmentasi query sampai trigram |
-| `max_new_tokens` | `200` | Final | Budget generasi LLM |
+| `max_new_tokens` | `256` | Final | Budget generasi LLM. `config.py` = `256`; baris ini sebelumnya keliru tertulis `200` — kode selalu pakai `cfg.max_new_tokens`. |
 | `temperature` | `0.0` | Final | Greedy decoding, deterministik |
 | `load_in_4bit` | `True` | Final | Kuantisasi NF4 |
 | `token_output_weight` | `3.0` | Final | α/μ dalam T = T_in + α×T_out — fixed dari proposal subbab 3.8.2.5, diupdate dari 1.0 (lihat riwayat resolusi konflik di "Evaluasi Metrik") |
@@ -218,19 +218,44 @@ Tujuan ablation: cari **elbow point** — nilai k di mana penambahan few-shot ex
 | Token Consumption | `avg_token_consumption` di `ablation_results.csv` | T = T_in + α×T_out. T_in = prompt tokens, T_out = generated SQL tokens, α = `token_output_weight` di config.py (**3.0**, fixed dari proposal). Diukur inline per sample setelah generate_sql. |
 | TEP (Token Elasticity of Performance) | Custom metric, hitung post-hoc | TEP_G = (ΔEX_G/EX_B) / (ΔT_G/T_B) — elastisitas performa GraphRAG relatif terhadap konsumsi token vs Baseline. ΔEX_G = EX_G − EX_B, ΔT_G = T_G − T_B. Hitung dari `ablation_results.csv` + EX dari Spider eval. |
 | QVT (Query Variance Testing) | Custom metric | Stabilitas output terhadap variasi pertanyaan |
-| Schema Linking Accuracy (SLA) | `src/metrics/sla.py` (skeleton) | Precision/recall/F1 retrieval vs gold schema, table-level & column-level terpisah |
+| Schema Linking Accuracy (SLA) | `src/metrics/sla.py` | Precision/recall/F1 retrieval vs gold schema, table-level & column-level terpisah, parser resmi SPIDER, macro-average per query. **INI metrik SLA yang dilaporkan.** Recall/precision yang di-print `retrieval.py`/`baseline.py` saat run = proxy internal (name-matching tanpa kualifikasi `table.column`, table+column dicampur satu set) — untuk progress/sweep saja, JANGAN dilaporkan sebagai SLA (`IMPLEMENTATION_DECISIONS.md` poin 19). |
 
 Definisi lengkap + algoritma step-by-step untuk keenam metrik di atas (termasuk SLA
 dan breakdown 6 dimensi analisis skripsi) ada di **`context/EVALUATION_ANALYSIS_GUIDE.md`**
 — itu source of truth-nya, tabel di atas cuma ringkasan. Implementasi metrik ada di
-`src/metrics/`, agregasi + interpretasi per dimensi ada di `src/dimensions/` (keduanya
-masih skeleton).
+`src/metrics/` (semua penuh), agregasi + interpretasi per dimensi ada di
+`src/dimensions/` (5 dari 6 penuh; Dimensi 4/QVT masih stub — lihat status di atas).
 
 ✅ **Konflik formula Token Consumption (μ vs α) dan keputusan EX order-sensitivity
 sudah diselesaikan** — lihat `context/IMPLEMENTATION_DECISIONS.md` poin 1 dan 5
 untuk detail konflik + alasan lengkap. Ringkas: `token_output_weight` = **3.0**
 (bukan 1.0), dan EX tetap pakai `eval_exec_match()` resmi SPIDER apa adanya
 (order-sensitive, beda dari algoritma literal di guide 1.3(c) langkah 3).
+
+### Confound diagnostics (read-only, tidak mengubah metrik)
+
+`run_comparison()` di `pipeline.py` menulis blok **CONFOUND DIAGNOSTICS** ke
+`outputs/tables/comparison_report.txt` — instrumentasi read-only untuk dua
+keterbatasan evaluasi, TIDAK memengaruhi nilai ESM/EX/CM/raw_logs (lihat
+`IMPLEMENTATION_DECISIONS.md` poin 20):
+- **Frekuensi outer JOIN** (`LEFT`/`RIGHT`/`FULL`) di gold vs prediksi tiap
+  kondisi. Sejak poin 11, in-process evaluator menormalisasi outer JOIN → `JOIN`
+  untuk *parsing* (string mentah tetap dieksekusi untuk EX), jadi tidak ada lagi
+  "silent ESM/CM=0". Yang dihitung sekarang: prediksi outer-JOIN yang `ESM=1`
+  tapi `EX=0` — kandidat di mana normalisasi parsing menyembunyikan beda semantik
+  nyata.
+- **Disagreement EX order-sensitivity** (poin 5) — jumlah query yang EX resmi
+  (order-sensitive) = 0 tapi perbandingan multiset baris (order-insensitive)
+  match gold, dipecah per kondisi + subset yang gold-nya punya `ORDER BY`.
+  `ex_result` di raw_logs TETAP 100% dari `eval_exec_match()` resmi.
+
+### Few-shot: sumber data & bias yang harus disebut di metodologi
+
+Few-shot example diambil HANYA dari `train_spider.json` (bukan dev/test).
+`few_shot_same_db_first=True` menaikkan contoh dengan `db_id` yang sama ke atas
+top-k. Karena split train/dev Spider berbagi sebagian `db_id`, banyak contoh
+few-shot berbagi schema dengan pertanyaan dev — ini **retrieval dari train set,
+bukan kebocoran dev/test**, tapi WAJIB disebut eksplisit di bab metodologi.
 
 Spider evaluation scripts harus didownload manual ke `external/spider_eval/`:
 ```bash
@@ -279,13 +304,13 @@ data_path = Path("/kaggle/input/datasets/alrette/spiderdataset/spider_data")
 - Struktur graph di `schema.py` — node identifier `{db}.{table}.{col}` dipakai di banyak tempat
 - `few_shot_same_db_first=True` — sudah jadi keputusan desain final
 - Greedy decoding (`temperature=0.0`, `do_sample=False`) — perlu deterministik untuk reprodusibilitas
+- **Definisi Baseline = table-level retrieval** (`src/retrieval/baseline.py`) — FINAL per 2026-09-06. Full-schema bypass (`--full-schema` / `use_full_schema_bypass=True`) adalah mode ablation saja, BUKAN baseline skripsi. Lihat `IMPLEMENTATION_DECISIONS.md` poin 18.
 
 ## Hal yang Masih TBD (update setelah eksperimen)
 
 - Nilai final `top_k_tables`, `top_k_columns`, `semantic_similarity_threshold` → tunggu hasil `sweep.py`
 - Nilai final `few_shot_k` → tunggu hasil ablation study
-- Definisi final baseline: saat ini table-level retrieval, mungkin diubah ke full-schema bypass — diskusikan dulu dengan kelompok
-- ✅ `max_new_tokens`: sudah konsisten 256 di `config.py` dan seluruh referensi (`generation.py` pakai `cfg.max_new_tokens`, tidak ada hardcode 200 lagi) — dicek ulang 2026-08-26, tidak perlu diseragamkan lagi
+- ✅ `max_new_tokens`: konsisten `256` di `config.py`, `generation.py` (`cfg.max_new_tokens`), README, dan tabel config di atas — baris tabel yang keliru `200` diperbaiki 2026-09-06
 - `data/raw_logs/{baseline,graphrag}_log.json` sudah diproduksi oleh `run_comparison()` di `pipeline.py` (via `python src/experiments/pipeline.py --baseline`) — **belum** oleh `ablation.py` (masih pakai jalur lama tanpa evaluasi ESM/EX/CM per query). Pipeline retrieval+generation PENUH (GraphRAG/Baseline sungguhan) belum pernah dijalankan end-to-end di Kaggle (torch tidak tersedia di environment dev lokal). **Lapisan metrics (`src/metrics/`) SUDAH divalidasi terhadap Spider dev set asli** (2026-08-26, 1034 query nyata, lihat `IMPLEMENTATION_DECISIONS.md` poin 16) — yang belum tervalidasi spesifik hanya pipeline retrieval+generation-nya sendiri, bukan lapisan evaluasi/metrics-nya
 
 ---
