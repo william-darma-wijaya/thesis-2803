@@ -61,8 +61,6 @@ class PipelineConfig:
     # Number of similar training examples injected into the prompt.
     # Set to 0 to disable few-shot entirely.
     few_shot_k: int = 3
-    # If True, examples from the same database are ranked first among top-k.
-    few_shot_same_db_first: bool = True
 
     # --- Generation ---
     max_new_tokens: int = 256

@@ -304,6 +304,135 @@ Penerapan beda per jalur, karena constraint arsitektur beda:
 
 ---
 
+## 21. QVT variations: paraphrase ALAMI dari dev.json, bukan digenerate/disiapkan manual (mengganti keputusan 2026-08-15)
+
+**Konteks:** keputusan 2026-08-15 (dicatat di `RESEARCHER_TODO.md`) bilang grouping variasi NL question untuk QVT (Dimensi 4) dikerjakan manual oleh peneliti di luar coding — waktu itu diasumsikan SPIDER dev set biasa tidak punya variasi NL question untuk SQL yang sama (asumsi ini juga tertulis literal di docstring lama `src/metrics/qvt.py`: "Ini TIDAK datang otomatis dari SPIDER dev set biasa").
+
+**Ditemukan (2026-09-07), setelah dataset SPIDER asli tersedia di `data/spider_data/`:** asumsi itu SALAH. Proses anotasi SPIDER (penulis pertanyaan berbeda + langkah verifikasi paraphrase) menghasilkan banyak SQL yang punya >1 pertanyaan NL berbeda secara alami. Dicek langsung ke `dev.json` (1034 baris): mengelompokkan berdasarkan `(db_id, SQL text)` identik menghasilkan **470 grup dengan tepat 2 pertanyaan NL berbeda per grup** (tidak ada grup dengan 3+), mencakup **940/1034 baris (90.9%)** dev set. 94 baris sisanya SQL-nya unik (cuma 1 pertanyaan), di luar populasi QVT.
+
+Contoh (`concert_singer`, SQL `SELECT count(*) FROM singer`):
+- "How many singers do we have?"
+- "What is the total number of singers?"
+
+**Keputusan:** pakai paraphrase alami ini sebagai `N_i1, N_i2` untuk QVT (guide 1.6), BUKAN generate parafrase baru (LLM atau manual). Alasan:
+1. Ini pertanyaan yang benar-benar ditulis manusia dengan intent yang sama — bukan sintetis (LLM-generated paraphrase punya risiko drift makna, dan menambah beban kerja peneliti tanpa perlu).
+2. Cakupan 90.9% dari dev set sudah lebih dari cukup untuk populasi QVT yang representatif.
+3. `predicted_sql`/`is_correct` (EX, sesuai poin 10) untuk tiap variasi bisa langsung diambil dari `data/raw_logs/{baseline,graphrag}_log.json` yang SUDAH diproduksi `run_comparison()` untuk keperluan Dimensi 1/2/3/5 — **tidak perlu jalankan pipeline terpisah/tambahan** untuk QVT sama sekali, tinggal join by `query_id`.
+
+**Batasan yang harus disebut di metodologi:**
+- `m_i` (jumlah variasi per query) selalu tepat 2, tidak pernah lebih — lebih kasar dari contoh ilustratif guide (m=5). `skor_i` cuma bisa 0, 0.5, atau 1.
+- Populasi QVT cuma 940/1034 (90.9%) dev set — 94 query dengan SQL unik tidak pernah dievaluasi variance-nya.
+- **Syarat teknis join:** `query_id` di raw_logs ("dev_XXXX") adalah posisi baris di `dev_data` SAAT `run_comparison()` jalan (lihat `pipeline.py` sekitar baris 648-652 & 782) — hanya identik dengan posisi asli di `dev.json` kalau `sample_ratio=1.0` (TANPA subsampling). Builder script mem-verifikasi `len(raw_logs) == len(dev.json)` sebelum join dan berhenti dengan pesan error kalau tidak sama, supaya tidak diam-diam menghasilkan pairing yang salah.
+
+**Lokasi implementasi:** `src/experiments/build_qvt_variations.py` (script baru — `build_groups()` mengelompokkan `dev.json`, `join_with_raw_logs()` menjoin ke raw_logs per kondisi, tulis `data/qvt_variations/{baseline,graphrag}_qvt.json`). Diverifikasi dengan fixture raw_logs sintetis (full 1034 baris, EX acak) di scratchpad — output 470 query x 2 variasi per kondisi sesuai kontrak `src/metrics/qvt.py`, dan dua guard rail (raw_logs belum ada; raw_logs ke-subsample) diuji menghasilkan pesan error yang jelas, bukan crash/silent-wrong-output. Docstring `src/metrics/qvt.py` yang lama (klaim "tidak datang otomatis") sudah diperbaiki.
+
+**Dampak ke `RESEARCHER_TODO.md`:** sub-tugas "grouping" untuk `data/qvt_variations/` sudah selesai secara kode (tinggal dijalankan). Yang masih jadi tanggung jawab peneliti/GPU: menjalankan `pipeline.py --baseline --sample 1.0` di Kaggle (blocker yang sama dengan Dimensi 1/2/3/5), lalu jalankan `build_qvt_variations.py`.
+
+---
+
+## 22. Penghapusan `few_shot_same_db_first` — provably dead code, bukan cuma inert
+
+**Konteks:** `retrieve_few_shot_examples()` (`src/generation/few_shot.py`) punya mode `few_shot_same_db_first=True` yang, kalau aktif: (1) over-fetch pool `few_shot_k * 4` kandidat by cosine similarity dulu, (2) mempromosikan kandidat yang `db_id`-nya sama dengan pertanyaan saat ini ke depan top-k, walau similarity-nya lebih rendah dari kandidat cross-DB yang tergeser. Docstring lama beralasan "Spider train/dev splits share database IDs, so same-DB examples are often the most relevant" — juga ditulis ulang di CLAUDE.md sebagai catatan metodologi yang harus disebut soal bias.
+
+**Ditemukan (2026-09-12), saat menjelaskan alur few-shot retrieval ke peneliti:** asumsi "train/dev share database IDs" itu SALAH. Diverifikasi langsung: `dev.json` (20 database) dan `train_spider.json` (140 database) **disjoint total** — 0 `db_id` overlap. Ini bukan kebetulan di split kita, tapi properti struktural Spider sebagai *cross-domain* benchmark (definisi intinya: model harus generalize ke database yang belum pernah dilihat). Konsekuensinya, cabang `same_db` di kode **provably selalu kosong** untuk evaluasi Spider dev set manapun — bukan "kebetulan nol di run ini", tapi tidak mungkin pernah berisi apapun selama pipeline dievaluasi terhadap dev set standar dengan few-shot dari train set standar.
+
+**Keputusan (2026-09-12):** hapus `few_shot_same_db_first` total (parameter config + logic rerank + over-fetch pool), bukan cuma didokumentasikan sebagai "inert". Alasan:
+1. Kode yang tidak mungkin pernah menyala itu dead weight — nambah kompleksitas (pool `k*4`, extra `torch.topk` di kandidat lebih besar) tanpa efek terukur apapun di hasil.
+2. Membiarkannya "didokumentasikan sebagai inert" berisiko sesi/peneliti berikutnya lupa konteks ini dan menganggapnya aktif — root cause (Spider cross-domain, disjoint by design) sudah permanen, bukan sesuatu yang bisa berubah nanti kalau dataset di-refresh.
+3. Trade-off yang coba dijawab fitur ini (promosikan same-DB walau similarity lebih rendah, demi vocab schema yang identik) TIDAK PERNAH tervalidasi lewat ablation — bukan keputusan berbasis bukti, cuma asumsi desain yang gagal diverifikasi terhadap data asli.
+
+`retrieve_few_shot_examples()` sekarang murni top-k by cosine similarity, tanpa parameter `db_id` (parameter itu jadi tidak terpakai setelah logic same-DB dihapus, jadi ikut dibuang dari signature). Ranking few-shot examples sekarang: 100% cosine similarity pertanyaan, titik.
+
+**Lokasi implementasi:** `src/generation/few_shot.py` (`retrieve_few_shot_examples()` disederhanakan, docstring modul diperbaiki), `src/core/config.py` (field `few_shot_same_db_first` dihapus dari `PipelineConfig`), `src/experiments/pipeline.py` + `src/experiments/ablation.py` (call site disesuaikan, `db_id` tidak lagi dioper ke `retrieve_few_shot_examples()`), `CLAUDE.md` (baris config table, "Few-shot: sumber data & bias", dan "Hal yang Jangan Diubah Tanpa Diskusi" diperbaiki — klaim "train/dev berbagi db_id" dikoreksi jadi "disjoint total").
+
+**Update (2026-09-12, sama hari):** `notebooks/compiled/graphrag_text2sql.ipynb` (versi Kaggle-ready) DISINKRONKAN penuh terhadap `src/` saat ini, bukan cuma untuk `few_shot_same_db_first`. Notebook itu ternyata drift signifikan dari `src/` di banyak tempat (kemungkinan besar belum di-update sejak beberapa refactor terakhir). Yang diperbaiki di 9 cell (config, generation, few_shot, sweep, baseline, pipeline helpers, + 3 cell run):
+- `predictions_file` default `"predictions.txt"` → `"outputs/predictions/predictions.txt"`; `bnb_compute_dtype` `torch.bfloat16` → `torch.float16`; `max_new_tokens` `200` → `256`; field `token_output_weight` (hilang total) ditambahkan.
+- `_clean_sql()`: guard pemotong teks-setelah-SQL yang hilang ditambahkan (`_cut` regex); fix alias-stripping yang tidak membuang `table.column` prefix dari klausa WHERE/GROUP/ORDER/HAVING/LIMIT yang dipertahankan.
+- `generate_sql_with_token_count()` (T_in/T_out) ditambahkan — notebook lama cuma punya `generate_sql()` tanpa hitung token.
+- `sweep.py`: metrik heuristik lama (`recall_weighted_f1` ad-hoc) diganti F6 (β=6, arxiv 2501.17174) yang sudah dipakai `src/experiments/sweep.py`; export CSV yang hilang ditambahkan.
+- `baseline.py`: `evaluate_table_linking()` diganti ke versi schema-aware (stopword-filtered, sama seperti `evaluate_schema_linking()`) dari versi lama raw-token-overlap; fix FK annotation (`from_col in this_cols`, bukan cuma truthy check) supaya tidak salah arah; fix bug `top_k_tables=0` yang dulu diam-diam fallback ke `top_k=3` alih-alih "semua tabel" (`_all_table_nodes()` ditambahkan).
+- `pipeline.py`: `run_official_evaluation()` ditambahkan JOIN-keyword normalization (`normalize_join_keywords_for_parsing`/`normalize_sql_file_for_parsing`, di-port dari `src/utils/sql_normalize.py`) supaya prediksi `INNER`/`CROSS`/`LEFT`/`RIGHT`/`FULL JOIN` tidak bikin parser resmi SPIDER crash saat evaluasi Kaggle (poin 11) -- notebook lama tidak punya normalisasi ini sama sekali.
+- **Konsekuensi yang perlu disadari:** `prune_path_nodes()` DIPANGGIL di versi notebook lama (`run_single`/sweep) tapi TIDAK dipanggil di `src/experiments/pipeline.py`/`sweep.py` saat ini (lihat open item terkait di bawah). Sync ini bikin notebook ikut TIDAK memanggilnya lagi (match `src/` current) -- artinya retrieval jadi kurang selektif dibanding sebelumnya (bridge node dari path-trace tidak lagi dibuang). Ini regresi nyata, bukan cuma cosmetic, kalau dibandingkan ke perilaku notebook SEBELUM sync ini. Perlu diputuskan terpisah: wire `prune_path_nodes()` balik ke `src/` + notebook, atau terima kondisi ini.
+- **TIDAK di-port:** sistem `data/raw_logs/*.json` + evaluasi ESM/EX/CM inline (`src/metrics/esm_ex_cm.py`) + confound diagnostics. Sesuai `requirements.txt` ("Pipeline utama... jalan di Kaggle... metrics/dimensions... dijalankan secara lokal"), notebook ini scope-nya tetap retrieval+generation+official-eval saja. **Catatan:** ini menyisakan pertanyaan terbuka -- `pipeline.py --baseline`'s `run_comparison()` (yang memproduksi `data/raw_logs/*.json`) SECARA NYATA memanggil `src.metrics.esm_ex_cm` inline di environment yang sama dengan LLM inference (jadi harus jalan di Kaggle juga), bertentangan dengan asumsi requirements.txt bahwa metrics selalu lokal. Belum diselesaikan di sini -- lihat open items.
+
+Diverifikasi: seluruh 27 cell notebook (termasuk yang tidak diubah) tetap valid Python (`ast.parse`) kecuali 2 cell magic command (`%pip install`/`!wget`, sudah begitu dari awal), JSON notebook valid, tidak ada sisa referensi `few_shot_same_db_first`.
+
+---
+
+## 23. Dimensi 4: silang-ESM butuh raw_logs terpisah (data QVT sengaja tidak membawa ESM), populasi silang = yang lolos filter wajib
+
+**Konflik/ambiguitas:** guide Bagian 3 Dimensi 4 langkah 6 minta "silangkan dengan ESM (apakah query yang tidak konsisten juga bermasalah di ESM)". Tapi:
+
+1. Data QVT (`data/qvt_variations/*.json`) **tidak punya ESM sama sekali** — field `is_correct` di situ adalah **EX**, bukan ESM (keputusan poin 10, sengaja, supaya definisi "benar" konsisten di seluruh perhitungan QVT). Jadi langkah 6 tidak bisa dijawab dari data QVT saja.
+2. Guide tidak mendefinisikan apa arti "tidak konsisten" dan "bermasalah di ESM" secara operasional, dan tidak bilang apakah query yang dibuang filter wajib (semua variasinya salah, guide 1.6(e)) ikut masuk silang atau tidak.
+3. `build_qvt_variations.py` versi awal (poin 21) cuma menyimpan **canonical** `query_id` per grup (yang terkecil), membuang `query_id` anggota lainnya — padahal ESM perlu dilihat untuk SETIAP variasi, bukan cuma satu.
+
+**Keputusan (2026-09-14):**
+
+**(a) Signature `run_dimension_4()` diperluas dengan raw_logs opsional:**
+```python
+run_dimension_4(baseline_qvt_data, graphrag_qvt_data,
+                baseline_logs=None, graphrag_logs=None)
+```
+Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_cross` = `None` dan `print_dimension_4()` mencetak blok `[!] DILEWATI` yang menjelaskan kenapa. Langkah guide dilewati secara **terlihat**, bukan diam-diam hilang.
+
+**(b) `build_qvt_variations.py` sekarang menyimpan `query_id` per VARIASI** (tambahan, bukan menggantikan `query_id` canonical di level grup). Field ini tidak dipakai `src/metrics/qvt.py` sama sekali — murni supaya Dimensi 4 bisa melihat `esm_result` tiap variasi di raw_logs. `dim4_robustness.py` melempar `ValueError` dengan pesan eksplisit kalau menemui file qvt_variations versi lama tanpa field ini, alih-alih diam-diam cuma melihat 1 dari m_i variasi.
+
+**(c) Populasi silang-ESM = query yang LOLOS filter wajib QVT (`included=True`) saja.** Query yang semua variasinya salah itu **"konsisten salah"**, bukan "tidak konsisten" — dan memang sudah dibuang dari QVT by definition. Jumlah yang dibuang tetap dilaporkan terpisah (`n_excluded`) supaya tidak tersembunyi.
+
+**(d) Definisi operasional dua sumbu, sengaja dibuat simetris:**
+- "tidak konsisten" := `qvt_score < 1.0` (tidak semua variasi benar secara EX)
+- "bermasalah di ESM" := tidak semua variasi grup itu punya `esm_result == 1`
+
+**(e) Skala threshold:** `aggregate_qvt()` mengembalikan 0–1, jadi "±2%" dari guide dipakai sebagai `0.02` pada skala itu (2 poin persen), bukan `2.0`. Batas persis mengikuti tabel guide: `ΔQVT ≥ +2%` meningkat, `−2% ≤ ΔQVT < +2%` stabil, `ΔQVT < −2%` menurun — tidak ada celah/overlap.
+
+**Alasan:**
+
+(a) Alternatifnya adalah memaksa data QVT membawa ESM juga. Itu ditolak karena bertentangan dengan poin 10 (satu definisi "benar" untuk seluruh QVT, jangan dicampur) dan akan bikin file qvt_variations punya dua field korektnya yang gampang tertukar. Membaca ESM dari raw_logs — sumber aslinya — lebih jujur dan tidak menduplikasi data. Dibuat opsional supaya Dimensi 4 tetap bisa dijalankan standalone atas file qvt_variations saja (mis. saat cek cepat ΔQVT) tanpa memuat raw_logs penuh.
+
+(c) Memasukkan query yang semua variasinya gagal ke kolom "tidak konsisten" akan salah secara konseptual — variance-nya justru NOL (konsisten gagal) — dan akan mengukur hal yang berbeda dari yang ditanya guide.
+
+(d) Kalau dua sumbu pakai ambang yang beda bentuk (mis. QVT pakai "tidak semua benar" tapi ESM pakai "rata-rata ESM < X%"), tabel 2×2-nya jadi tidak apple-to-apple. Bentuk all-or-nothing yang sama di dua sumbu bikin silangnya bisa dibaca langsung.
+
+**Catatan keterbatasan (dari poin 21, bukan baru):** dengan paraphrase alami dev.json, `m_i` **selalu tepat 2**, jadi `qvt_score` per query hanya bisa bernilai `1.0` (2/2 benar) atau `0.5` (1/2 benar) — query 0/2 dibuang filter. Artinya sumbu "konsisten vs tidak konsisten" di praktiknya adalah biner 2/2 vs 1/2. Kode tidak meng-hardcode `m_i = 2`, tapi interpretasi hasilnya harus sadar batasan ini. Sebutkan di bab metodologi.
+
+**Verifikasi:** 7 test fixture sintetis — QVT hand-computed (termasuk filter wajib: 4 grup → M=3, 1 dibuang), batas threshold ±2% di 7 titik (termasuk persis `+0.02`, `-0.02`, dan `0`), kontingensi 2×2 hand-computed untuk kedua kondisi (memastikan grup yang difilter TIDAK ikut masuk), `esm_cross is None` saat logs tidak dioper, dan 4 error guard (qvt_data kosong, semua query difilter → re-raise dengan label kondisi, format qvt_variations versi lama, variasi hilang di raw_logs → dihitung `n_missing_in_logs`, tidak crash). Plus satu test end-to-end atas `data/spider_data/dev.json` ASLI (1034 baris → 470 grup, semuanya `m_i=2`) lewat `build_groups()` + `join_with_raw_logs()` sungguhan dengan raw_logs sintetis — memastikan kontrak builder ↔ dim4 nyambung.
+
+**Lokasi implementasi:** `src/dimensions/dim4_robustness.py` (implementasi penuh, `run_dimension_4()` + `print_dimension_4()`, menggantikan stub `raise NotImplementedError`), `src/experiments/build_qvt_variations.py` (`join_with_raw_logs()` menambahkan `query_id` per variasi), `src/metrics/qvt.py` (blok format data di docstring diperbarui + catatan bahwa `query_id` dalam variasi tidak dipakai modul itu), `CLAUDE.md` (status Dimensi 4), `context/DIMENSIONS_EXPLAINED.md` (bagian Dimension 4).
+
+---
+
+## 24. Orkestrasi 6 dimensi (`run_all_dimensions.py`): skip-dengan-alasan, gating Dimensi 5 dari Dimensi 2, `ex_per_k` manual untuk Dimensi 6
+
+**Konflik/ambiguitas:** `run_all_dimensions.py` sebelumnya skeleton (`main()` raise `NotImplementedError`). Saat diisi, muncul empat hal yang guide tidak jawab:
+
+1. Setiap dimensi punya prasyarat data BERBEDA (raw_logs, qvt_variations, ex_per_k) dan semuanya belum ada sampai run Kaggle selesai. Apakah file ini crash kalau salah satu belum siap?
+2. Guide bikin Dimensi 5 **kondisional** ("hanya dijalankan jika pipeline belum optimal", trigger dari Dimensi 2 kondisi "EX rendah, ESM rendah"), tapi poin 14 sudah memutuskan `run_dimension_5()` sendiri TIDAK mengecek itu — gating-nya tugas pemanggil. Sekarang pemanggilnya ada, jadi gating harus diletakkan di sini.
+3. Dimensi 6 butuh `ex_per_k` (EX per nilai k, skala 0–100). Tidak ada file manapun di project yang menyimpannya: `outputs/tables/ablation_results.csv` cuma punya recall/precision/token (lihat `_save_csv()` di `ablation.py`), dan EX per k dihitung oleh Spider `evaluation.py` yang dijalankan `_run_ablation_evals()` sebagai **subprocess** — outputnya ke stdout/log, tidak pernah machine-readable.
+4. Dimensi 1 satu-satunya yang butuh `PipelineConfig` (untuk μ), dan `src/core/config.py` `import torch` — yang tidak ada di environment evaluasi lokal.
+
+**Keputusan (2026-09-17):**
+
+**(a) Skip-dengan-alasan, bukan crash.** Tiap dimensi dijalankan dalam wrapper yang mengembalikan `status` ∈ `{"ok", "skipped", "error"}`. `"skipped"` = prasyarat data belum ada (kondisi NORMAL di tahap ini) dengan `reason` yang menyebut file yang kurang + perintah persis untuk memproduksinya. `"error"` = exception tak terduga (bug). Satu dimensi gagal TIDAK membatalkan lima lainnya. **Exit code 1 hanya untuk `"error"`** — "data belum ada" exit 0, supaya file ini aman dijalankan kapan saja cuma untuk melihat status kesiapan.
+
+**(b) Gating Dimensi 5 diletakkan di sini, sesuai guide.** Dimensi 5 dijalankan HANYA kalau `run_dimension_2()` mengembalikan `escalate_to_dimension_5=True` (yaitu kuadran "EX rendah, ESM rendah" per poin 12). Kalau tidak, di-skip dengan alasan yang menyebut kombinasi Dimensi 2 yang terbaca. Flag `--always-dim5` menimpa gating itu. Dimensi 5 dijalankan untuk **dua kondisi** (Baseline dan GraphRAG) secara terpisah — bukan digabung jadi satu diagnosis — karena dimensi itu memang diagnostik satu-kondisi (poin 14).
+
+**(c) `ex_per_k` dioper manual** lewat `--ex-per-k 0=45.2,1=52.1,3=54.0,5=53.8` atau `--ex-per-k-file` (JSON `{"0": 45.2, ...}`). Kalau tidak diberikan, Dimensi 6 di-skip dengan alasan yang menjelaskan kenapa angkanya tidak bisa diambil otomatis. **TIDAK** dibuat parser stdout Spider eval, dan `ablation.py` **TIDAK** diubah untuk menulis kolom EX — dua-duanya perubahan ke jalur eksperimen yang sudah jalan, di luar scope pengisian orkestrator ini (lihat open item D).
+
+**(d) Dimensi 1 di-import LAZY**, terpisah dari lima import dimensi lain di top-level. Kalau `torch` tidak ada, Dimensi 1 di-skip dengan `reason` yang menyebut sebab persisnya (`config.py` baris 5, untuk satu default `bnb_compute_dtype`) + dua remedy (`pip install torch` versi CPU, atau jalankan di Kaggle). **Sengaja TIDAK** dibuat `PipelineConfig` tiruan/shim lokal yang meng-hardcode μ=3 — itu akan bikin sumber μ bercabang dua dan bisa drift dari `config.py` tanpa ada yang sadar (justru persis masalah yang poin 1 selesaikan). Lihat open item C.
+
+**(e) Validasi skema raw_logs saat load.** `load_raw_logs()` memeriksa 12 field wajib guide Bagian 2 per baris dan melempar `ValueError` yang menyebut **path + index baris + query_id + daftar field yang hilang**. Alasan: tanpa ini, raw_logs yang malformed baru meledak jadi `KeyError` mentah di tengah dimensi ke-2 atau ke-3, tanpa petunjuk baris mana yang salah.
+
+**Alasan (a):** file ini adalah satu-satunya tempat peneliti bisa bertanya "apa yang sudah bisa dijalankan sekarang?". Kalau crash di prasyarat pertama yang kurang, ia tidak pernah bisa menjawab pertanyaan itu — dan output "DILEWATI + alasan + perintah remedy" per dimensi justru berguna sebagai checklist kesiapan, bukan cuma penanganan error.
+
+**Output:** `outputs/tables/dimensions_results.json` (semua return value dimensi + status, machine-readable untuk bikin tabel/plot skripsi) dan `outputs/tables/dimensions_report.txt` (teks laporan persis seperti yang dicetak ke stdout). `--no-save` untuk print saja.
+
+**Verifikasi:** 9 test fixture sintetis end-to-end lewat CLI sungguhan (subprocess) — (1) skenario GraphRAG lebih baik: dim 2/3/4/6 OK dan dim5 di-skip dengan alasan "Dimensi 2 tidak escalate"; (2) skenario GraphRAG lebih buruk: dim2 escalate → dim5 JALAN untuk kedua kondisi; (3) `--always-dim5` menimpa gating pada fixture (1) yang sama; (4) `qvt_variations` hilang → cuma dim4 di-skip, dim2/dim3 tetap OK; (5) raw_logs malformed (2 field dihapus di baris ke-7) → pesan menyebut `baris ke-7` + `ex_result` + `cm_per_clause`, exit 0; (6) `--only 2 3` menghasilkan tepat 2 key; (7) `--ex-per-k-file` + validasi parsing `--ex-per-k`; (8) `--only 9` → error argparse bersih (bukan traceback) + file output tetap tertulis; (9) laporan penuh dicetak dan diperiksa manual. Dimensi 1 ter-skip di semua test karena `torch` memang tidak ada di environment lokal — itu jalur (d) yang bekerja sesuai rancangan, bukan kegagalan test.
+
+**Lokasi implementasi:** `src/experiments/run_all_dimensions.py` (seluruh file ditulis ulang dari skeleton), `CLAUDE.md` (status orkestrasi + CLI quick reference).
+
+---
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER
@@ -317,3 +446,39 @@ Penerapan beda per jalur, karena constraint arsitektur beda:
 **Catatan teknis:** `INNER JOIN` → `JOIN` aman dinormalisasi sebelum parsing (100% setara secara semantik di SQL standar). `LEFT JOIN`/`RIGHT JOIN` TIDAK aman dinormalisasi ke `JOIN` biasa — keduanya mempertahankan baris yang tidak match dengan `NULL`, beda perilaku dari inner join, jadi normalisasi buta akan mengubah semantik yang diukur, bukan cuma perbaikan kompatibilitas parser.
 
 **Status (historis, sebelum poin 11):** belum diputuskan mau diapakan (dibiarkan sebagai known limitation vs investigasi seberapa sering LLM benar-benar memakai keyword ini di praktik).
+
+### B. `requirements.txt` vs `pipeline.py --baseline`: kontradiksi soal "metrics jalan di mana"
+
+**Ditemukan (2026-09-12),** saat sync `notebooks/compiled/graphrag_text2sql.ipynb` (poin 22). `requirements.txt` menyatakan eksplisit: *"Requirements untuk evaluation pipeline (src/metrics/, src/dimensions/) — dijalankan secara lokal, bukan di Kaggle. Pipeline utama (src/core, src/retrieval, src/generation, src/experiments) jalan di Kaggle Notebook..."* — implikasinya `src/metrics/` tidak pernah perlu importable di lingkungan Kaggle.
+
+**Tapi** `src/experiments/pipeline.py`'s `run_comparison()` (dipanggil via `python src/experiments/pipeline.py --baseline`, yang memproduksi `data/raw_logs/{baseline,graphrag}_log.json` — satu-satunya sumber data buat Dimensi 1/2/3/5 dan `build_qvt_variations.py`) memanggil `src.metrics.esm_ex_cm` (`evaluate_single_query`, `build_kmaps`, `build_schema_for_db`) **inline, di proses yang sama** dengan retrieval+generation LLM (yang wajib jalan di GPU/Kaggle). Ini berarti `src/metrics/esm_ex_cm.py` (dan transitif: `external/spider_eval/evaluation.py`+`process_sql.py`) **harus** importable di lingkungan Kaggle supaya `pipeline.py --baseline` bisa jalan sama sekali — bertentangan langsung dengan klaim `requirements.txt` di atas.
+
+**Belum diputuskan:** apakah `requirements.txt`-nya yang perlu diperbarui (akui `src/metrics/esm_ex_cm.py` minimal harus ada di Kaggle juga untuk jalur `--baseline`), atau `run_comparison()`-nya yang perlu dipisah (pisahkan step retrieval+generation dari step evaluasi ESM/EX/CM+raw_logs jadi dua proses/dua environment berbeda, sesuai niat awal requirements.txt). Belum ada dampak konkret ke hasil manapun sejauh ini — cuma inkonsistensi dokumentasi/arsitektur yang perlu diklarifikasi peneliti sebelum run Kaggle sungguhan.
+
+### C. `src/core/config.py` mengikat SELURUH lapisan dimensi ke `torch` demi satu default dtype
+
+**Ditemukan (2026-09-17),** saat mengisi `run_all_dimensions.py` (poin 24).
+
+`src/core/config.py` baris 5 `import torch`, dipakai HANYA untuk satu default field: `bnb_compute_dtype: torch.dtype = torch.float16`. Tapi `src/dimensions/dim1_efficiency.py` `import PipelineConfig` dari situ (untuk μ = `token_output_weight`), jadi **Dimensi 1 tidak bisa jalan di environment tanpa torch** — padahal `requirements.txt` menyatakan lapisan `src/metrics/` + `src/dimensions/` justru dirancang jalan LOKAL, bukan di Kaggle. Lima dimensi lain tidak terpengaruh (tidak ada yang butuh `cfg`).
+
+Efek nyata: dijalankan lokal apa adanya sekarang, `run_all_dimensions.py` melaporkan `Dimensi 1: DILEWATI (torch tidak ada)` — dan Dimensi 1 itu yang menjawab RM1, hasil headline skripsi.
+
+**Opsi:**
+1. `pip install torch` versi CPU di environment lokal (paling cepat, tidak menyentuh kode; ~200MB untuk satu konstanta dtype).
+2. Tambahkan `torch` ke `requirements.txt` — mengakui lapisan evaluasi memang butuh torch, konsisten dengan opsi 1.
+3. Decouple `config.py` dari torch: simpan dtype sebagai string (`"float16"`) dan resolve ke `torch.dtype` di `generation.py` saat load model. Paling bersih secara arsitektur, TAPI menyentuh jalur GPU yang sudah jalan (`load_model_and_tokenizer()`) — perlu diuji ulang di Kaggle sebelum dipercaya.
+4. Biarkan; jalankan Dimensi 1 di Kaggle bersama pipeline, lima dimensi lain lokal.
+
+**Belum diputuskan.** Terkait erat dengan open item B (kontradiksi "metrics jalan di mana") — sebaiknya diputuskan bersamaan, karena dua-duanya soal batas environment lokal vs Kaggle untuk lapisan evaluasi.
+
+### D. EX per k untuk Dimensi 6 tidak tersimpan machine-readable
+
+**Ditemukan (2026-09-17),** saat mengisi `run_all_dimensions.py` (poin 24).
+
+`run_dimension_6()` butuh `ex_per_k` = `{0: EX, 1: EX, 3: EX, 5: EX}` (skala 0–100). Tidak ada file di project yang menyimpannya:
+- `outputs/tables/ablation_results.csv` (ditulis `_save_csv()` di `ablation.py`) punya `avg_recall`, `avg_precision`, `avg_prompt_tokens`, `avg_output_tokens`, `avg_token_consumption`, `n_samples` — **tidak ada kolom EX/ESM**.
+- EX per k dihitung `_run_ablation_evals()` dengan memanggil Spider `evaluation.py` sebagai **subprocess** per file prediksi; hasilnya ke stdout/log, tidak di-parse dan tidak disimpan.
+
+Untuk sekarang `run_all_dimensions.py` menerima angkanya manual (`--ex-per-k` / `--ex-per-k-file`) dan men-skip Dimensi 6 dengan penjelasan kalau tidak diberikan (poin 24c).
+
+**Belum diputuskan:** (1) tambahkan kolom `ex`/`esm` ke `ablation_results.csv` dengan cara meng-capture + parse stdout `evaluation.py` di `_run_ablation_evals()`; atau (2) pindahkan evaluasi ablation ke `esm_ex_cm.evaluate_single_query()` in-process (seperti yang sudah dilakukan `run_comparison()` di `pipeline.py`) supaya EX per k langsung tersedia sebagai angka, sekaligus menutup gap "`ablation.py` belum memproduksi raw_logs" yang sudah tercatat di CLAUDE.md; atau (3) biarkan manual — peneliti copy angka dari output Spider eval sekali saja setelah run ablation. Opsi 2 paling menyelesaikan akar masalah tapi menyentuh `ablation.py` yang jalan di Kaggle, jadi butuh konfirmasi peneliti dulu.

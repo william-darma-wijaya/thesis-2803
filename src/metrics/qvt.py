@@ -4,18 +4,25 @@ qvt.py — Query Variance Testing
 Referensi: EVALUATION_ANALYSIS_GUIDE.md Bagian 1.6.
 
 PRASYARAT DATA: dataset variasi NL question per gold SQL, taruh di
-data/qvt_variations/. Ini TIDAK datang otomatis dari SPIDER dev set biasa,
-harus disiapkan/digenerate terpisah (belum ada generator-nya di src/experiments/
-per saat modul ini ditulis — lihat catatan run_all_dimensions.py).
+data/qvt_variations/. KOREKSI (2026-09-07, lihat context/IMPLEMENTATION_DECISIONS.md
+poin 21): klaim lama di sini ("tidak datang otomatis dari dev set biasa") SALAH —
+dev.json SPIDER punya ~470 SQL dengan 2 paraphrase NL alami (ditulis manusia saat
+anotasi), mencakup 90.9% dev set. `src/experiments/build_qvt_variations.py`
+membangun data/qvt_variations/{baseline,graphrag}_qvt.json dari situ + raw_logs
+yang sudah ada (data/raw_logs/*.json) — tidak perlu generate parafrase baru.
 
 Format data yang diharapkan (per gold SQL):
 {
-  "query_id": "...",
+  "query_id": "...",          # canonical id group (query_id terkecil anggotanya)
   "gold_sql": "...",
   "variations": [
-     {"nl_question": "...", "predicted_sql": "...", "is_correct": 0 | 1}
+     {"query_id": "...", "nl_question": "...", "predicted_sql": "...", "is_correct": 0 | 1}
   ]
 }
+
+"query_id" DI DALAM tiap variasi tidak dipakai modul ini sama sekali — itu untuk
+silang-ESM di src/dimensions/dim4_robustness.py, yang perlu melihat esm_result
+tiap variasi di raw_logs (lihat IMPLEMENTATION_DECISIONS.md poin 23).
 
 KEPUTUSAN (2026-08-15, lihat context/IMPLEMENTATION_DECISIONS.md poin 10):
 "is_correct" per variasi diukur pakai **EX** (Execution Accuracy), bukan ESM.

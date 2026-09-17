@@ -179,7 +179,7 @@ def run_single(
     few_shot_block = ""
     if few_shot_index is not None and cfg.few_shot_k > 0:
         examples = retrieve_few_shot_examples(
-            question, db_id, few_shot_index, embed_model, cfg
+            question, few_shot_index, embed_model, cfg
         )
         few_shot_block = format_few_shot_block(examples)
 
