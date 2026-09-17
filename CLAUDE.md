@@ -36,6 +36,7 @@ thesis-2803/
 │   │   ├── pipeline.py     — orchestration utama, CLI entry point, Spider evaluation
 │   │   ├── sweep.py        — hyperparameter sweep: top_k_tables × top_k_columns (tanpa LLM)
 │   │   ├── ablation.py     — ablation study: few-shot k={0,1,3,5} × {baseline, graphrag}
+│   │   ├── build_qvt_variations.py — bangun data/qvt_variations/*.json dari paraphrase alami dev.json + raw_logs (lihat IMPLEMENTATION_DECISIONS.md poin 21)
 │   │   └── run_all_dimensions.py — entry point evaluasi: baca raw_logs, jalankan 6 dimensi analisis
 │   ├── utils/               — helper evaluasi: schema_utils.py (load/validasi db_schema), sql_execution.py (eksekusi SQLite aman)
 │   ├── metrics/             — metrik skripsi level query: sla.py, esm_ex_cm.py, token_consumption.py, tep.py, qvt.py
@@ -45,7 +46,7 @@ thesis-2803/
 ├── data/
 │   ├── raw_logs/            — INPUT dimensi analisis: baseline_log.json, graphrag_log.json (skema di context/EVALUATION_ANALYSIS_GUIDE.md Bagian 2) — diproduksi oleh `pipeline.py`'s `run_comparison()` (via `--baseline`), BELUM oleh `ablation.py`, lihat TBD di bawah
 │   ├── db_schema/           — schema per db_id untuk validasi SLA
-│   └── qvt_variations/      — dataset paraphrase NL question untuk metrik QVT (Dimensi 4)
+│   └── qvt_variations/      — dataset paraphrase NL question untuk metrik QVT (Dimensi 4), dibangun otomatis oleh `build_qvt_variations.py` dari paraphrase alami di `data/spider_data/dev.json` (bukan digenerate manual — lihat IMPLEMENTATION_DECISIONS.md poin 21)
 ├── context/
 │   ├── EVALUATION_ANALYSIS_GUIDE.md — source of truth formula & alur berpikir untuk src/metrics/ dan src/dimensions/ (JANGAN ubah formula/threshold di situ tanpa konfirmasi peneliti)
 │   ├── IMPLEMENTATION_DECISIONS.md — catatan SEMUA keputusan peneliti saat implementasi (konflik guide vs kode/tooling resmi SPIDER, dan alasannya) — baca ini sebelum mengubah perilaku src/metrics/ yang terasa "aneh"
@@ -67,9 +68,9 @@ Semua modul di `src/` dipanggil sebagai `src.<paket>.<modul>` (mis. `from src.co
 
 **Status `src/utils/`, `src/metrics/`, `src/dimensions/`:** hasil merge dari `evaluation_pipeline/`, sebuah folder template yang tadinya dibuat Claude tanpa melihat codebase ini (dari sesi brainstorming metrik/dimensi terpisah). Formula dan alur sudah final dari proposal (lihat `context/EVALUATION_ANALYSIS_GUIDE.md`).
 - **`src/metrics/` — SEMUA sudah diimplementasi penuh** (bukan lagi stub): `sla.py`, `esm_ex_cm.py`, `token_consumption.py`, `tep.py`, `qvt.py`. `src/utils/` juga penuh: `schema_utils.py`, `sql_normalize.py` (fix parser JOIN-keyword, lihat `IMPLEMENTATION_DECISIONS.md` poin 11), `raw_logs.py` (helper grouping per difficulty, dipakai lintas `src/dimensions/`).
-- **`src/dimensions/` — 5 dari 6 dimensi sudah diimplementasi**: Dimensi 1 (Efisiensi), 2 (Struktur SQL), 3 (Komponen SQL), 5 (Bottleneck), 6 (Ablation Few-Shot, interpretasi saja — belum ada data nyata dari `ablation.py`). **Masih stub: Dimensi 4** (Robustness/QVT) — blocked di `data/qvt_variations/` yang masih kosong (lihat `RESEARCHER_TODO.md`).
+- **`src/dimensions/` — KEENAM dimensi sudah diimplementasi** (tidak ada stub tersisa): Dimensi 1 (Efisiensi), 2 (Struktur SQL), 3 (Komponen SQL), 4 (Robustness/QVT), 5 (Bottleneck), 6 (Ablation Few-Shot, interpretasi saja — belum ada data nyata dari `ablation.py`). Dimensi 4 diimplementasi 2026-09-14 (lihat `IMPLEMENTATION_DECISIONS.md` poin 23) — `run_dimension_4()` menerima raw_logs opsional untuk silang-ESM langkah 6, karena data QVT sengaja cuma membawa EX (poin 10). - **`run_all_dimensions.py` — SUDAH terisi** (2026-09-17, lihat `IMPLEMENTATION_DECISIONS.md` poin 24), bukan skeleton lagi. Merangkai raw_logs → 6 dimensi jadi satu run, tulis `outputs/tables/dimensions_results.json` + `dimensions_report.txt`. Perilaku penting: setiap dimensi yang prasyarat datanya belum ada di-**skip dengan alasan + perintah remedy**, bukan crash (exit code 1 HANYA untuk bug tak terduga, bukan untuk "data belum ada") — jadi file ini aman dijalankan kapan saja sebagai checklist kesiapan. Dimensi 5 di-gate oleh hasil Dimensi 2 sesuai guide (`--always-dim5` untuk menimpa); Dimensi 6 butuh `--ex-per-k` manual (lihat open item D); Dimensi 1 di-import lazy dan ter-skip lokal karena `config.py` butuh `torch` (lihat open item C).
 - ✅ **Sudah divalidasi terhadap Spider dev set ASLI** (2026-08-26, bukan cuma sanity test SQLite sintetis lagi) — 1034 query dev set real (`data/spider_data/`, di luar git, lihat `.gitignore`), round-trip test lewat `esm_ex_cm.py`/`sla.py`: 0 exception, 0 kegagalan ESM. Satu limitation data upstream ditemukan (1 baris rusak encoding di `wta_1.sqlite`, pengaruh 0.19% dev set) dan didokumentasikan, bukan diperbaiki (lihat `IMPLEMENTATION_DECISIONS.md` poin 16 untuk alasan lengkap). `run_comparison()` di `pipeline.py` yang menulis `data/raw_logs/*.json` dari pipeline GraphRAG/Baseline sungguhan masih belum pernah dijalankan (butuh GPU/Kaggle, lihat `RESEARCHER_TODO.md`) — yang sudah divalidasi adalah lapisan metrics (`src/metrics/`), bukan pipeline retrieval+generation penuh.
-- **Semua keputusan implementasi** (konflik guide vs kode yang sudah ada, konflik guide vs keterbatasan tooling resmi SPIDER, dan open items yang belum diputuskan) ada di **`context/IMPLEMENTATION_DECISIONS.md`** — 20 keputusan tercatat sejauh ini, termasuk formula Token Consumption, EX order-sensitivity, label difficulty, casing CM clause, keterbatasan `union_all`, fix parser JOIN-keyword, hasil validasi dev set asli, bug fix `_set_op_clause_match()` (UNION/INTERSECT/EXCEPT salah skor akibat mutasi in-place), definisi Baseline final (poin 18), proxy schema-linking vs SLA (poin 19), dan confound diagnostics read-only (poin 20).
+- **Semua keputusan implementasi** (konflik guide vs kode yang sudah ada, konflik guide vs keterbatasan tooling resmi SPIDER, dan open items yang belum diputuskan) ada di **`context/IMPLEMENTATION_DECISIONS.md`** — 23 keputusan tercatat sejauh ini, termasuk formula Token Consumption, EX order-sensitivity, label difficulty, casing CM clause, keterbatasan `union_all`, fix parser JOIN-keyword, hasil validasi dev set asli, bug fix `_set_op_clause_match()` (UNION/INTERSECT/EXCEPT salah skor akibat mutasi in-place), definisi Baseline final (poin 18), proxy schema-linking vs SLA (poin 19), confound diagnostics read-only (poin 20), QVT variations dari paraphrase alami dev.json (poin 21), penghapusan `few_shot_same_db_first` (poin 22), kontrak silang QVT×ESM di Dimensi 4 (poin 23), dan orkestrasi 6 dimensi (poin 24). Open items yang masih terbuka: B (metrics jalan di mana), C (`config.py` mengikat lapisan dimensi ke torch), D (EX per k Dimensi 6 tidak tersimpan machine-readable).
 
 ---
 
@@ -169,7 +170,6 @@ Semua parameter ada di `PipelineConfig` dataclass. **Jangan hardcode nilai di fi
 | `top_k_columns` | `5` | TBD | Ditentukan oleh sweep.py |
 | `semantic_similarity_threshold` | `0.35` | TBD | Fallback jika top_k_columns=0 |
 | `few_shot_k` | `3` | TBD | Hasil ablation study |
-| `few_shot_same_db_first` | `True` | Final | Prioritaskan contoh dari DB yang sama |
 | `max_ngram` | `3` | Final | Segmentasi query sampai trigram |
 | `max_new_tokens` | `256` | Final | Budget generasi LLM. `config.py` = `256`; baris ini sebelumnya keliru tertulis `200` — kode selalu pakai `cfg.max_new_tokens`. |
 | `temperature` | `0.0` | Final | Greedy decoding, deterministik |
@@ -224,7 +224,7 @@ Definisi lengkap + algoritma step-by-step untuk keenam metrik di atas (termasuk 
 dan breakdown 6 dimensi analisis skripsi) ada di **`context/EVALUATION_ANALYSIS_GUIDE.md`**
 — itu source of truth-nya, tabel di atas cuma ringkasan. Implementasi metrik ada di
 `src/metrics/` (semua penuh), agregasi + interpretasi per dimensi ada di
-`src/dimensions/` (5 dari 6 penuh; Dimensi 4/QVT masih stub — lihat status di atas).
+`src/dimensions/` (keenam-enamnya penuh — lihat status di atas).
 
 ✅ **Konflik formula Token Consumption (μ vs α) dan keputusan EX order-sensitivity
 sudah diselesaikan** — lihat `context/IMPLEMENTATION_DECISIONS.md` poin 1 dan 5
@@ -251,11 +251,19 @@ keterbatasan evaluasi, TIDAK memengaruhi nilai ESM/EX/CM/raw_logs (lihat
 
 ### Few-shot: sumber data & bias yang harus disebut di metodologi
 
-Few-shot example diambil HANYA dari `train_spider.json` (bukan dev/test).
-`few_shot_same_db_first=True` menaikkan contoh dengan `db_id` yang sama ke atas
-top-k. Karena split train/dev Spider berbagi sebagian `db_id`, banyak contoh
-few-shot berbagi schema dengan pertanyaan dev — ini **retrieval dari train set,
-bukan kebocoran dev/test**, tapi WAJIB disebut eksplisit di bab metodologi.
+Few-shot example diambil HANYA dari `train_spider.json` (bukan dev/test),
+diranking murni by cosine similarity pertanyaan (BGE-M3, sama model dengan
+schema linking). Ini **retrieval dari train set, bukan kebocoran dev/test** —
+WAJIB disebut eksplisit di bab metodologi.
+
+Sebelumnya ada mode `few_shot_same_db_first` yang mempromosikan contoh dari
+`db_id` yang sama ke atas top-k, dengan asumsi "train/dev Spider berbagi
+sebagian db_id". **Asumsi itu salah** — Spider itu cross-domain benchmark,
+train (140 DB) dan dev (20 DB) disjoint total (diverifikasi: 0 overlap
+`db_id`). Mode itu provably tidak pernah bisa menyala untuk evaluasi dev set
+manapun, jadi dihapus 2026-09-12 (lihat `IMPLEMENTATION_DECISIONS.md` poin 22)
+— bukan cuma didokumentasikan sebagai inert, tapi kode + parameter config-nya
+dihapus total supaya tidak ada over-fetch pool tanpa efek.
 
 Spider evaluation scripts harus didownload manual ke `external/spider_eval/`:
 ```bash
@@ -302,7 +310,6 @@ data_path = Path("/kaggle/input/datasets/alrette/spiderdataset/spider_data")
 
 - Format prompt di `generation.py` — sudah di-tune, perubahan kecil berdampak besar ke output LLM
 - Struktur graph di `schema.py` — node identifier `{db}.{table}.{col}` dipakai di banyak tempat
-- `few_shot_same_db_first=True` — sudah jadi keputusan desain final
 - Greedy decoding (`temperature=0.0`, `do_sample=False`) — perlu deterministik untuk reprodusibilitas
 - **Definisi Baseline = table-level retrieval** (`src/retrieval/baseline.py`) — FINAL per 2026-09-06. Full-schema bypass (`--full-schema` / `use_full_schema_bypass=True`) adalah mode ablation saja, BUKAN baseline skripsi. Lihat `IMPLEMENTATION_DECISIONS.md` poin 18.
 
@@ -338,4 +345,14 @@ python src/experiments/sweep.py --sample 0.2
 
 # Perbandingan GraphRAG vs Baseline
 python src/experiments/pipeline.py --baseline
+
+# Bangun data QVT (butuh data/raw_logs/ dari run --baseline sample 1.0)
+python src/experiments/build_qvt_variations.py
+
+# Evaluasi: jalankan 6 dimensi analisis atas data/raw_logs/
+python src/experiments/run_all_dimensions.py
+
+# Idem, subset dimensi + data ablation untuk Dimensi 6
+python src/experiments/run_all_dimensions.py --only 1 2 3
+python src/experiments/run_all_dimensions.py --ex-per-k 0=45.2,1=52.1,3=54.0,5=53.8
 ```

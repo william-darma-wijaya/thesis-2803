@@ -112,7 +112,6 @@ def _run_k(
         top_k_tables=base_cfg.top_k_tables,
         top_k_columns=base_cfg.top_k_columns,
         few_shot_k=k,
-        few_shot_same_db_first=base_cfg.few_shot_same_db_first,
         use_full_schema_bypass=False,
     )
 
@@ -174,7 +173,7 @@ def _run_k(
                 few_shot_block = ""
                 if few_shot_index is not None and k > 0:
                     examples = retrieve_few_shot_examples(
-                        question, db_id, few_shot_index, embed_model, cfg
+                        question, few_shot_index, embed_model, cfg
                     )
                     few_shot_block = format_few_shot_block(examples)
 

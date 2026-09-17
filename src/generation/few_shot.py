@@ -7,8 +7,9 @@ Strategy: similarity-based retrieval.
     question using cosine similarity.
   - Return their (question, gold_sql) pairs as few-shot examples in the prompt.
 
-Optionally, examples from the same database are prioritised (same-DB-first mode),
-since those examples are guaranteed to share at least some schema vocabulary.
+Ranking murni by cosine similarity — tidak ada prioritas berdasarkan db_id.
+(Mode "same-DB-first" pernah ada, dihapus 2026-09-12 karena provably dead code
+untuk Spider: train/dev disjoint total, lihat IMPLEMENTATION_DECISIONS.md poin 22.)
 """
 
 import json
@@ -86,20 +87,23 @@ def build_few_shot_index(
 
 def retrieve_few_shot_examples(
     question: str,
-    db_id: str,
     index: FewShotIndex,
     embed_model: SentenceTransformer,
     cfg: PipelineConfig,
 ) -> list[FewShotExample]:
     """
-    Return the top-k most similar training examples for `question`.
+    Return the top-k most similar training examples for `question`, ranked
+    purely by cosine similarity.
 
-    If cfg.few_shot_same_db_first is True, examples from the same database
-    are ranked first among the top-k candidates, giving the LLM schema-familiar
-    examples when available.
-
-    The current question's own database is NOT excluded — Spider train/dev splits
-    share database IDs, so same-DB examples are often the most relevant.
+    REMOVED (2026-09-12, lihat context/IMPLEMENTATION_DECISIONS.md poin 22):
+    dulu ada mode "same-DB-first" yang mempromosikan contoh dari database yang
+    sama ke atas top-k, dengan asumsi "Spider train/dev splits share database
+    IDs". Asumsi itu salah — Spider itu cross-domain benchmark, train (140 DB)
+    dan dev (20 DB) sengaja disjoint total (diverifikasi langsung: 0 overlap).
+    Jadi cabang same-DB itu PROVABLY selalu kosong untuk evaluasi Spider dev
+    standar manapun juga — dead code yang tidak pernah bisa menyala, bukan cuma
+    kebetulan nol di satu run. Dihapus, bukan cuma didokumentasikan, supaya
+    tidak ada over-fetch pool (`k*4`) yang costly tanpa efek apapun.
     """
     if cfg.few_shot_k == 0 or index is None:
         return []
@@ -107,25 +111,8 @@ def retrieve_few_shot_examples(
     query_emb = embed_model.encode(question, convert_to_tensor=True)
     scores = util.cos_sim(query_emb, index.embeddings)[0]  # (n_train,)
 
-    # Retrieve a larger candidate pool first if same-DB-first is enabled,
-    # so we have enough candidates to rerank after partitioning by DB.
-    # Edge case: if the DB has fewer training examples than k, the same-DB
-    # partition will be exhausted and we pad from other DBs — this is fine
-    # and expected. The pool cap ensures we never request more than available.
-    pool_size = cfg.few_shot_k * 4 if cfg.few_shot_same_db_first else cfg.few_shot_k
-    pool_size = min(pool_size, len(index.examples))
-
-    top_indices = torch.topk(scores, pool_size).indices.tolist()
-    candidates = [index.examples[i] for i in top_indices]
-
-    if cfg.few_shot_same_db_first:
-        # Stable rerank: same-DB examples float to the top, order within
-        # each group is preserved (i.e. still sorted by similarity score).
-        same_db = [e for e in candidates if e.db_id == db_id]
-        other_db = [e for e in candidates if e.db_id != db_id]
-        candidates = same_db + other_db
-
-    return candidates[: cfg.few_shot_k]
+    top_indices = torch.topk(scores, cfg.few_shot_k).indices.tolist()
+    return [index.examples[i] for i in top_indices]
 
 
 # ---------------------------------------------------------------------------

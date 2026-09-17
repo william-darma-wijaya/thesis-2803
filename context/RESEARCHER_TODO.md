@@ -16,31 +16,36 @@
 
 ## 1. Data yang harus disiapkan
 
-- [ ] **`data/qvt_variations/*.json`** — dataset variasi NL question per gold SQL
-  untuk metrik QVT (Dimensi 4).
-  **Keputusan (2026-08-15): grouping dilakukan sendiri oleh peneliti**, bukan
-  digenerate otomatis oleh Claude Code — peneliti yang menentukan cara
-  mengelompokkan variasi pertanyaan ke `query_id` gold SQL yang sama.
-  Format kontrak data (lihat `src/metrics/qvt.py`):
+- [x] **`data/qvt_variations/*.json`** — SELESAI SECARA KODE 2026-09-07 (lihat
+  `IMPLEMENTATION_DECISIONS.md` poin 21) — **membalikkan keputusan 2026-08-15**
+  di bawah ini. Ternyata `dev.json` SPIDER sendiri sudah punya ~470 SQL dengan
+  2 paraphrase NL question ditulis manusia (proses anotasi), mencakup 90.9%
+  dev set — tidak perlu grouping manual ataupun generate parafrase baru.
+  `src/experiments/build_qvt_variations.py` mengerjakan groupingnya otomatis
+  dari `data/spider_data/dev.json` + join ke `data/raw_logs/*.json` yang sudah
+  ada (tidak perlu run pipeline terpisah untuk QVT).
+  **Yang masih jadi blocker:** hanya `data/raw_logs/*.json` itu sendiri harus
+  berasal dari `pipeline.py --baseline --sample 1.0` di Kaggle (item #2 di
+  bawah) — begitu itu ada, tinggal jalankan:
+  ```bash
+  python src/experiments/build_qvt_variations.py
+  ```
+  <details><summary>Keputusan lama 2026-08-15 (sudah tidak berlaku, dibiarkan untuk riwayat)</summary>
+
+  Format kontrak data (masih berlaku, dipakai `build_qvt_variations.py` —
+  ditambah field `query_id` per variasi sejak 2026-09-14, poin 23):
   ```json
   {
     "query_id": "dev_0001",
     "gold_sql": "...",
     "variations": [
-      {"nl_question": "...", "predicted_sql": "...", "is_correct": 0 | 1}
+      {"query_id": "dev_0001", "nl_question": "...", "predicted_sql": "...", "is_correct": 0 | 1}
     ]
   }
   ```
-  - `query_id` harus cocok dengan konvensi `dev_{i+1:04d}` yang dipakai
-    `pipeline.py` (lihat `src/experiments/pipeline.py:605`), supaya nanti bisa
-    disilangkan dengan hasil ESM di raw_logs (Dimensi 4 butuh QVT × ESM
-    berpasangan).
-  - `predicted_sql` dan `is_correct` (pakai **EX**, sudah diputuskan — lihat
-    `IMPLEMENTATION_DECISIONS.md` poin 10) baru bisa diisi setelah tiap variasi
-    dijalankan lewat pipeline + dievaluasi. Kalau peneliti ingin bagian
-    run-pipeline-dan-hitung-EX ini dibantu lewat script (bukan cuma
-    grouping-nya), bilang saja — itu bagian terpisah yang belum ada
-    generator/runner-nya sama sekali di `src/experiments/`.
+  `is_correct` pakai **EX** (`IMPLEMENTATION_DECISIONS.md` poin 10).
+  `query_id` di dalam variasi dipakai Dimensi 4 untuk silang-ESM ke raw_logs.
+  </details>
 
 ## 2. Eksperimen yang harus dijalankan (menentukan parameter TBD)
 

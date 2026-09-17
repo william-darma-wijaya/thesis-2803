@@ -130,6 +130,50 @@ Dimension 3 hands its finding — which specific clause degraded the most, and b
 
 ---
 
+## Dimension 4 (Robustness: Consistency Under Paraphrase)
+
+> Code: `src/dimensions/dim4_robustness.py`, `run_dimension_4()`. Alur & tabel interpretasi: guide Bagian 3, "Dimensi 4". Metrics used: QVT (consistency) and ESM (SQL structure) — both explained individually in `context/METRICS_EXPLAINED.md`.
+
+### The question this dimension actually answers
+
+Every other dimension asks some version of "how often is the system right?" This one asks something different: **is the system right for the same reasons every time?** Two people can ask for the exact same thing in different words — "How many singers do we have?" and "What is the total number of singers?" — and a system that genuinely understands the question should produce the same SQL for both. A system that gets one right and the other wrong isn't really *understanding* the question; it's reacting to the specific wording it happened to see. That's brittleness, and a plain accuracy number hides it completely — a system that gets exactly half of every paraphrase pair right can post the same accuracy as one that's perfectly consistent but slightly less capable.
+
+The reason this matters specifically for *this* thesis: GraphRAG's whole premise is cutting the schema down to only what's relevant. A fair worry is that aggressive pruning makes the pipeline fragile — the smaller the context, the more a single differently-worded question could swing retrieval onto the wrong columns. Dimension 4 is the check on that worry.
+
+### Where the paraphrases come from — a genuinely lucky finding
+
+Measuring this normally means writing paraphrases yourself, which is slow and introduces your own bias about what "the same question, reworded" means. It turned out not to be necessary: SPIDER's own dev set already contains **470 SQL queries that each have two different human-written natural-language phrasings** — covering about 91% of the dev set — a side effect of how the benchmark was annotated. Those are exactly the `N_i1, N_i2` the QVT formula needs, written by actual humans rather than generated, and they cost nothing extra to run because the pipeline already answers every dev question anyway. (`IMPLEMENTATION_DECISIONS.md` poin 21.)
+
+The catch worth stating plainly in the methodology: there are always **exactly two** phrasings per query, never three or more. So "consistent" here means "got both of them right" and "inconsistent" means "got exactly one right" — a binary distinction, not a fine-grained spectrum.
+
+### The filter that's easy to get wrong
+
+QVT deliberately **throws away** any query where *all* of the phrasings failed, rather than scoring it zero. This looks like cherry-picking at first glance, but it isn't — it's the difference between two very different failures. A query the system gets wrong every single time, no matter how you word it, is **consistently wrong**: that's an accuracy problem, and Dimensions 2, 3, and 5 already measure it thoroughly. Scoring it as "zero consistency" would be double-counting an accuracy failure as a robustness failure, and would drag the QVT number down for a reason that has nothing to do with robustness. QVT is only meaningful for queries the system *can* get right — the question is whether it does so reliably. The count of dropped queries is still reported next to the score, so it's never invisible.
+
+### Reading the ±2% threshold
+
+The verdict is the gap between the two conditions' QVT scores (GraphRAG minus Baseline), read against a fixed ±2 percentage point band:
+
+- **≥ +2%** → GraphRAG is *meaningfully* more consistent.
+- **between −2% and +2%** → consistency is effectively unchanged — the token savings didn't cost robustness. For this thesis, this is a perfectly good result, not a null one: the hypothesis being tested is that pruning doesn't *hurt*, so "no change" is a pass.
+- **< −2%** → GraphRAG is *less* consistent, which reads as over-pruning: the context got small enough that wording started to matter more than it should.
+
+The ±2% isn't arbitrary or tunable. It comes from the guide, and the reasoning is that published state-of-the-art methods differ from each other by only 3–4 percentage points, and the model here isn't fine-tuned — so it's noisier than those. Anything under 2 points is inside the noise floor and shouldn't be narrated as a real effect.
+
+### Crossing QVT with ESM, and why that needs a second data source
+
+The last step asks whether the unstable queries are *also* the structurally broken ones — are these one problem or two? If inconsistent queries are the same queries that fail ESM, then paraphrase instability is a symptom of a system that was already struggling on those queries. If they're mostly *different* queries, then instability is its own separate failure mode and deserves its own treatment.
+
+This step needs data the QVT files don't have. Within QVT, "correct" is deliberately defined by **EX** (did the SQL actually return the right answer) and held fixed everywhere, so that one definition is never mixed with another mid-calculation (`IMPLEMENTATION_DECISIONS.md` poin 10). ESM is a different question entirely — did the SQL have the right *structure* — so it has to be read from the raw logs, its original source. That's why `run_dimension_4()` takes the raw logs as extra optional arguments: passing them runs the cross-tab, leaving them out prints an explicit "this step was skipped, and here's why" notice rather than quietly dropping a step the guide asks for (`IMPLEMENTATION_DECISIONS.md` poin 23).
+
+Both axes use the same all-or-nothing shape — "did *every* phrasing succeed?" for QVT, "did *every* phrasing have correct structure?" for ESM — so the resulting 2×2 table compares like with like rather than a strict standard against a lenient one.
+
+### Where it fits in the bigger picture
+
+Dimensions 2 and 3 measure whether GraphRAG's SQL is *correct*. Dimension 4 measures whether that correctness is *dependable* — and those can diverge. A pipeline that improves accuracy while quietly becoming more wording-sensitive has traded a visible number for an invisible weakness, and Dimension 4 is the only place in this analysis where that trade would show up at all.
+
+---
+
 ## Dimension 5 (Bottleneck: Retrieval vs. Generation)
 
 > Code: `src/dimensions/dim5_bottleneck.py`, `run_dimension_5()`. Alur & tabel diagnostik: guide Bagian 3, "Dimensi 5". Metrics used: SLA (retrieval quality) and EX (generation quality) — both explained individually in `context/METRICS_EXPLAINED.md`.
