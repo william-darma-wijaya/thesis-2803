@@ -352,7 +352,7 @@ Contoh (`concert_singer`, SQL `SELECT count(*) FROM singer`):
 - `sweep.py`: metrik heuristik lama (`recall_weighted_f1` ad-hoc) diganti F6 (β=6, arxiv 2501.17174) yang sudah dipakai `src/experiments/sweep.py`; export CSV yang hilang ditambahkan.
 - `baseline.py`: `evaluate_table_linking()` diganti ke versi schema-aware (stopword-filtered, sama seperti `evaluate_schema_linking()`) dari versi lama raw-token-overlap; fix FK annotation (`from_col in this_cols`, bukan cuma truthy check) supaya tidak salah arah; fix bug `top_k_tables=0` yang dulu diam-diam fallback ke `top_k=3` alih-alih "semua tabel" (`_all_table_nodes()` ditambahkan).
 - `pipeline.py`: `run_official_evaluation()` ditambahkan JOIN-keyword normalization (`normalize_join_keywords_for_parsing`/`normalize_sql_file_for_parsing`, di-port dari `src/utils/sql_normalize.py`) supaya prediksi `INNER`/`CROSS`/`LEFT`/`RIGHT`/`FULL JOIN` tidak bikin parser resmi SPIDER crash saat evaluasi Kaggle (poin 11) -- notebook lama tidak punya normalisasi ini sama sekali.
-- **Konsekuensi yang perlu disadari:** `prune_path_nodes()` DIPANGGIL di versi notebook lama (`run_single`/sweep) tapi TIDAK dipanggil di `src/experiments/pipeline.py`/`sweep.py` saat ini (lihat open item terkait di bawah). Sync ini bikin notebook ikut TIDAK memanggilnya lagi (match `src/` current) -- artinya retrieval jadi kurang selektif dibanding sebelumnya (bridge node dari path-trace tidak lagi dibuang). Ini regresi nyata, bukan cuma cosmetic, kalau dibandingkan ke perilaku notebook SEBELUM sync ini. Perlu diputuskan terpisah: wire `prune_path_nodes()` balik ke `src/` + notebook, atau terima kondisi ini.
+- **Konsekuensi yang perlu disadari:** `prune_path_nodes()` DIPANGGIL di versi notebook lama (`run_single`/sweep) tapi TIDAK dipanggil di `src/experiments/pipeline.py`/`sweep.py` saat ini (lihat open item terkait di bawah; DIPUTUSKAN di poin 25: fungsinya dihapus). Sync ini bikin notebook ikut TIDAK memanggilnya lagi (match `src/` current) -- artinya retrieval jadi kurang selektif dibanding sebelumnya (bridge node dari path-trace tidak lagi dibuang). Ini regresi nyata, bukan cuma cosmetic, kalau dibandingkan ke perilaku notebook SEBELUM sync ini. Perlu diputuskan terpisah: wire `prune_path_nodes()` balik ke `src/` + notebook, atau terima kondisi ini.
 - **TIDAK di-port:** sistem `data/raw_logs/*.json` + evaluasi ESM/EX/CM inline (`src/metrics/esm_ex_cm.py`) + confound diagnostics. Sesuai `requirements.txt` ("Pipeline utama... jalan di Kaggle... metrics/dimensions... dijalankan secara lokal"), notebook ini scope-nya tetap retrieval+generation+official-eval saja. **Catatan:** ini menyisakan pertanyaan terbuka -- `pipeline.py --baseline`'s `run_comparison()` (yang memproduksi `data/raw_logs/*.json`) SECARA NYATA memanggil `src.metrics.esm_ex_cm` inline di environment yang sama dengan LLM inference (jadi harus jalan di Kaggle juga), bertentangan dengan asumsi requirements.txt bahwa metrics selalu lokal. Belum diselesaikan di sini -- lihat open items.
 
 Diverifikasi: seluruh 27 cell notebook (termasuk yang tidak diubah) tetap valid Python (`ast.parse`) kecuali 2 cell magic command (`%pip install`/`!wget`, sudah begitu dari awal), JSON notebook valid, tidak ada sisa referensi `few_shot_same_db_first`.
@@ -432,6 +432,32 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 **Lokasi implementasi:** `src/experiments/run_all_dimensions.py` (seluruh file ditulis ulang dari skeleton), `CLAUDE.md` (status orkestrasi + CLI quick reference).
 
 ---
+
+## 25. Penghapusan `prune_path_nodes()` — dead code, dihapus (2026-09-19)
+
+**Keputusan peneliti:** path pruning tidak dipakai lagi, fungsinya dihapus dari `src/retrieval/retrieval.py`.
+
+**Latar belakang:** `prune_path_nodes()` (buang node perantara path-trace yang bukan direct hit/PK/FK) sudah tidak dipanggil oleh `run_single()`, `sweep.py`, `ablation.py` maupun notebook sejak `log.md` mencatat pemanggilnya dicabut. Sejak itu fungsinya cuma tersisa sebagai definisi tanpa pemanggil, sementara dokumentasi (`CLAUDE.md`, komentar `sweep.py`) masih menyebut "path pruning" seolah bagian pipeline — menyesatkan untuk bab metodologi.
+
+**Yang berubah:** fungsi dihapus (grep: tidak ada pemanggil tersisa di `src/`); `CLAUDE.md` (deskripsi GraphRAG, diagram alur GraphRAG jadi 7 tahap, struktur file) dan komentar `sweep.py` disesuaikan. **Perilaku pipeline TIDAK berubah** karena fungsi itu memang tidak dijalankan.
+
+**Yang perlu diingat di metodologi:** GraphRAG = two-stage retrieval + graph traversal (shortest path antar kolom terpilih; node jalur masuk konteks apa adanya). Selektivitas berasal dari `top_k_tables`/`top_k_columns`, bukan dari pruning. Node perantara dari traversal ikut dikirim ke LLM, jadi `avg_precision` proxy bisa lebih rendah dari desain awal.
+
+**Notebook:** `eval_pipeline.ipynb` (root) ditulis ulang 2026-09-19 mengikuti `pipeline.py` saat ini — import `src.*`, unpack `run_single`/`run_single_baseline` 7/6 nilai, evaluasi in-process + `raw_logs`, confound diagnostics, normalisasi JOIN untuk cross-check Spider, walk-through per tahap. Ini menggantikan catatan "TIDAK di-port" di poin sebelumnya untuk notebook root tersebut.
+
+## 26. Integrasi pipeline -> metrics -> 6 dimensi (`run_dimension_analysis()`), 2026-09-19
+
+**Keputusan:** lapisan analisis dipasang ke akhir `run_comparison()` (`pipeline.py --baseline`) dan ke `eval_pipeline.ipynb` lewat SATU fungsi, `pipeline.run_dimension_analysis()`. Fungsi ini hanya mengorkestrasi (`build_qvt_files()` + `run_all()` + `save_dimension_outputs()`); logikanya tetap di `build_qvt_variations.py` dan `run_all_dimensions.py`, jadi CLI, pipeline, dan notebook tidak punya jalur berbeda yang bisa drift.
+
+**Aturan yang dipasang:**
+- `full_dev` (= `sample_ratio >= 1.0`) menentukan Dimensi 4: hanya pada run penuh QVT dibangun ulang dan Dimensi 4 dijalankan. Pada subsample Dimensi 4 dikeluarkan dari daftar (bukan sekadar di-skip), supaya `data/qvt_variations/` sisa run penuh sebelumnya tidak dipasangkan diam-diam dengan raw_logs yang berbeda.
+- Analisis dibungkus `try/except` non-fatal di `run_comparison()`: jam-jam generation sudah tersimpan di raw_logs; kegagalan analisis tidak boleh terlihat seperti run gagal (jalankan ulang `run_all_dimensions.py`).
+- Flag CLI baru: `--no-dimensions`, `--ex-per-k`, `--always-dim5`. `EX_PER_K` untuk Dimensi 6 tetap manual (open item D belum berubah).
+- Refactor kecil pendukung: `build_qvt_variations.build_qvt_files()` (dipisah dari `main()`, perilaku CLI sama) dan `run_all_dimensions.save_dimension_outputs()`.
+
+**Yang perlu diingat:** `run_comparison()` sejak awal menulis raw_logs ke `data/raw_logs/` tanpa memedulikan `sample_ratio` (menimpa run penuh sebelumnya bila `--sample < 1.0`); ini perilaku lama yang tidak diubah di sini. Notebook memakai `outputs/trial/` untuk run trial.
+
+**Verifikasi (lokal, tanpa torch):** `run_dimension_analysis()` diuji dengan fixture 1034 query (run penuh: QVT terbentuk dan Dimensi 2/3/4/5/6 `ok`; subsample: Dimensi 4 tidak muncul walau ada QVT lama; run penuh dengan raw_logs subsample: Dimensi 4 `skipped`, tanpa crash). Dimensi 1 ter-skip lokal karena `torch` (open item C), akan jalan di Kaggle. Pipeline penuh belum pernah dijalankan end-to-end.
 
 ## Belum diputuskan / open items
 

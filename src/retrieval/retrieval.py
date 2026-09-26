@@ -315,63 +315,6 @@ def trace_schema_paths(
 
 
 # ---------------------------------------------------------------------------
-# Path pruning (Option B)
-# ---------------------------------------------------------------------------
-
-def prune_path_nodes(
-    graph: nx.Graph,
-    detected_column_names: set[str],
-    all_path_nodes: list[str],
-) -> list[str]:
-    """
-    Drop intermediate path nodes that carry no semantic signal.
-
-    The shortest-path expansion between two detected columns often traverses
-    "bridge" nodes — columns that exist only to connect two tables via FK/PK
-    chains. Including every bridge node inflates the schema context with
-    irrelevant columns and hurts precision.
-
-    Pruning rule — keep a node if ANY of:
-      1. Its column name was semantically detected from the query (direct hit).
-      2. It is a PRIMARY KEY.
-      3. It is a FOREIGN KEY (has at least one foreign_key edge).
-
-    Drop if: it is only an intermediate traversal node with no PK/FK role.
-
-    This preserves the join skeleton (PK/FK columns are always kept so the
-    LLM can still write correct JOINs) while dropping pure noise columns.
-    """
-    kept: list[str] = []
-    for node in all_path_nodes:
-        d = graph.nodes.get(node, {})
-        if not d:
-            continue
-
-        # Rule 1: direct semantic hit
-        if d.get("column", "").lower() in detected_column_names:
-            kept.append(node)
-            continue
-
-        # Rule 2: primary key
-        if d.get("is_pk", False):
-            kept.append(node)
-            continue
-
-        # Rule 3: foreign key (has at least one foreign_key edge)
-        has_fk = any(
-            graph.get_edge_data(node, nb, {}).get("relation") == "foreign_key"
-            for nb in graph.neighbors(node)
-        )
-        if has_fk:
-            kept.append(node)
-            continue
-
-        # Rule 4 (implicit): intermediate-only node — drop it
-
-    return kept
-
-
-# ---------------------------------------------------------------------------
 # Context builder
 # ---------------------------------------------------------------------------
 

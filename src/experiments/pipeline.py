@@ -20,6 +20,15 @@ Flags:
     
     "--sample", type=float, default=1.0,
         help="Fraction of dev set to evaluate when --baseline is used (default: 1.0).",
+
+    "--no-dimensions", action="store_true",
+        help="With --baseline: skip the 6-dimension analysis afterwards.",
+
+    "--ex-per-k", type=str,
+        help="EX per few-shot k for Dimension 6 (0-100), e.g. 0=45.2,1=52.1,3=54.0,5=53.8.",
+
+    "--always-dim5", action="store_true",
+        help="Run Dimension 5 even without the Dimension 2 trigger.",
 """
 
 import argparse
@@ -607,10 +616,69 @@ def main(cfg: PipelineConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Dimension analysis (metrics -> 6 dimensions), fed by data/raw_logs/*.json
+# ---------------------------------------------------------------------------
+
+def run_dimension_analysis(
+    raw_logs_dir: Path,
+    out_dir: Path,
+    dev_json: Path,
+    full_dev: bool,
+    ex_per_k: dict | None = None,
+    always_dim5: bool = False,
+    qvt_dir: Path = Path("data/qvt_variations"),
+) -> dict:
+    """
+    Run the thesis's 6 analysis dimensions over raw_logs_dir and write
+    dimensions_results.json + dimensions_report.txt to out_dir.
+
+    This is the single integration point between the generation pipeline and
+    the evaluation layer (src/metrics/ + src/dimensions/); both run_comparison()
+    and eval_pipeline.ipynb call it, so they cannot drift apart. It only
+    orchestrates -- all logic lives in build_qvt_variations.py and
+    run_all_dimensions.py (see IMPLEMENTATION_DECISIONS.md poin 21, 23, 24).
+
+    full_dev : True only when raw_logs cover the WHOLE dev set (sample_ratio
+               1.0). QVT (Dimension 4) needs it: query_id is the row position
+               in dev.json, so QVT data is (re)built and Dimension 4 runs only
+               then. On a subsample Dimension 4 is left out on purpose -- an
+               older data/qvt_variations/ from a previous full run must not be
+               silently paired with different raw_logs.
+    ex_per_k : {k: EX 0-100} for Dimension 6 (not stored machine-readably by
+               ablation.py, see open item D); None -> Dimension 6 is skipped
+               with an explanation.
+    """
+    from src.experiments.build_qvt_variations import build_qvt_files
+    from src.experiments.run_all_dimensions import run_all, save_dimension_outputs
+
+    only = [1, 2, 3, 4, 5, 6] if full_dev else [1, 2, 3, 5, 6]
+    if full_dev:
+        with open(dev_json, "r", encoding="utf-8") as f:
+            dev_data = json.load(f)
+        build_qvt_files(dev_data, raw_logs_dir, qvt_dir)
+    else:
+        logger.info("Subsampled run -> QVT/Dimension 4 skipped (needs the full dev set).")
+
+    results, report = run_all(
+        raw_logs_dir=raw_logs_dir, qvt_dir=qvt_dir, only=only,
+        ex_per_k=ex_per_k, always_dim5=always_dim5,
+    )
+    print(report)
+    save_dimension_outputs(results, report, out_dir)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Comparison: GraphRAG vs Baseline side-by-side
 # ---------------------------------------------------------------------------
 
-def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
+def run_comparison(
+    cfg: PipelineConfig,
+    sample_ratio: float,
+    run_dimensions: bool = True,
+    ex_per_k: dict | None = None,
+    always_dim5: bool = False,
+) -> None:
     """
     Run GraphRAG (column/node) AND Baseline (table/node) on the same
     dev-set sample, then print a side-by-side schema-linking + prediction
@@ -620,6 +688,9 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
         predictions.txt          — GraphRAG
         baseline_predictions.txt — Baseline
         comparison_report.txt    — side-by-side summary
+        data/raw_logs/*.json     — per-query raw logs (input of the 6 dimensions)
+        outputs/tables/dimensions_{results.json,report.txt}
+                                 — 6-dimension analysis (unless run_dimensions=False)
     """
     import numpy as np
     from src.retrieval.baseline import (
@@ -887,6 +958,28 @@ def run_comparison(cfg: PipelineConfig, sample_ratio: float) -> None:
     print("=" * 60)
     bl_spider_eval(b_pred_path, cfg)
 
+    # ── 6-dimension analysis over the raw_logs just written ────────────────
+    # Own try/except: hours of generation are already saved above, a failure
+    # here must not look like a failed run (re-run run_all_dimensions.py alone).
+    if run_dimensions:
+        print("\n" + "=" * 60)
+        print("  6-DIMENSION ANALYSIS (metrics -> dimensions)")
+        print("=" * 60)
+        try:
+            run_dimension_analysis(
+                raw_logs_dir=raw_logs_dir,
+                out_dir=Path("outputs/tables"),
+                dev_json=cfg.dev_json,
+                full_dev=sample_ratio >= 1.0,
+                ex_per_k=ex_per_k,
+                always_dim5=always_dim5,
+            )
+        except Exception:
+            logger.exception(
+                "Dimension analysis failed (non-fatal, raw_logs are saved) -- "
+                "re-run: python src/experiments/run_all_dimensions.py"
+            )
+
 
 # ---------------------------------------------------------------------------
 # CLI — GANTI if __name__ == "__main__" yang lama dengan ini
@@ -913,6 +1006,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sample", type=float, default=1.0,
         help="Fraction of dev set to evaluate when --baseline is used (default: 1.0).",
+    )
+    parser.add_argument(
+        "--no-dimensions", action="store_true",
+        help="With --baseline: skip the 6-dimension analysis after the comparison run.",
+    )
+    parser.add_argument(
+        "--ex-per-k", default=None, metavar="SPEC",
+        help="EX per few-shot k for Dimension 6, scale 0-100 (e.g. 0=45.2,1=52.1,3=54.0,5=53.8).",
+    )
+    parser.add_argument(
+        "--always-dim5", action="store_true",
+        help="Run Dimension 5 even if Dimension 2 does not escalate to it.",
     )
     args, unknown = parser.parse_known_args()
 
@@ -952,6 +1057,15 @@ if __name__ == "__main__":
             _print_summary,
             _run_spider_eval,
         )
-        run_comparison(config, sample_ratio=args.sample)
+        from src.experiments.run_all_dimensions import parse_ex_per_k
+        try:
+            ex_per_k = parse_ex_per_k(args.ex_per_k, None)
+        except ValueError as exc:
+            parser.error(str(exc))
+        run_comparison(
+            config, sample_ratio=args.sample,
+            run_dimensions=not args.no_dimensions,
+            ex_per_k=ex_per_k, always_dim5=args.always_dim5,
+        )
     else:
         main(config)

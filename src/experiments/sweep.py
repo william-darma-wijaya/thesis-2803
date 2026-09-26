@@ -54,11 +54,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # tables=1 → recall ~83% (below 90% threshold, never valid)
-# tables=2 → recall ~97.5% (valid but pruning makes higher recall better)
-# Start from tables=3 (recall ~99%) — pruning handles precision from here.
+# tables=2 → recall ~97.5% (valid but higher recall is better)
+# Start from tables=3 (recall ~99%).
 TOP_K_TABLES_VALUES  = [3, 4, 5]
-# Extended column grid — pruning will strip irrelevant columns anyway,
-# so higher values are safe to test.
+# Extended column grid (path pruning was removed — see IMPLEMENTATION_DECISIONS.md
+# poin 25 — so precision is controlled by top_k_columns alone).
 TOP_K_COLUMNS_VALUES = [2, 3, 5, 7, 10]
 
 # Minimum recall required before we consider a config valid.
