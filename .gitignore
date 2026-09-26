@@ -4,6 +4,6 @@ __pycache__/
 # Full SPIDER dataset (~1.7GB across dev+test databases) -- too large for git,
 # individual files exceed GitHub's 100MB hard limit (e.g. soccer_1.sqlite).
 # Keep locally for dev/testing, download separately elsewhere (Kaggle input
-# mount in production, manual download for local dev) -- same convention as
-# external/spider_eval/ (wget'd manually, not committed).
+# mount in production, manual download for local dev). Beda dengan
+# external/spider_eval/ yang SUDAH di-commit (kecil, ikut ter-clone).
 data/spider_data/
