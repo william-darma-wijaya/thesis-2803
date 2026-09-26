@@ -37,7 +37,9 @@ class PipelineConfig:
     # --- Models ---
     embedding_model: str = "BAAI/bge-m3"
     llm_model: str = "Qwen/Qwen2.5-Coder-7B-Instruct"
-
+    llm_model_frame = ["Qwen/Qwen2.5-Coder-1.5B-Instruct", "Qwen/Qwen2.5-Coder-3B-Instruct", 
+                       "Qwen/Qwen2.5-Coder-7B-Instruct", "Qwen/Qwen2.5-Coder-14B-Instruct"
+]
     # --- Quantization ---
     load_in_4bit: bool = True
     bnb_double_quant: bool = True
@@ -60,10 +62,15 @@ class PipelineConfig:
     # Set to 0 to disable (all tables are considered in one pass).
     top_k_tables: int = 3
 
+    # top k ablations untuk top k tables and columns
+    top_k_frame = [0.4, 0.5, 0.6, 0.8]
+
     # --- Few-shot ---
     # Number of similar training examples injected into the prompt.
     # Set to 0 to disable few-shot entirely.
     few_shot_k: int = 3
+    # Ablation for the few shots so we can see 0-5 shots
+    few_shot_frame = [0, 1, 3, 5]
 
     # --- Generation ---
     max_new_tokens: int = 256
