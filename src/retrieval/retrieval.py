@@ -4,18 +4,20 @@ GraphRAG schema linking: semantic retrieval + graph path tracing.
 Two improvements over the baseline:
   1. Global column selection  — each column is scored by its best n-gram match,
                                  columns below the similarity threshold are
-                                 dropped, and at most top_k_columns are kept for
+                                 dropped, and at most top-k columns are kept for
                                  the WHOLE query (a cap, not a target).
   2. Two-stage retrieval      — first narrow down to the top-k most relevant
                                  *tables*, then retrieve columns only within
                                  those tables. This bounds precision regardless
                                  of database size.
 
-Both features are controlled via PipelineConfig; setting top_k_tables /
-top_k_columns to 0 disables the table restriction / the column cap.
+Both k's are fractions (PipelineConfig.top_k_tables_pct / top_k_columns_pct),
+converted per query by k_from_pct(); 0 disables the table restriction / the
+column cap.
 """
 
 import logging
+import math
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -120,6 +122,17 @@ def _extract_phrases(query: str, max_ngram: int) -> list[str]:
     )
 
 
+def k_from_pct(pct: float, n: int) -> int:
+    """
+    Turn a top-k fraction into a count for a pool of n items: ceil(pct x n),
+    at least 1. pct <= 0 means "no limit" and returns n.
+    round() guards against float noise (0.6 * 5 must be 3, not 3.0000000000000004 -> 4).
+    """
+    if pct <= 0 or n <= 0:
+        return n
+    return max(1, math.ceil(round(pct * n, 9)))
+
+
 def _top_k_indices(score_row: torch.Tensor, k: int) -> list[int]:
     """Return indices of the k highest scores in a 1-D tensor."""
     k = min(k, score_row.size(0))
@@ -137,11 +150,12 @@ def retrieve_candidate_tables(
     cfg: PipelineConfig,
 ) -> list[str]:
     """
-    Return the top-k most relevant table names for `query`.
+    Return the top-k most relevant table names for `query`, with
+    k = k_from_pct(cfg.top_k_tables_pct, number of tables in the database).
 
-    If `cfg.top_k_tables` is 0, all tables are returned (two-stage disabled).
+    If `cfg.top_k_tables_pct` is 0, all tables are returned (two-stage disabled).
     """
-    if cfg.top_k_tables == 0 or index.table_embeddings is None:
+    if cfg.top_k_tables_pct <= 0 or index.table_embeddings is None:
         return index.tables
 
     phrases = _extract_phrases(query, cfg.max_ngram)
@@ -154,7 +168,8 @@ def retrieve_candidate_tables(
     # Max-pool across phrases: best score any phrase gave each table
     max_scores, _ = scores.max(dim=0)  # (n_tables,)
 
-    selected_indices = _top_k_indices(max_scores, cfg.top_k_tables)
+    k = k_from_pct(cfg.top_k_tables_pct, len(index.tables))
+    selected_indices = _top_k_indices(max_scores, k)
     selected_tables = [index.tables[i] for i in selected_indices]
 
     logger.debug("Stage 1 — candidate tables for '%s': %s", query[:50], selected_tables)
@@ -180,9 +195,10 @@ def retrieve_candidate_columns(
       1. Each column is scored by the best (max) cosine similarity any query
          n-gram gives it.
       2. Columns scoring below cfg.semantic_similarity_threshold are dropped.
-      3. If cfg.top_k_columns > 0, at most that many columns are kept
-         (k is a cap, never a target: fewer columns pass -> fewer are returned).
-         top_k_columns == 0 means threshold-only, no cap.
+      3. At most k = k_from_pct(cfg.top_k_columns_pct, columns in the candidate
+         tables) columns are kept (k is a cap, never a target: fewer columns
+         pass -> fewer are returned). top_k_columns_pct == 0 means
+         threshold-only, no cap.
       4. If nothing passes the threshold, the single best column is kept so the
          prompt never ends up with an empty schema.
 
@@ -218,8 +234,7 @@ def retrieve_candidate_columns(
     ranked = torch.argsort(col_scores, descending=True).tolist()
 
     kept = [i for i in ranked if col_scores[i].item() >= cfg.semantic_similarity_threshold]
-    if cfg.top_k_columns > 0:
-        kept = kept[: cfg.top_k_columns]
+    kept = kept[: k_from_pct(cfg.top_k_columns_pct, len(filtered_node_ids))]
     if not kept:
         kept = ranked[:1]  # fallback: never return an empty schema
 
@@ -248,8 +263,8 @@ def semantic_schema_linking(
       Stage 2 — retrieve the top-k most relevant *columns* within those tables.
 
     Falls back gracefully:
-      - If top_k_tables == 0, Stage 1 is skipped (all tables considered).
-      - If top_k_columns == 0, Stage 2 is threshold-only (no cap on column count).
+      - If top_k_tables_pct == 0, Stage 1 is skipped (all tables considered).
+      - If top_k_columns_pct == 0, Stage 2 is threshold-only (no cap on column count).
       - If `index` is None, a SchemaIndex is built on-the-fly from the legacy
         `all_columns` / `col_embeddings` arguments (backward compatible).
     """
@@ -325,6 +340,64 @@ def trace_schema_paths(
                 continue
 
     return column_nodes, paths, relations
+
+
+def _all_column_nodes(graph: nx.Graph, db_name: str) -> list[str]:
+    return [
+        n for n, d in graph.nodes(data=True)
+        if d.get("database") == db_name and d.get("type") == "column"
+    ]
+
+
+def retrieve_graphrag_schema(
+    graph: nx.Graph,
+    db_name: str,
+    question: str,
+    index: SchemaIndex,
+    embed_model: SentenceTransformer,
+    cfg: PipelineConfig,
+) -> tuple[list[str], list[str]]:
+    """
+    The whole GraphRAG retrieval step for one question, shared by pipeline.py,
+    ablation.py, sweep.py and the notebook so they cannot drift apart:
+    Stage 1 tables -> Stage 2 columns -> graph traversal.
+
+    Returns:
+        column_nodes     : node IDs whose DDL goes into the prompt (detected
+                           columns + every node on the traversal paths), in a
+                           deterministic order so the prompt is reproducible
+        candidate_tables : Stage-1 tables (for the sweep's selectivity diagnostic)
+
+    Full-schema bypass, or no column detected -> every column of the database.
+    """
+    if cfg.use_full_schema_bypass:
+        return _all_column_nodes(graph, db_name), index.tables
+
+    candidate_tables = retrieve_candidate_tables(question, index, embed_model, cfg)
+    detected = retrieve_candidate_columns(question, index, candidate_tables, embed_model, cfg)
+    if not detected:
+        return _all_column_nodes(graph, db_name), candidate_tables
+
+    c_nodes, paths, _ = trace_schema_paths(graph, db_name, detected)
+    # dict.fromkeys, not set(): set order follows string hashing, which changes
+    # between Python processes and would reorder the CREATE TABLE blocks.
+    column_nodes = list(dict.fromkeys(c_nodes + [n for path in paths for n in path]))
+    return column_nodes, candidate_tables
+
+
+def column_nodes_to_schema(graph: nx.Graph, column_nodes: list[str]) -> list[str]:
+    """
+    Column node ids -> sorted ["table.column", ...] (lowercase), the
+    predicted_schema format of raw_logs and the input of src/metrics/sla.py.
+    Reads table/column from node attributes, not by splitting the node id.
+    """
+    out = set()
+    for node in column_nodes:
+        d = graph.nodes[node]
+        table, column = d.get("table"), d.get("column")
+        if table and column and column != "*":
+            out.add(f"{table.lower()}.{column.lower()}")
+    return sorted(out)
 
 
 # ---------------------------------------------------------------------------

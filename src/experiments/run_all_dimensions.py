@@ -31,7 +31,7 @@ BUKAN crash — jadi file ini aman dijalankan kapan saja untuk lihat status):
 | 1,2,3   | data/raw_logs/{baseline,graphrag}_log.json                        |
 | 4       | idem + data/qvt_variations/{baseline,graphrag}_qvt.json            |
 | 5       | idem raw_logs (+ gating dari Dimensi 2, lihat di bawah)           |
-| 6       | ex_per_k manual dari run ablation.py (--ex-per-k / --ex-per-k-file)|
+| 6       | ex_per_k: --ex-per-k-file outputs/tables/ablation_ex_per_k_graphrag.json (ablation.py) atau --ex-per-k |
 
 raw_logs diproduksi oleh `python src/experiments/pipeline.py --baseline`
 (butuh GPU/Kaggle). qvt_variations dibangun dari raw_logs itu oleh
@@ -161,11 +161,10 @@ def parse_ex_per_k(spec: Optional[str], path: Optional[Path]) -> Optional[Dict[i
     Ambil ex_per_k untuk Dimensi 6 dari CLI (`0=45.2,1=52.1,...`) atau dari file
     JSON (`{"0": 45.2, "1": 52.1, ...}`). CLI menang kalau dua-duanya diberikan.
 
-    Kenapa manual: `outputs/tables/ablation_results.csv` yang ditulis
-    `ablation.py` TIDAK punya kolom EX (cuma recall/precision/token) -- EX untuk
-    tiap k dihitung terpisah oleh Spider `evaluation.py` yang outputnya ke
-    stdout subprocess, tidak pernah tersimpan machine-readable. Jadi angkanya
-    harus dioper peneliti. Lihat IMPLEMENTATION_DECISIONS.md poin 24.
+    Sejak poin 28, `ablation.py` menghitung EX per k in-process dan menulis
+    `outputs/tables/ablation_ex_per_k_{mode}.json` dalam format file ini, jadi
+    cukup `--ex-per-k-file outputs/tables/ablation_ex_per_k_graphrag.json`.
+    (Sebelumnya manual, poin 24c / open item D.)
     """
     if spec:
         out: Dict[int, float] = {}
@@ -360,12 +359,10 @@ def run_all(
         def _dim6():
             if not ex_per_k:
                 raise _DimensionSkipped(
-                    "ex_per_k tidak disediakan. `outputs/tables/ablation_results.csv` "
-                    "tidak punya kolom EX (cuma recall/precision/token) -- EX per k "
-                    "datang dari Spider evaluation.py atas "
-                    "`outputs/predictions/ablation_*_predictions_k*.txt`, dan harus "
-                    "dioper manual: --ex-per-k 0=45.2,1=52.1,3=54.0,5=53.8 "
-                    "(atau --ex-per-k-file berisi {\"0\": 45.2, ...})."
+                    "ex_per_k tidak disediakan. Jalankan ablation.py (tahap 2), lalu "
+                    "--ex-per-k-file outputs/tables/ablation_ex_per_k_graphrag.json "
+                    "(ditulis otomatis, EX in-process per k), atau manual: "
+                    "--ex-per-k 0=45.2,1=52.1,3=54.0,5=53.8."
                 )
             return run_dimension_6(ex_per_k), print_dimension_6
         rec, text = _run_one(6, _dim6)

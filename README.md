@@ -18,9 +18,9 @@ src/
 │   ├── generation.py   — Prompt template, SQL cleaning, model loading & inference
 │   └── few_shot.py     — Few-shot example retrieval
 └── experiments/
-    ├── pipeline.py      — Orchestration, CLI entry point, official Spider evaluation
-    ├── sweep.py         — top_k_tables × top_k_columns sweep
-    └── ablation.py      — few-shot k ablation
+    ├── pipeline.py      — Orchestration, CLI entry point, official Spider evaluation, model comparison (ablation stage 3)
+    ├── sweep.py         — ablation stage 1: top-k fraction sweep (tables × columns), ranked by SLA
+    └── ablation.py      — ablation stage 2: few-shot k, ranked by EX
 external/spider_eval/    — Official SPIDER evaluation.py + process_sql.py
 README.md
 ```
@@ -94,6 +94,12 @@ All settings live in `config.py` (`PipelineConfig` dataclass):
 |---|---|---|
 | `embedding_model` | `BAAI/bge-m3` | Sentence encoder for schema linking |
 | `llm_model` | `Qwen/Qwen2.5-Coder-7B-Instruct` | SQL generation model |
+| `llm_model_frame` | Qwen2.5-Coder 1.5B/3B/7B/14B | Models compared in ablation stage 3 |
+| `top_k_tables_pct` / `top_k_columns_pct` | `0.6` / `0.6` | GraphRAG top-k as a fraction of tables in the DB / columns in the candidate tables |
+| `baseline_top_k_tables_pct` | `0.6` | Baseline top-k as a fraction of tables in the DB |
+| `top_k_frame` | `[0.4, 0.5, 0.6, 0.8]` | Ablation stage 1 grid (`sweep.py`, ranked by SLA) |
+| `few_shot_k` | `3` | Few-shot examples, same k for GraphRAG and Baseline |
+| `few_shot_frame` | `[0, 1, 3, 5]` | Ablation stage 2 grid (`ablation.py`, ranked by EX) |
 | `semantic_similarity_threshold` | `0.35` | Min cosine sim for column detection |
 | `max_ngram` | `3` | Max phrase length for query segmentation |
 | `max_new_tokens` | `256` | LLM generation budget |

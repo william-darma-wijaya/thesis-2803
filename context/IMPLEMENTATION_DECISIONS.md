@@ -481,6 +481,32 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 
 **Verifikasi (lokal, embedding palsu terkontrol):** cap global tidak pernah terlampaui berapa pun jumlah n-gram; threshold tinggi memberi < k kolom; fallback = tepat 1 kolom; `k=0` tanpa cap; kolom bernama sama di tabel lain tidak ikut masuk; jalur `sweep.py` (`_run_combination`, `_run_grid`, CSV) jalan. **Belum** diuji dengan BGE-M3/Spider asli.
 
+## 28. Ablation 3 tahap (top-k persentase → few-shot → model), Baseline ikut few-shot (2026-09-26)
+
+**Keputusan peneliti:** `config.py` diberi tiga grid — `top_k_frame = [0.4, 0.5, 0.6, 0.8]`, `few_shot_frame = [0, 1, 3, 5]`, `llm_model_frame` (Qwen2.5-Coder 1.5B/3B/7B/14B) — dan ablation dijalankan **bertahap**, pemenang tiap tahap dipakai tahap berikutnya. Baseline **tidak lagi zero-shot**: jumlah shot Baseline dan GraphRAG harus selalu sama.
+
+**Yang diputuskan (jawaban peneliti atas pertanyaan desain):**
+1. **Top-k jadi persentase**, bukan jumlah absolut, supaya budget retrieval ikut skala database. Tabel = `ceil(p × #tabel DB)`; kolom = `ceil(p × #kolom di tabel kandidat Stage 1)`; minimal 1; `0` = nonaktif (`retrieval.k_from_pct()`, dengan `round()` untuk kebisingan float: 0.6×5 harus 3, bukan 4). Field lama `top_k_tables`/`top_k_columns` diganti `top_k_tables_pct`/`top_k_columns_pct`; `PipelineConfig.validate()` menolak nilai di luar [0, 1] supaya angka absolut lama (mis. `3`) tidak diam-diam jadi "300%".
+2. **Grid tahap 1 = cross product** tabel × kolom (16 konfigurasi GraphRAG). Baseline tidak punya tahap kolom → 4 konfigurasi, dan persentase tabelnya disimpan terpisah (`baseline_top_k_tables_pct`) — tiap pipeline dituning dengan caranya sendiri, bukan meminjam pemenang GraphRAG (itu akan bias melawan Baseline).
+3. **Metrik pemilihan dipisah per tahap:** tahap 1 dengan **SLA** (tanpa LLM), tahap 2 dengan **EX**, tahap 3 dengan EX (+ token).
+
+**Konsekuensi implementasi:**
+- **Tahap 1 = `sweep.py`, tanpa LLM.** Karena SLA murni membandingkan himpunan `tabel.kolom` yang masuk prompt dengan gold schema, tahap ini tidak butuh generasi. Sweep sekarang memakai **SLA resmi** (`src/metrics/sla.py`: parser Spider, level tabel & kolom, macro-average) — bukan lagi proxy name-matching + F6 (poin 19, 27). Pemenang default = **F1 level kolom** tertinggi (seri → kolom terkirim lebih sedikit); `--rank-by` bisa diganti ke `col_recall` dll. `semantic_similarity_threshold` tetap di nilai config (peneliti tidak memasukkannya ke grid); `--thresholds` untuk ikut men-sweep-nya. `run_sweep_and_get_best()` sekarang mengembalikan **dict** `{field config: nilai}` (bukan 3-tuple). `main()` dan `run_sweep_and_get_best()` yang tadinya duplikat digabung ke `run_sweep()`.
+- **Tahap 2 = `ablation.py`, EX in-process.** Tiap prediksi dinilai `esm_ex_cm.evaluate_single_query()` (evaluator yang sama dengan raw_logs), jadi `ablation_results.csv` punya kolom `avg_ex`/`avg_esm` dan `ablation_ex_per_k_{mode}.json` ditulis dalam format `--ex-per-k-file` → **menutup open item D** (opsi 2). CSV sekarang di-**merge** (baris mode lain dipertahankan) karena dua mode dijalankan sebagai dua proses terpisah. k bersama = EX rata-rata kedua mode tertinggi (seri → k lebih kecil), karena k harus satu untuk dua pipeline. Fallback `"SELECT 1"` saat generation error tetap dinilai (EX=0), sama dengan `run_comparison()`.
+- **Tahap 3 = `pipeline.py --baseline --models all|<nama>`** → `run_model_comparison()`: `run_comparison()` sekali per model, output per model di `model_run_dirs()` (`outputs/models/<model>/`, `data/raw_logs/<model>/`, `data/qvt_variations/<model>/`), ringkasan `outputs/tables/model_comparison.csv` ditulis ulang tiap model selesai (aman terhadap timeout Kaggle). `run_comparison()` diberi parameter `out_dir`/`raw_logs_dir`/`qvt_dir` (default = path lama) dan mengembalikan ringkasan EX/ESM/token.
+- **Baseline few-shot:** `run_single_baseline(..., few_shot_index=...)` memakai `build_few_shot_block()` — helper yang sama dengan `run_single()`, index sama, `cfg.few_shot_k` sama. `run_comparison()`, `run_baseline()`, `ablation.py`, dan notebook semuanya meneruskan index yang sama ke kedua arm. Catatan lama "Baseline zero-shot, selisih bercampur efek few-shot" di notebook tidak berlaku lagi.
+- **Satu jalur retrieval per arm:** `retrieve_graphrag_schema()` (retrieval.py) dan `retrieve_baseline_tables()` (baseline.py) dipakai pipeline, ablation, sweep, dan notebook. Sebelumnya `ablation.py` punya salinan sendiri yang sudah menyimpang (Baseline `top_k_tables=0` → diam-diam 3). `column_nodes_to_schema()` / `table_nodes_to_schema()` dipindah dari `pipeline.py` (nama lama `_column_nodes_to_predicted_schema` dkk tetap ada sebagai alias untuk notebook).
+- **Urutan konteks prompt deterministik:** `list(set(...))` di jalur GraphRAG dan `trace_table_paths()` diganti `dict.fromkeys(...)`. Urutan `set` string berubah antar proses Python (hash randomization), jadi urutan blok `CREATE TABLE` — dan akibatnya output greedy LLM — sebelumnya bisa berbeda antar run dengan config yang sama.
+- **Override CLI** (`--tables-pct`, `--columns-pct`, `--baseline-tables-pct`, `--threshold`, `--few-shot-k`, `--llm-model`) di `pipeline.py` dan `ablation.py`, supaya pemenang tahap sebelumnya bisa dipakai di Kaggle sebelum di-commit ke `config.py`. Urutan prioritas: CLI > sweep otomatis > `config.py`.
+
+**Yang perlu diingat di metodologi:**
+- Grid tahap 1 bisa "datar" di kolom: kalau threshold similarity sudah memotong kolom di bawah cap persentase, menaikkan `top_k_columns_pct` tidak mengubah apa pun. Kolom `avg_cols_sent` vs `avg_cols_candidate` di `sweep_results.csv` menunjukkannya; pertimbangkan `--thresholds 0.0 ...`.
+- F1 kolom cenderung memilih konteks lebih ketat daripada F6/recall (poin 27). Itu sesuai pilihan peneliti (trade-off token vs performa), tapi kalau EX tahap 2 jatuh karena recall, `--rank-by col_recall` adalah alternatif yang terdokumentasi.
+- SLA memberi 0 pada query yang gold schema-nya kosong (mis. `SELECT count(*) FROM t`, limitasi `*` di `sla.py`). Nilainya sama untuk semua konfigurasi, jadi tidak mengubah ranking — hanya menurunkan angka absolut.
+- Pemilihan k (tahap 2) dan model (tahap 3) dilakukan di dev set yang sama dengan yang dilaporkan — sebut sebagai keterbatasan (tidak ada split validasi terpisah di Spider publik).
+
+**Verifikasi (lokal, fixture Spider sintetis 2 DB / 6 query, embedding & LLM palsu):** sweep menghasilkan 16 + 4 konfigurasi dan pemenang per mode; persentase benar-benar mengubah jumlah tabel/kolom terkirim; ablation dua mode ter-merge di satu CSV, Baseline k=0 → EX 0 dan k≥1 → EX 100 (few-shot benar-benar masuk ke prompt Baseline), `recommend_k` memilih k bersama; `run_model_comparison` menulis direktori per model + `model_comparison.csv`, semua prompt kedua arm berisi tepat k contoh; semua sel kode `eval_pipeline.ipynb` jalan (model default dan model non-default). **Belum** diuji dengan BGE-M3/Qwen/Spider asli. `notebooks/compiled/graphrag_text2sql.ipynb` tetap TIDAK diperbarui (poin 27).
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER
@@ -520,6 +546,8 @@ Efek nyata: dijalankan lokal apa adanya sekarang, `run_all_dimensions.py` melapo
 **Belum diputuskan.** Terkait erat dengan open item B (kontradiksi "metrics jalan di mana") — sebaiknya diputuskan bersamaan, karena dua-duanya soal batas environment lokal vs Kaggle untuk lapisan evaluasi.
 
 ### D. EX per k untuk Dimensi 6 tidak tersimpan machine-readable
+
+✅ **Diselesaikan (2026-09-26) — opsi 2, lihat poin 28.** `ablation.py` menilai tiap prediksi in-process dan menulis `avg_ex`/`avg_esm` ke `ablation_results.csv` + `outputs/tables/ablation_ex_per_k_{mode}.json` (dipakai langsung oleh `--ex-per-k-file`). Teks asli di bawah dipertahankan sebagai catatan historis.
 
 **Ditemukan (2026-09-17),** saat mengisi `run_all_dimensions.py` (poin 24).
 

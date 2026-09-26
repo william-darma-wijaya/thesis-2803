@@ -141,3 +141,19 @@ def format_few_shot_block(examples: list[FewShotExample]) -> str:
         lines.append("")  # blank line between examples
 
     return "\n".join(lines) + "\n"
+
+
+def build_few_shot_block(
+    question: str,
+    index: FewShotIndex | None,
+    embed_model: SentenceTransformer,
+    cfg: PipelineConfig,
+) -> str:
+    """
+    Retrieve + format in one call. Used by BOTH GraphRAG (run_single) and
+    Baseline (run_single_baseline), so the two arms always get the same
+    cfg.few_shot_k examples for the same question. "" when k=0 or no index.
+    """
+    if index is None or cfg.few_shot_k <= 0:
+        return ""
+    return format_few_shot_block(retrieve_few_shot_examples(question, index, embed_model, cfg))

@@ -1,19 +1,31 @@
 """
-Precision sweep: top_k_tables × top_k_columns × semantic_similarity_threshold
+Ablation stage 1 — top-k fraction sweep, ranked by SLA (no LLM).
 
-Runs schema-linking ONLY (no LLM) on a subset of the dev set across
-all combinations of the three parameters. Fast because no GPU inference
-is involved — just embedding lookups. Also reports selectivity
-(columns sent vs. columns available in the candidate tables).
+Grid (both from config.py's top_k_frame, see IMPLEMENTATION_DECISIONS.md poin 28):
+    GraphRAG : top_k_tables_pct x top_k_columns_pct   (cross product, 16 configs)
+    Baseline : baseline_top_k_tables_pct              (no column stage, 4 configs)
+semantic_similarity_threshold stays at the config value unless --thresholds is
+given (GraphRAG only; the baseline has no threshold).
+
+Every config is scored with the reportable Schema Linking Accuracy
+(src/metrics/sla.py, NOT the name-matching proxy of retrieval.py): the exact
+"table.column" set the prompt would contain vs the gold schema from the
+official Spider parser, precision/recall/F1 at table AND column level,
+macro-averaged per query. Retrieval runs through the same
+retrieve_graphrag_schema() / retrieve_baseline_tables() as the pipeline.
+
+Winner per mode = highest --rank-by (default col_f1); ties go to the config
+that sends fewer columns. The few-shot k (stage 2, ablation.py) and the model
+(stage 3, pipeline.py --models) are chosen later, by EX.
 
 Usage:
-    python src/experiments/sweep.py                      # default: 20% dev set
-    python src/experiments/sweep.py --sample 0.5        # 50% dev set
-    python src/experiments/sweep.py --sample 1.0        # full dev set
+    python src/experiments/sweep.py                        # 20% dev set
+    python src/experiments/sweep.py --sample 1.0
+    python src/experiments/sweep.py --rank-by col_recall
+    python src/experiments/sweep.py --thresholds 0.0 0.3 0.35 0.5
 
 Output:
-    outputs/tables/sweep_results.csv   — raw per-combination metrics
-    sweep_summary.txt   — human-readable ranked table
+    outputs/tables/sweep_results.csv
 """
 
 import argparse
@@ -21,27 +33,32 @@ import csv
 import json
 import logging
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from itertools import product
 from pathlib import Path
 
 import numpy as np
-import torch
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.core.config import PipelineConfig
-from src.retrieval.retrieval import (
-    SchemaIndex,
-    build_schema_index,
-    evaluate_schema_linking,
-    retrieve_candidate_columns,
-    retrieve_candidate_tables,
-    trace_schema_paths,
-)
 from src.core.schema import build_schema_graph, load_spider_schema
+from src.metrics.sla import aggregate_sla, compute_sla, extract_ground_truth_schema
+from src.retrieval.baseline import (
+    _all_table_nodes,
+    build_table_graph,
+    build_table_index,
+    retrieve_baseline_tables,
+    table_nodes_to_schema,
+)
+from src.retrieval.retrieval import (
+    build_schema_index,
+    column_nodes_to_schema,
+    retrieve_graphrag_schema,
+)
+from src.utils.schema_utils import load_db_schema
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,360 +67,267 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Grid to sweep
-# ---------------------------------------------------------------------------
-
-# tables=1 → recall ~83% (below 90% threshold, never valid)
-# tables=2 → recall ~97.5% (valid but higher recall is better)
-# Start from tables=3 (recall ~99%).
-TOP_K_TABLES_VALUES  = [3, 4, 5]
-# Extended column grid (path pruning was removed — see IMPLEMENTATION_DECISIONS.md
-# poin 25 — so precision is controlled by top_k_columns alone).
-TOP_K_COLUMNS_VALUES = [2, 3, 5, 7, 10]
-# Minimum cosine similarity for a column to be kept (0.0 = no threshold, top-k cap only).
-# BGE-M3 scores are not calibrated, so these are guesses to be read off the sweep.
-# NOTE: F6 weights recall 36x over precision, so ranking by F6 tends to favour the
-# loosest setting; read the precision / cols-sent columns before trusting "best".
-SIM_THRESHOLD_VALUES = [0.0, 0.3, 0.4, 0.5]
-
-# Minimum recall required before we consider a config valid.
-# Text-to-SQL needs high recall — a missing table = guaranteed wrong SQL.
-RECALL_THRESHOLD = 0.90
+RANK_METRICS = ("col_f1", "col_recall", "col_precision", "table_f1", "table_recall", "table_precision")
+SWEEP_CSV = Path("outputs/tables/sweep_results.csv")
 
 
 # ---------------------------------------------------------------------------
-# Single combination evaluation
+# Result container
 # ---------------------------------------------------------------------------
 
 @dataclass
 class SweepResult:
-    top_k_tables:        int
-    top_k_columns:       int
-    sim_threshold:       float
-    avg_recall:          float
-    avg_precision:       float
-    f1:                  float  # standard F1 (β=1), shown for reference
-    f6:                  float  # F6 (β=6): peak correlation with EX (arxiv 2501.17174)
-    meets_recall_target: bool   # avg_recall >= RECALL_THRESHOLD (informational)
-    n_samples:           int
-    # Selectivity diagnostic: columns actually sent to the prompt vs. all columns
-    # of the Stage-1 candidate tables. sent/available near 1.0 = no column pruning.
-    avg_cols_sent:       float
-    avg_cols_available:  float
+    mode:               str            # "graphrag" | "baseline"
+    tables_pct:         float
+    columns_pct:        float | None   # None for baseline (no column stage)
+    sim_threshold:      float | None   # None for baseline
+    table_precision:    float
+    table_recall:       float
+    table_f1:           float
+    col_precision:      float
+    col_recall:         float
+    col_f1:             float
+    avg_tables_sent:    float
+    avg_cols_sent:      float          # columns in the prompt ("table.column" count)
+    avg_cols_candidate: float | None   # GraphRAG: columns of the Stage-1 tables
+    avg_cols_db:        float          # columns in the whole database
+    n_samples:          int
+
+    @property
+    def label(self) -> str:
+        if self.mode == "baseline":
+            return f"tables={self.tables_pct:.2f}"
+        return f"tables={self.tables_pct:.2f} cols={self.columns_pct:.2f} thr={self.sim_threshold:.2f}"
 
 
-def _run_combination(
-    top_k_tables: int,
-    top_k_columns: int,
-    sim_threshold: float,
-    dev_subset: list[dict],
-    graph,
-    schema_cache: dict[str, SchemaIndex],
-    embed_model: SentenceTransformer,
-    base_cfg: PipelineConfig,
+def _score(
+    mode: str,
+    tables_pct: float,
+    columns_pct: float | None,
+    sim_threshold: float | None,
+    gold_pred: list[tuple[set, list]],
+    tables_sent: list[int],
+    cols_candidate: list[int] | None,
+    cols_db: list[int],
 ) -> SweepResult:
-    """Evaluate schema-linking recall + precision for one (tables, cols, threshold) triple."""
-    cfg = PipelineConfig(
-        data_path=base_cfg.data_path,
-        top_k_tables=top_k_tables,
-        top_k_columns=top_k_columns,
+    t = aggregate_sla([compute_sla(g, set(p), level="table") for g, p in gold_pred])
+    c = aggregate_sla([compute_sla(g, set(p), level="column") for g, p in gold_pred])
+    return SweepResult(
+        mode=mode, tables_pct=tables_pct, columns_pct=columns_pct, sim_threshold=sim_threshold,
+        table_precision=t.precision, table_recall=t.recall, table_f1=t.f1,
+        col_precision=c.precision, col_recall=c.recall, col_f1=c.f1,
+        avg_tables_sent=float(np.mean(tables_sent)),
+        avg_cols_sent=float(np.mean([len(p) for _, p in gold_pred])),
+        avg_cols_candidate=float(np.mean(cols_candidate)) if cols_candidate is not None else None,
+        avg_cols_db=float(np.mean(cols_db)),
+        n_samples=len(gold_pred),
+    )
+
+
+# ---------------------------------------------------------------------------
+# One configuration per mode
+# ---------------------------------------------------------------------------
+
+def _run_graphrag(tables_pct, columns_pct, sim_threshold, samples, graph, cache,
+                  n_cols_db, embed_model, base_cfg) -> SweepResult:
+    cfg = replace(
+        base_cfg,
+        top_k_tables_pct=tables_pct,
+        top_k_columns_pct=columns_pct,
         semantic_similarity_threshold=sim_threshold,
-        few_shot_k=0,           # irrelevant for linking-only sweep
         use_full_schema_bypass=False,
     )
-
-    recalls, precisions = [], []
-    cols_sent, cols_available = [], []
-
-    for item in dev_subset:
-        db_id    = item["db_id"]
-        question = item["question"]
-        gold_sql = item["query"]
-        index    = schema_cache[db_id]
-
-        # Same two stages as semantic_schema_linking(), split so the candidate
-        # tables are available for the selectivity diagnostic.
-        candidate_tables = retrieve_candidate_tables(question, index, embed_model, cfg)
-        detected_cols = retrieve_candidate_columns(
-            question, index, candidate_tables, embed_model, cfg,
+    gold_pred, tables_sent, cols_candidate, cols_db = [], [], [], []
+    for item, gold in samples:
+        db_id = item["db_id"]
+        index = cache[db_id]
+        column_nodes, candidate_tables = retrieve_graphrag_schema(
+            graph, db_id, item["question"], index, embed_model, cfg,
         )
-        candidate_set = set(candidate_tables)
-        cols_available.append(sum(1 for t in index.col_table_map if t in candidate_set))
+        predicted = column_nodes_to_schema(graph, column_nodes)
+        gold_pred.append((gold, predicted))
+        tables_sent.append(len({p.split(".", 1)[0] for p in predicted}))
+        candidate = set(candidate_tables)
+        cols_candidate.append(sum(1 for t in index.col_table_map if t in candidate))
+        cols_db.append(n_cols_db[db_id])
+    return _score("graphrag", tables_pct, columns_pct, sim_threshold,
+                  gold_pred, tables_sent, cols_candidate, cols_db)
 
-        if not detected_cols:
-            # fallback = full schema (same as pipeline)
-            column_nodes = [
-                n for n, d in graph.nodes(data=True)
-                if d.get("database") == db_id and d.get("type") == "column"
-            ]
-        else:
-            c_nodes, paths, _ = trace_schema_paths(graph, db_id, detected_cols)
-            column_nodes = list(set(c_nodes + [node for path in paths for node in path]))
 
-        cols_sent.append(len(column_nodes))
-        if not column_nodes:
-            recalls.append(0.0)
-            precisions.append(0.0)
-            continue
-
-        r, p = evaluate_schema_linking(gold_sql, column_nodes, graph, db_id)
-        recalls.append(r)
-        precisions.append(p)
-
-    avg_r = float(np.mean(recalls))
-    avg_p = float(np.mean(precisions))
-    f1    = (2 * avg_r * avg_p / (avg_r + avg_p)) if (avg_r + avg_p) > 0 else 0.0
-
-    meets_target = avg_r >= RECALL_THRESHOLD
-    # F6 (β=6): weights recall 36× more than precision.
-    # Chosen because β=6 yields peak correlation with Execution Accuracy (EX)
-    # among all F-beta variants — see arxiv 2501.17174.
-    denom = 36 * avg_p + avg_r
-    f6 = 37 * avg_r * avg_p / denom if denom > 0 else 0.0
-
-    return SweepResult(
-        top_k_tables=top_k_tables,
-        top_k_columns=top_k_columns,
-        sim_threshold=sim_threshold,
-        avg_recall=avg_r,
-        avg_precision=avg_p,
-        f1=f1,
-        f6=f6,
-        meets_recall_target=meets_target,
-        n_samples=len(dev_subset),
-        avg_cols_sent=float(np.mean(cols_sent)),
-        avg_cols_available=float(np.mean(cols_available)),
-    )
+def _run_baseline(tables_pct, samples, tbl_graph, tbl_cache, n_cols_db,
+                  embed_model, base_cfg) -> SweepResult:
+    cfg = replace(base_cfg, baseline_top_k_tables_pct=tables_pct, use_full_schema_bypass=False)
+    gold_pred, tables_sent, cols_db = [], [], []
+    for item, gold in samples:
+        db_id = item["db_id"]
+        table_nodes = retrieve_baseline_tables(
+            tbl_graph, db_id, item["question"], tbl_cache[db_id], embed_model, cfg,
+        )
+        gold_pred.append((gold, table_nodes_to_schema(tbl_graph, table_nodes)))
+        tables_sent.append(len(table_nodes))
+        cols_db.append(n_cols_db[db_id])
+    return _score("baseline", tables_pct, None, None, gold_pred, tables_sent, None, cols_db)
 
 
 # ---------------------------------------------------------------------------
-# Reporting
+# Selection & reporting
 # ---------------------------------------------------------------------------
 
-def _selectivity(r: SweepResult) -> float:
-    """sent/avail: ~1.0 means the column stage barely pruned anything."""
-    return r.avg_cols_sent / r.avg_cols_available if r.avg_cols_available else 0.0
+def pick_best(results: list[SweepResult], mode: str, rank_by: str) -> SweepResult:
+    """Highest rank_by for `mode`; ties -> fewer columns sent (cheaper prompt)."""
+    candidates = [r for r in results if r.mode == mode]
+    return max(candidates, key=lambda r: (round(getattr(r, rank_by), 6), -r.avg_cols_sent))
 
 
-def _format_row(r: SweepResult, note: str) -> str:
-    target_str = "YES" if r.meets_recall_target else "NO "
-    return (
-        f"{r.top_k_tables:>8} {r.top_k_columns:>6} {r.sim_threshold:>5.2f} "
-        f"{r.avg_recall*100:>8.2f}% {r.avg_precision*100:>10.2f}% "
-        f"{r.f1*100:>7.2f}% {r.avg_cols_sent:>6.1f} {r.avg_cols_available:>6.1f} "
-        f"{_selectivity(r):>10.2f} {target_str:>9}  {note}"
-    )
+def best_config(results: list[SweepResult], rank_by: str) -> dict:
+    """Winners as {PipelineConfig field: value}, ready for setattr(cfg, ...)."""
+    g = pick_best(results, "graphrag", rank_by)
+    b = pick_best(results, "baseline", rank_by)
+    return {
+        "top_k_tables_pct": g.tables_pct,
+        "top_k_columns_pct": g.columns_pct,
+        "semantic_similarity_threshold": g.sim_threshold,
+        "baseline_top_k_tables_pct": b.tables_pct,
+    }
 
 
-def _print_table(results: list[SweepResult]) -> None:
-    """Print two ranked tables: standard F1 and recall-weighted ranking."""
-    W = 104
-
-    # --- Table 1: ranked by standard F1 (for reference) ---
-    header = (
-        f"{'tables':>8} {'cols':>6} {'thr':>5} {'recall':>9} {'precision':>11} "
-        f"{'F1':>8} {'sent':>6} {'avail':>6} {'sent/avail':>10} {'meets90%':>9}  note"
-    )
-    print("\n" + "=" * W)
-    print("SWEEP RESULTS — ranked by standard F1  (reference only)")
-    print("=" * W)
-    print(header)
-    print("-" * W)
-    for i, r in enumerate(sorted(results, key=lambda r: r.f1, reverse=True)):
-        note = "<-- best std-F1" if i == 0 else ""
-        print(_format_row(r, note))
-    print("=" * W)
-
-    # --- Table 2: ranked by F6 (RECOMMENDED) ---
-    print("\n" + "=" * W)
-    print("SWEEP RESULTS — ranked by F6 score (β=6)  [RECOMMENDED]")
-    print("  F6 = 37×P×R / (36P+R)  |  recall weighted 36× more than precision")
-    print(f"  Peak EX correlation among F-beta variants (arxiv 2501.17174)  |  90% recall line shown for reference")
-    print("=" * W)
-    print(header)
-    print("-" * W)
-    for i, r in enumerate(sorted(results, key=lambda r: r.f6, reverse=True)):
-        note = ""
-        if i == 0:
-            note = "<-- RECOMMENDED (best F6)"
-        elif not r.meets_recall_target:
-            note = f"recall < {RECALL_THRESHOLD*100:.0f}%"
-        print(_format_row(r, note))
-    print("=" * W)
+def _print_table(results: list[SweepResult], rank_by: str) -> None:
+    W = 118
+    for mode in ("graphrag", "baseline"):
+        rows = sorted((r for r in results if r.mode == mode),
+                      key=lambda r: (round(getattr(r, rank_by), 6), -r.avg_cols_sent), reverse=True)
+        print("\n" + "=" * W)
+        print(f"SWEEP — {mode.upper()}  ranked by SLA {rank_by}  (macro-average per query, src/metrics/sla.py)")
+        print("=" * W)
+        print(f"{'config':<34} {'tbl P':>7} {'tbl R':>7} {'tbl F1':>7} {'col P':>7} {'col R':>7} "
+              f"{'col F1':>7} {'tbl':>5} {'cols':>6} {'cand':>6} {'db':>6}")
+        print("-" * W)
+        for i, r in enumerate(rows):
+            cand = f"{r.avg_cols_candidate:>6.1f}" if r.avg_cols_candidate is not None else f"{'-':>6}"
+            print(
+                f"{r.label:<34} {r.table_precision*100:>6.1f}% {r.table_recall*100:>6.1f}% "
+                f"{r.table_f1*100:>6.1f}% {r.col_precision*100:>6.1f}% {r.col_recall*100:>6.1f}% "
+                f"{r.col_f1*100:>6.1f}% {r.avg_tables_sent:>5.1f} {r.avg_cols_sent:>6.1f} "
+                f"{cand} {r.avg_cols_db:>6.1f}" + ("  <-- BEST" if i == 0 else "")
+            )
+        print("=" * W)
+    print("tbl/cols = tables/columns in the prompt, cand = columns of the Stage-1 tables, db = columns in the DB")
 
 
 def _save_csv(results: list[SweepResult], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [asdict(r) for r in results]
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["top_k_tables", "top_k_columns", "sim_threshold",
-                        "avg_recall", "avg_precision", "f1", "f6",
-                        "avg_cols_sent", "avg_cols_available", "sent_over_avail",
-                        "meets_recall_target", "n_samples"],
-        )
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
         writer.writeheader()
-        for r in results:
-            writer.writerow({
-                "top_k_tables":        r.top_k_tables,
-                "top_k_columns":       r.top_k_columns,
-                "sim_threshold":       r.sim_threshold,
-                "avg_recall":          round(r.avg_recall, 4),
-                "avg_precision":       round(r.avg_precision, 4),
-                "f1":                  round(r.f1, 4),
-                "f6":                  round(r.f6, 4),
-                "avg_cols_sent":       round(r.avg_cols_sent, 2),
-                "avg_cols_available":  round(r.avg_cols_available, 2),
-                "sent_over_avail":     round(_selectivity(r), 4),
-                "meets_recall_target": r.meets_recall_target,
-                "n_samples":           r.n_samples,
-            })
+        for row in rows:
+            writer.writerow({k: round(v, 4) if isinstance(v, float) else v for k, v in row.items()})
     logger.info("CSV saved to %s", path)
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Public API — used by the CLI below, pipeline.py and eval_pipeline.ipynb
 # ---------------------------------------------------------------------------
 
-def main(sample_ratio: float) -> None:
-    cfg = PipelineConfig()
-
-    logger.info("Loading schema and building graph …")
-    schema_df = load_spider_schema(cfg.tables_json)
-    graph     = build_schema_graph(schema_df)
-
-    logger.info("Loading dev set …")
-    with open(cfg.dev_json, "r", encoding="utf-8") as f:
-        dev_data = json.load(f)
-
-    # Deterministic subsample
-    n = max(1, int(len(dev_data) * sample_ratio))
-    rng = np.random.default_rng(42)
-    indices = rng.choice(len(dev_data), size=n, replace=False)
-    dev_subset = [dev_data[i] for i in sorted(indices)]
-    logger.info("Sweep subset: %d / %d questions (%.0f%%)", n, len(dev_data), sample_ratio * 100)
-
-    logger.info("Loading embedding model: %s", cfg.embedding_model)
-    embed_model = SentenceTransformer(cfg.embedding_model)
-
-    # Pre-build schema indices for all DBs in subset
-    unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_subset))
-    logger.info("Building schema indices for %d databases …", len(unique_db_ids))
-    schema_cache: dict[str, SchemaIndex] = {
-        db_id: build_schema_index(graph, db_id, embed_model)
-        for db_id in tqdm(unique_db_ids, desc="Indexing")
-    }
-
-    results = _run_grid(dev_subset, graph, schema_cache, embed_model, cfg)
-
-    _print_table(results)
-    _save_csv(results, Path("outputs/tables/sweep_results.csv"))
-
-    # Recommend best config
-    best = max(results, key=lambda r: r.f6)
-    print(
-        f"\nRecommended config (best F6): "
-        f"top_k_tables={best.top_k_tables}, top_k_columns={best.top_k_columns}, "
-        f"semantic_similarity_threshold={best.sim_threshold}\n"
-        f"  recall={best.avg_recall*100:.2f}%  "
-        f"precision={best.avg_precision*100:.2f}%  "
-        f"meets_90%_target={'YES' if best.meets_recall_target else 'NO'}\n"
-        f"  (F1={best.f1*100:.2f}%  F6={best.f6*100:.2f}%  "
-        f"cols sent/available={_selectivity(best):.2f})"
-    )
-    if not best.meets_recall_target:
-        print(
-            f"  WARNING: best config still below {RECALL_THRESHOLD*100:.0f}% recall.\n"
-            "  Consider expanding TOP_K_TABLES_VALUES in sweep.py."
-        )
-    print("→ Update these three values in config.py before running the full pipeline.\n")
-
-
-def _run_grid(dev_subset, graph, schema_cache, embed_model, cfg) -> list[SweepResult]:
-    """Run every (top_k_tables, top_k_columns, threshold) combination."""
-    combos = list(product(TOP_K_TABLES_VALUES, TOP_K_COLUMNS_VALUES, SIM_THRESHOLD_VALUES))
-    logger.info("Running %d combinations …", len(combos))
-
-    results: list[SweepResult] = []
-    for top_k_tables, top_k_columns, sim_threshold in tqdm(combos, desc="Sweep"):
-        result = _run_combination(
-            top_k_tables, top_k_columns, sim_threshold,
-            dev_subset, graph, schema_cache, embed_model, cfg,
-        )
-        results.append(result)
-        logger.info(
-            "  tables=%d cols=%d thr=%.2f → recall=%.2f%% precision=%.2f%% "
-            "F1=%.2f%% sent/avail=%.2f",
-            top_k_tables, top_k_columns, sim_threshold,
-            result.avg_recall * 100, result.avg_precision * 100, result.f1 * 100,
-            _selectivity(result),
-        )
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Public API — called by pipeline.py
-# ---------------------------------------------------------------------------
-
-def run_sweep_and_get_best(
+def run_sweep(
     sample_ratio: float,
-    cfg,
-) -> tuple[int, int, float]:
+    cfg: PipelineConfig,
+    rank_by: str = "col_f1",
+    thresholds: list[float] | None = None,
+) -> tuple[list[SweepResult], dict]:
     """
-    Run the full precision sweep and return
-    (best_top_k_tables, best_top_k_columns, best_similarity_threshold).
-
-    Called automatically by pipeline.py at startup unless --skip-sweep is passed.
-    The sweep uses embedding lookups only — no LLM inference — so it is fast.
-    Results are also saved to sweep_results.csv for your records.
+    Run the whole stage-1 grid and return (all results, best_config()).
+    Retrieval + SLA only — no LLM, so it is cheap (embedding lookups).
     """
-    import json
-    from sentence_transformers import SentenceTransformer
-    from src.core.schema import build_schema_graph, load_spider_schema
+    if rank_by not in RANK_METRICS:
+        raise ValueError(f"rank_by must be one of {RANK_METRICS}, got {rank_by!r}")
+    thresholds = thresholds or [cfg.semantic_similarity_threshold]
 
-    logger.info("Loading schema for sweep …")
+    logger.info("Loading schema and building both graphs …")
     schema_df = load_spider_schema(cfg.tables_json)
-    graph     = build_schema_graph(schema_df)
+    col_graph = build_schema_graph(schema_df)
+    tbl_graph = build_table_graph(schema_df)
 
     with open(cfg.dev_json, "r", encoding="utf-8") as f:
         dev_data = json.load(f)
-
     n = max(1, int(len(dev_data) * sample_ratio))
     rng = np.random.default_rng(cfg.seed)
     indices = rng.choice(len(dev_data), size=n, replace=False)
     dev_subset = [dev_data[i] for i in sorted(indices)]
     logger.info("Sweep subset: %d / %d questions", n, len(dev_data))
 
-    logger.info("Loading embedding model for sweep: %s", cfg.embedding_model)
+    # Gold schema once per question (official Spider parser, see sla.py).
+    db_schema = load_db_schema(str(cfg.tables_json))
+    samples, n_failed = [], 0
+    for item in dev_subset:
+        try:
+            samples.append((item, extract_ground_truth_schema(item["query"], item["db_id"], db_schema)))
+        except Exception:
+            n_failed += 1
+    if n_failed:
+        logger.warning("%d gold SQL could not be parsed -> excluded from the sweep", n_failed)
+
+    logger.info("Loading embedding model: %s", cfg.embedding_model)
     embed_model = SentenceTransformer(cfg.embedding_model)
 
-    unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_subset))
-    schema_cache = {
-        db_id: build_schema_index(graph, db_id, embed_model)
-        for db_id in tqdm(unique_db_ids, desc="Sweep — indexing")
-    }
+    unique_db_ids = list(dict.fromkeys(item["db_id"] for item, _ in samples))
+    col_cache = {db_id: build_schema_index(col_graph, db_id, embed_model)
+                 for db_id in tqdm(unique_db_ids, desc="Indexing columns")}
+    tbl_cache = {db_id: build_table_index(tbl_graph, db_id, embed_model)
+                 for db_id in tqdm(unique_db_ids, desc="Indexing tables")}
+    n_cols_db = {db_id: len(table_nodes_to_schema(tbl_graph, _all_table_nodes(tbl_graph, db_id)))
+                 for db_id in unique_db_ids}
 
-    results = _run_grid(dev_subset, graph, schema_cache, embed_model, cfg)
+    frame = cfg.top_k_frame
+    g_combos = list(product(frame, frame, thresholds))
+    logger.info("Running %d GraphRAG + %d Baseline configs …", len(g_combos), len(frame))
 
-    _print_table(results)
-    _save_csv(results, Path("outputs/tables/sweep_results.csv"))
+    results: list[SweepResult] = []
+    for tables_pct, columns_pct, thr in tqdm(g_combos, desc="Sweep GraphRAG"):
+        r = _run_graphrag(tables_pct, columns_pct, thr, samples, col_graph, col_cache,
+                          n_cols_db, embed_model, cfg)
+        results.append(r)
+        logger.info("  graphrag %s -> col F1=%.2f%% R=%.2f%% | cols sent=%.1f",
+                    r.label, r.col_f1 * 100, r.col_recall * 100, r.avg_cols_sent)
+    for tables_pct in tqdm(frame, desc="Sweep Baseline"):
+        r = _run_baseline(tables_pct, samples, tbl_graph, tbl_cache, n_cols_db, embed_model, cfg)
+        results.append(r)
+        logger.info("  baseline %s -> col F1=%.2f%% R=%.2f%% | cols sent=%.1f",
+                    r.label, r.col_f1 * 100, r.col_recall * 100, r.avg_cols_sent)
 
-    best = max(results, key=lambda r: r.f6)
-    logger.info(
-        "Best config (recall-weighted): top_k_tables=%d top_k_columns=%d thr=%.2f "
-        "recall=%.2f%% precision=%.2f%% sent/avail=%.2f",
-        best.top_k_tables, best.top_k_columns, best.sim_threshold,
-        best.avg_recall * 100, best.avg_precision * 100, _selectivity(best),
-    )
-    return best.top_k_tables, best.top_k_columns, best.sim_threshold
+    _print_table(results, rank_by)
+    _save_csv(results, SWEEP_CSV)
+
+    best = best_config(results, rank_by)
+    print(f"\nBest config (SLA {rank_by}):")
+    for attr, value in best.items():
+        print(f"  {attr} = {value}")
+    print("-> Put these in config.py (or pass --tables-pct/--columns-pct/--baseline-tables-pct/"
+          "--threshold) before running ablation.py (stage 2).\n")
+    return results, best
+
+
+def run_sweep_and_get_best(
+    sample_ratio: float,
+    cfg: PipelineConfig,
+    rank_by: str = "col_f1",
+    thresholds: list[float] | None = None,
+) -> dict:
+    """
+    Stage 1 winners as {PipelineConfig field: value}. Called by pipeline.py at
+    startup unless --skip-sweep is passed, and by eval_pipeline.ipynb.
+    """
+    return run_sweep(sample_ratio, cfg, rank_by, thresholds)[1]
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Schema-linking precision sweep")
-    parser.add_argument(
-        "--sample", type=float, default=0.2,
-        help="Fraction of dev set to use (default: 0.2 = 20%%)",
-    )
+    parser = argparse.ArgumentParser(description="Ablation stage 1: top-k fraction sweep ranked by SLA")
+    parser.add_argument("--sample", type=float, default=0.2,
+                        help="Fraction of dev set to use (default: 0.2 = 20%%)")
+    parser.add_argument("--rank-by", choices=RANK_METRICS, default="col_f1",
+                        help="SLA metric that picks the winner (default: col_f1).")
+    parser.add_argument("--thresholds", type=float, nargs="+", default=None,
+                        help="Also sweep semantic_similarity_threshold (GraphRAG). "
+                             "Default: only the config.py value.")
     args, unknown = parser.parse_known_args()
-    main(args.sample)
+    run_sweep(args.sample, PipelineConfig(), args.rank_by, args.thresholds)

@@ -29,16 +29,26 @@ Flags:
 
     "--always-dim5", action="store_true",
         help="Run Dimension 5 even without the Dimension 2 trigger.",
+
+    "--models", nargs="+", metavar="MODEL",
+        help="With --baseline: ablation stage 3 -- run the comparison once per
+              model ('all' = config.py llm_model_frame), outputs per model.",
+
+    "--tables-pct / --columns-pct / --baseline-tables-pct / --threshold /
+     --few-shot-k / --llm-model",
+        help="Override the config.py value (e.g. stage 1/2 winners on Kaggle).",
 """
 
 import argparse
+import csv
+import gc
 import json
 import logging
 import random
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -48,17 +58,18 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.core.config import PipelineConfig
+from src.core.config import PipelineConfig, add_config_override_args, apply_config_overrides
 from src.experiments.sweep import run_sweep_and_get_best
-from src.generation.few_shot import FewShotIndex, build_few_shot_index, format_few_shot_block, retrieve_few_shot_examples
+from src.generation.few_shot import FewShotIndex, build_few_shot_block, build_few_shot_index
 from src.generation.generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
+from src.retrieval.baseline import table_nodes_to_schema
 from src.retrieval.retrieval import (
     SchemaIndex,
     build_schema_context,
     build_schema_index,
+    column_nodes_to_schema,
     evaluate_schema_linking,
-    semantic_schema_linking,
-    trace_schema_paths,
+    retrieve_graphrag_schema,
 )
 from src.core.schema import build_schema_graph, load_spider_schema
 from src.metrics import esm_ex_cm
@@ -151,32 +162,8 @@ def run_single(
     if schema_index is None:
         schema_index = build_schema_index(graph, db_id, embed_model)
 
-    # --- Schema retrieval ---
-    if cfg.use_full_schema_bypass:
-        column_nodes = [
-            n
-            for n, d in graph.nodes(data=True)
-            if d.get("database") == db_id and d.get("type") == "column"
-        ]
-    else:
-        detected_cols = semantic_schema_linking(
-            graph, db_id, question,
-            all_columns=schema_index.columns,
-            col_embeddings=schema_index.col_embeddings,
-            embed_model=embed_model,
-            cfg=cfg,
-            index=schema_index,
-        )
-
-        if not detected_cols:
-            column_nodes = [
-                n
-                for n, d in graph.nodes(data=True)
-                if d.get("database") == db_id and d.get("type") == "column"
-            ]
-        else:
-            c_nodes, paths, _ = trace_schema_paths(graph, db_id, detected_cols)
-            column_nodes = list(set(c_nodes + [node for path in paths for node in path]))
+    # --- Schema retrieval (Stage 1 tables -> Stage 2 columns -> traversal) ---
+    column_nodes, _ = retrieve_graphrag_schema(graph, db_id, question, schema_index, embed_model, cfg)
 
     if not column_nodes:
         return "SELECT 1", 0.0, 0.0, "", [], 0, 0
@@ -184,13 +171,8 @@ def run_single(
     # --- Schema linking evaluation ---
     recall, precision = evaluate_schema_linking(gold_sql, column_nodes, graph, db_id)
 
-    # --- Few-shot example retrieval ---
-    few_shot_block = ""
-    if few_shot_index is not None and cfg.few_shot_k > 0:
-        examples = retrieve_few_shot_examples(
-            question, few_shot_index, embed_model, cfg
-        )
-        few_shot_block = format_few_shot_block(examples)
+    # --- Few-shot example retrieval (same helper + k as the baseline) ---
+    few_shot_block = build_few_shot_block(question, few_shot_index, embed_model, cfg)
 
     # --- Prompt construction & SQL generation ---
     schema_context = build_schema_context(graph, column_nodes)
@@ -333,43 +315,11 @@ def build_gold_schema_context(
 # predicted_schema helpers for data/raw_logs/*.json (see run_comparison())
 # ---------------------------------------------------------------------------
 
-def _column_nodes_to_predicted_schema(graph, column_nodes: list) -> list[str]:
-    """
-    Convert GraphRAG column node ids into a flat sorted ["table.column", ...]
-    list for raw_logs' predicted_schema field. Reads table/column from node
-    ATTRIBUTES (not by string-splitting the node id "{db}.{table}.{col}")
-    since that's how the rest of the codebase already looks these up (see
-    evaluate_schema_linking() in src/retrieval/retrieval.py).
-    """
-    out = set()
-    for node in column_nodes:
-        d = graph.nodes[node]
-        table = d.get("table")
-        column = d.get("column")
-        if table and column and column != "*":
-            out.add(f"{table.lower()}.{column.lower()}")
-    return sorted(out)
-
-
-def _table_nodes_to_predicted_schema(graph, table_nodes: list) -> list[str]:
-    """
-    Convert Baseline table node ids into a flat sorted ["table.column", ...]
-    list. Baseline sends ALL columns of the selected tables with no pruning
-    (see CLAUDE.md root, "Arsitektur Pipeline (Baseline)"), so this expands
-    each table node's "columns" attribute (see build_table_graph() in
-    src/retrieval/baseline.py) rather than just listing the table names.
-    """
-    out = set()
-    for node in table_nodes:
-        d = graph.nodes[node]
-        table = d.get("table")
-        if not table:
-            continue
-        for col_info in d.get("columns", []):
-            column = col_info.get("Column")
-            if column and column != "*":
-                out.add(f"{table.lower()}.{column.lower()}")
-    return sorted(out)
+# Moved next to their retrieval code so sweep.py can score SLA on exactly the
+# same "table.column" sets (sweep.py cannot import pipeline.py: circular).
+# Old names kept because eval_pipeline.ipynb imports them from here.
+_column_nodes_to_predicted_schema = column_nodes_to_schema
+_table_nodes_to_predicted_schema = table_nodes_to_schema
 
 
 # ---------------------------------------------------------------------------
@@ -672,33 +622,70 @@ def run_dimension_analysis(
 # Comparison: GraphRAG vs Baseline side-by-side
 # ---------------------------------------------------------------------------
 
+def model_run_dirs(llm_model: str, out_root: Path = Path("outputs")) -> tuple[Path, Path, Path]:
+    """
+    (out_dir, raw_logs_dir, qvt_dir) for one model of the stage-3 model
+    comparison, e.g. Qwen/Qwen2.5-Coder-3B-Instruct ->
+    outputs/models/Qwen2.5-Coder-3B-Instruct/, data/raw_logs/Qwen2.5-Coder-3B-Instruct/,
+    data/qvt_variations/Qwen2.5-Coder-3B-Instruct/. Keeps models from overwriting
+    each other and from the default (single-model) run's paths.
+    """
+    slug = llm_model.rstrip("/").split("/")[-1]
+    return (
+        out_root / "models" / slug,
+        Path("data/raw_logs") / slug,
+        Path("data/qvt_variations") / slug,
+    )
+
+
+def summarize_raw_logs(raw_logs: list[dict], alpha: float) -> dict:
+    """EX/ESM (0-100) and mean token counts of one condition's raw_logs."""
+    if not raw_logs:
+        return {"n": 0}
+    t_in = np.mean([r["token_input"] for r in raw_logs])
+    t_out = np.mean([r["token_output"] for r in raw_logs])
+    return {
+        "n": len(raw_logs),
+        "ex": float(np.mean([r["ex_result"] for r in raw_logs]) * 100),
+        "esm": float(np.mean([r["esm_result"] for r in raw_logs]) * 100),
+        "t_in": float(t_in),
+        "t_out": float(t_out),
+        "t": float(t_in + alpha * t_out),
+    }
+
+
 def run_comparison(
     cfg: PipelineConfig,
     sample_ratio: float,
     run_dimensions: bool = True,
     ex_per_k: dict | None = None,
     always_dim5: bool = False,
-) -> None:
+    out_dir: Path = Path("outputs"),
+    raw_logs_dir: Path = Path("data/raw_logs"),
+    qvt_dir: Path = Path("data/qvt_variations"),
+) -> dict:
     """
     Run GraphRAG (column/node) AND Baseline (table/node) on the same
     dev-set sample, then print a side-by-side schema-linking + prediction
-    comparison report.
+    comparison report. Both arms use the same LLM and the same few-shot k
+    (cfg.few_shot_k); only the retrieval differs.
 
-    Predictions are saved to:
-        predictions.txt          — GraphRAG
-        baseline_predictions.txt — Baseline
-        comparison_report.txt    — side-by-side summary
-        data/raw_logs/*.json     — per-query raw logs (input of the 6 dimensions)
-        outputs/tables/dimensions_{results.json,report.txt}
-                                 — 6-dimension analysis (unless run_dimensions=False)
+    Saved (paths relative to out_dir / raw_logs_dir; the defaults are the
+    single-model run, model_run_dirs() gives the per-model ones):
+        predictions/predictions.txt          — GraphRAG
+        predictions/baseline_predictions.txt — Baseline
+        tables/comparison_report.txt         — side-by-side summary
+        raw_logs_dir/*.json                  — per-query raw logs (input of the 6 dimensions)
+        tables/dimensions_{results.json,report.txt}
+                                             — 6-dimension analysis (unless run_dimensions=False)
+
+    Returns {"graphrag": summarize_raw_logs(...), "baseline": ...}.
     """
-    import numpy as np
     from src.retrieval.baseline import (
         BaselineResult,
         build_table_graph,
         build_table_index,
         run_single_baseline,
-        _save_predictions as bl_save_pred,
         _save_log        as bl_save_log,
         _save_csv        as bl_save_csv,
         _print_summary   as bl_print_summary,
@@ -706,6 +693,11 @@ def run_comparison(
     )
 
     set_seed(cfg.seed)
+    for sub in ("predictions", "tables", "logs"):
+        (out_dir / sub).mkdir(parents=True, exist_ok=True)
+    # run_official_evaluation() reads cfg.predictions_file (and writes its
+    # normalized copies next to it), so point it at this run's GraphRAG file.
+    cfg = replace(cfg, predictions_file=out_dir / "predictions" / "predictions.txt")
 
     # ── Shared setup ──────────────────────────────────────────────────────
     logger.info("Loading schema …")
@@ -749,11 +741,10 @@ def run_comparison(
         for db_id in tqdm(unique_db_ids, desc="Indexing tables")
     }
 
-    # Few-shot index (GraphRAG only)
+    # Few-shot index — shared by BOTH arms, same k (cfg.few_shot_k)
     few_shot_idx = None
     if cfg.few_shot_k > 0:
-        from src.generation.few_shot import build_few_shot_index
-        logger.info("Building few-shot index …")
+        logger.info("Building few-shot index (k=%d, GraphRAG + Baseline) …", cfg.few_shot_k)
         few_shot_idx = build_few_shot_index(cfg.train_json, embed_model)
 
     # ── Raw-log evaluation setup (SLA/ESM/EX/CM per query -> data/raw_logs/) ──
@@ -775,8 +766,8 @@ def run_comparison(
     graphrag_results: list[PipelineResult] = []
     baseline_results: list[BaselineResult] = []
 
-    g_pred_path = Path("outputs/predictions/predictions.txt")
-    b_pred_path = Path("outputs/predictions/baseline_predictions.txt")
+    g_pred_path = cfg.predictions_file
+    b_pred_path = out_dir / "predictions" / "baseline_predictions.txt"
 
     W = 72
     with open(g_pred_path, "w", encoding="utf-8") as gf, \
@@ -806,6 +797,7 @@ def run_comparison(
                     question, gold_sql, db_id,
                     tbl_graph, embed_model, llm, tokenizer, cfg,
                     table_index=tbl_cache[db_id],
+                    few_shot_index=few_shot_idx,
                 )
             except Exception:
                 logger.exception("Baseline error on sample %d", i)
@@ -890,12 +882,11 @@ def run_comparison(
                 print("=" * W)
 
     # ── Save baseline artefacts ────────────────────────────────────────────
-    bl_save_log(baseline_results, Path("outputs/logs/baseline_log.txt"))
-    bl_save_csv(baseline_results, Path("outputs/tables/baseline_results.csv"))
+    bl_save_log(baseline_results, out_dir / "logs" / "baseline_log.txt")
+    bl_save_csv(baseline_results, out_dir / "tables" / "baseline_results.csv")
 
     # ── Save raw_logs (input for src/dimensions/, see EVALUATION_ANALYSIS_GUIDE.md
     # Bagian 2 for the schema) ──────────────────────────────────────────────
-    raw_logs_dir = Path("data/raw_logs")
     raw_logs_dir.mkdir(parents=True, exist_ok=True)
     with open(raw_logs_dir / "graphrag_log.json", "w", encoding="utf-8") as f:
         json.dump(graphrag_raw_logs, f, ensure_ascii=False, indent=2)
@@ -930,13 +921,18 @@ def run_comparison(
         "  Node granularity      column/node      table/node",
         "  Schema context        pruned cols      all cols in table",
         "  Linking strategy      n-gram match     single query embed",
+        f"  Top-k tables (pct)    {cfg.top_k_tables_pct:<16} {cfg.baseline_top_k_tables_pct}",
+        f"  Top-k columns (pct)   {cfg.top_k_columns_pct:<16} -",
+        f"  Few-shot k            {cfg.few_shot_k:<16} {cfg.few_shot_k}",
+        f"  LLM                   {cfg.llm_model}",
         "=" * 70,
         "",
     ]
     report = "\n".join(report_lines) + _format_confound_diag(confound_diag)
     print(report)
-    Path("outputs/tables/comparison_report.txt").write_text(report, encoding="utf-8")
-    logger.info("Comparison report → outputs/tables/comparison_report.txt")
+    report_path = out_dir / "tables" / "comparison_report.txt"
+    report_path.write_text(report, encoding="utf-8")
+    logger.info("Comparison report → %s", report_path)
     logger.info(
         "Confound diag — outer JOIN gold=%d graphrag=%d baseline=%d | "
         "EX order-sensitivity ex0-but-set-match graphrag=%d baseline=%d",
@@ -968,11 +964,12 @@ def run_comparison(
         try:
             run_dimension_analysis(
                 raw_logs_dir=raw_logs_dir,
-                out_dir=Path("outputs/tables"),
+                out_dir=out_dir / "tables",
                 dev_json=cfg.dev_json,
                 full_dev=sample_ratio >= 1.0,
                 ex_per_k=ex_per_k,
                 always_dim5=always_dim5,
+                qvt_dir=qvt_dir,
             )
         except Exception:
             logger.exception(
@@ -980,9 +977,80 @@ def run_comparison(
                 "re-run: python src/experiments/run_all_dimensions.py"
             )
 
+    return {
+        "graphrag": summarize_raw_logs(graphrag_raw_logs, cfg.token_output_weight),
+        "baseline": summarize_raw_logs(baseline_raw_logs, cfg.token_output_weight),
+    }
+
 
 # ---------------------------------------------------------------------------
-# CLI — GANTI if __name__ == "__main__" yang lama dengan ini
+# Ablation stage 3: the same comparison for every model in llm_model_frame
+# ---------------------------------------------------------------------------
+
+def run_model_comparison(
+    cfg: PipelineConfig,
+    models: list[str],
+    sample_ratio: float,
+    run_dimensions: bool = True,
+    ex_per_k: dict | None = None,
+    always_dim5: bool = False,
+) -> list[dict]:
+    """
+    Run run_comparison() once per model with everything else fixed (the stage
+    1/2 winners in cfg), each into its own model_run_dirs(). Writes
+    outputs/tables/model_comparison.csv (one row per model x mode, rewritten
+    after every model so a Kaggle timeout keeps the finished ones).
+    """
+    rows: list[dict] = []
+    summary_path = Path("outputs/tables/model_comparison.csv")
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+
+    for model in models:
+        logger.info("=" * 60)
+        logger.info("MODEL %d/%d: %s", len(rows) // 2 + 1, len(models), model)
+        logger.info("=" * 60)
+        out_dir, raw_logs_dir, qvt_dir = model_run_dirs(model)
+        summary = run_comparison(
+            replace(cfg, llm_model=model), sample_ratio,
+            run_dimensions=run_dimensions, ex_per_k=ex_per_k, always_dim5=always_dim5,
+            out_dir=out_dir, raw_logs_dir=raw_logs_dir, qvt_dir=qvt_dir,
+        )
+        # run_comparison's LLM is unreachable now; free the VRAM before the next one.
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        for mode, s in summary.items():
+            rows.append({
+                "llm_model": model, "mode": mode, "n": s.get("n", 0),
+                "ex": round(s.get("ex", 0.0), 2), "esm": round(s.get("esm", 0.0), 2),
+                "avg_t_in": round(s.get("t_in", 0.0), 1), "avg_t_out": round(s.get("t_out", 0.0), 1),
+                "avg_token_consumption": round(s.get("t", 0.0), 1),
+                "few_shot_k": cfg.few_shot_k,
+                "tables_pct": cfg.top_k_tables_pct if mode == "graphrag" else cfg.baseline_top_k_tables_pct,
+                "columns_pct": cfg.top_k_columns_pct if mode == "graphrag" else "",
+                "raw_logs": str(raw_logs_dir / f"{mode}_log.json"),
+            })
+        with open(summary_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+
+    W = 86
+    print("\n" + "=" * W)
+    print("  MODEL COMPARISON (ablation stage 3) — EX/ESM in-process, T = T_in + α×T_out")
+    print("=" * W)
+    print(f"  {'model':<36} {'mode':<9} {'EX':>7} {'ESM':>7} {'T_in':>8} {'T_out':>7} {'T':>8}")
+    print("-" * W)
+    for r in rows:
+        print(f"  {r['llm_model'].split('/')[-1]:<36} {r['mode']:<9} {r['ex']:>6.2f}% {r['esm']:>6.2f}% "
+              f"{r['avg_t_in']:>8.1f} {r['avg_t_out']:>7.1f} {r['avg_token_consumption']:>8.1f}")
+    print("=" * W)
+    logger.info("Model comparison → %s", summary_path)
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# CLI
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -993,11 +1061,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--skip-sweep", action="store_true",
-        help="Skip the precision sweep and use top_k values from config.py as-is.",
+        help="Skip the top-k sweep (ablation stage 1) and use the config.py fractions as-is.",
     )
     parser.add_argument(
         "--sweep-sample", type=float, default=0.2,
-        help="Fraction of dev set used for the precision sweep (default: 0.2).",
+        help="Fraction of dev set used for the top-k sweep (default: 0.2).",
     )
     parser.add_argument(
         "--baseline", action="store_true",
@@ -1016,60 +1084,64 @@ if __name__ == "__main__":
         help="EX per few-shot k for Dimension 6, scale 0-100 (e.g. 0=45.2,1=52.1,3=54.0,5=53.8).",
     )
     parser.add_argument(
+        "--ex-per-k-file", default=None, metavar="JSON",
+        help="Same as --ex-per-k from a file, e.g. outputs/tables/ablation_ex_per_k_graphrag.json "
+             "(written by ablation.py).",
+    )
+    parser.add_argument(
         "--always-dim5", action="store_true",
         help="Run Dimension 5 even if Dimension 2 does not escalate to it.",
     )
+    parser.add_argument(
+        "--models", nargs="+", default=None, metavar="MODEL",
+        help="With --baseline: ablation stage 3, one comparison per model "
+             "('all' = config.py llm_model_frame). Outputs go to outputs/models/<model>/.",
+    )
+    add_config_override_args(parser)
     args, unknown = parser.parse_known_args()
 
     config = PipelineConfig(use_full_schema_bypass=args.full_schema)
 
-    # Sweep (skipped automatically when --baseline is used or --full-schema)
+    # Ablation stage 1: top-k sweep (no LLM, ranked by SLA)
     if not args.skip_sweep and not config.use_full_schema_bypass:
         logger.info("=" * 60)
-        logger.info("STEP 0: Precision sweep (pass --skip-sweep to skip)")
+        logger.info("STEP 0: top-k sweep (pass --skip-sweep to skip)")
         logger.info("=" * 60)
-        best_tables, best_cols, best_threshold = run_sweep_and_get_best(
-            sample_ratio=args.sweep_sample,
-            cfg=config,
-        )
-        logger.info(
-            "Sweep done — updating config: top_k_tables=%d, top_k_columns=%d, "
-            "semantic_similarity_threshold=%.2f",
-            best_tables, best_cols, best_threshold,
-        )
-        config.top_k_tables  = best_tables
-        config.top_k_columns = best_cols
-        config.semantic_similarity_threshold = best_threshold
-    else:
-        logger.info(
-            "Skipping sweep — using config: top_k_tables=%d, top_k_columns=%d, "
-            "semantic_similarity_threshold=%.2f",
-            config.top_k_tables, config.top_k_columns,
-            config.semantic_similarity_threshold,
-        )
+        best = run_sweep_and_get_best(sample_ratio=args.sweep_sample, cfg=config)
+        logger.info("Sweep done — updating config: %s", best)
+        for attr, value in best.items():
+            setattr(config, attr, value)
+
+    # Explicit CLI values win over both config.py and the sweep.
+    apply_config_overrides(config, args)
+    logger.info(
+        "Config: tables_pct=%.2f columns_pct=%.2f threshold=%.2f baseline_tables_pct=%.2f "
+        "few_shot_k=%d (both arms) llm=%s",
+        config.top_k_tables_pct, config.top_k_columns_pct, config.semantic_similarity_threshold,
+        config.baseline_top_k_tables_pct, config.few_shot_k, config.llm_model,
+    )
+
+    if args.models and not args.baseline:
+        parser.error("--models needs --baseline (stage 3 compares both arms per model).")
 
     if args.baseline:
-        # Import baseline imports here to keep them lazy
-        from src.retrieval.baseline import (
-            BaselineResult,
-            build_table_graph,
-            build_table_index,
-            run_single_baseline,
-            _save_predictions,
-            _save_log,
-            _save_csv,
-            _print_summary,
-            _run_spider_eval,
-        )
         from src.experiments.run_all_dimensions import parse_ex_per_k
         try:
-            ex_per_k = parse_ex_per_k(args.ex_per_k, None)
+            ex_per_k = parse_ex_per_k(args.ex_per_k, Path(args.ex_per_k_file) if args.ex_per_k_file else None)
         except ValueError as exc:
             parser.error(str(exc))
-        run_comparison(
-            config, sample_ratio=args.sample,
-            run_dimensions=not args.no_dimensions,
-            ex_per_k=ex_per_k, always_dim5=args.always_dim5,
-        )
+        if args.models:
+            models = config.llm_model_frame if args.models == ["all"] else args.models
+            run_model_comparison(
+                config, models, sample_ratio=args.sample,
+                run_dimensions=not args.no_dimensions,
+                ex_per_k=ex_per_k, always_dim5=args.always_dim5,
+            )
+        else:
+            run_comparison(
+                config, sample_ratio=args.sample,
+                run_dimensions=not args.no_dimensions,
+                ex_per_k=ex_per_k, always_dim5=args.always_dim5,
+            )
     else:
         main(config)

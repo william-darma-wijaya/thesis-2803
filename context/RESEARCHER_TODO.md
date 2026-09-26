@@ -49,23 +49,37 @@
 
 ## 2. Eksperimen yang harus dijalankan (menentukan parameter TBD)
 
-- [ ] **`sweep.py`** — jalankan untuk menentukan nilai final `top_k_tables`,
-  `top_k_columns`, `semantic_similarity_threshold` di `config.py` (saat ini
-  masih nilai default placeholder, ditandai TBD).
+Ablation bertahap (`IMPLEMENTATION_DECISIONS.md` poin 28) — urutannya wajib,
+tiap tahap memakai pemenang tahap sebelumnya. Setelah tiap tahap, **tulis
+pemenangnya ke `config.py`** (atau oper lewat flag `--tables-pct` dkk).
+
+- [ ] **Tahap 1 — `sweep.py`** (tanpa LLM, cepat): pilih `top_k_tables_pct`,
+  `top_k_columns_pct`, `baseline_top_k_tables_pct` by SLA (saat ini
+  placeholder `0.6`, TBD).
   ```bash
   python src/experiments/sweep.py --sample 0.2
   ```
-- [ ] **`ablation.py`** (Run 1 — Baseline, Run 2 — GraphRAG) — belum pernah
-  dijalankan sama sekali (bukan cuma "belum final", tapi belum ada output di
-  `outputs/tables/ablation_results.csv` sama sekali per saat catatan ini
-  ditulis). Perlu dijalankan untuk menentukan `few_shot_k` final dan supaya
-  Dimensi 1 & 6 punya data nyata untuk dianalisis.
+  Baca juga `avg_cols_sent` vs `avg_cols_candidate` di `sweep_results.csv`:
+  kalau semua persentase kolom memberi hasil sama, threshold 0.35 yang
+  memotong — pertimbangkan `--thresholds 0.0 0.3 0.35 0.5`.
+- [ ] **Tahap 2 — `ablation.py`** (Run 1 — Baseline, Run 2 — GraphRAG, GPU):
+  pilih `few_shot_k` by EX (satu k untuk kedua pipeline; script mencetak
+  rekomendasi "shared" setelah dua mode selesai). Juga menghasilkan
+  `outputs/tables/ablation_ex_per_k_graphrag.json` untuk Dimensi 6.
   ```bash
-  python src/experiments/ablation.py --mode baseline --k-values 0 1 3 5 --sample 1.0
-  python src/experiments/ablation.py --mode graphrag --k-values 0 1 3 5 --sample 1.0
+  python src/experiments/ablation.py --mode baseline --sample 1.0
+  python src/experiments/ablation.py --mode graphrag --sample 1.0
   ```
-  Catatan: butuh GPU (torch tidak tersedia di environment dev lokal) — jalankan
-  di Kaggle.
+- [ ] **Tahap 3 — perbandingan model** (GPU): semua model di
+  `llm_model_frame` dengan config tahap 1+2, lalu tentukan `llm_model` final.
+  ```bash
+  python src/experiments/pipeline.py --baseline --skip-sweep --models all --sample 1.0
+  ```
+  Catatan: 14B 4-bit butuh ~9 GB VRAM + BGE-M3; di T4 16 GB masih muat tapi
+  jalankan per model (`--models <nama>`) kalau sesi Kaggle mepet waktu.
+
+Catatan: tahap 2 & 3 butuh GPU (torch/LLM tidak jalan di environment dev
+lokal) — jalankan di Kaggle.
 
 ## 3. Keputusan yang perlu didiskusikan
 
@@ -98,7 +112,7 @@
 ## Status lain yang masih TBD (lihat `CLAUDE.md` untuk daftar lengkap)
 
 `CLAUDE.md` root punya bagian "Hal yang Masih TBD" sendiri (nilai final
-`top_k_tables`/`top_k_columns`/`few_shot_k`, dll) — file ini melengkapi, bukan
+`top_k_*_pct`/`few_shot_k`/`llm_model`, dll) — file ini melengkapi, bukan
 menggantikan, daftar itu. Kalau ada TBD baru yang murni soal kode/implementasi
 (bukan sesuatu yang perlu disiapkan/diputuskan peneliti di luar coding), catat
 di `CLAUDE.md` atau `IMPLEMENTATION_DECISIONS.md`, bukan di sini.

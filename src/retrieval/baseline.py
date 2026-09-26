@@ -13,6 +13,10 @@ Architecture difference:
                                embeddings. Coarser granularity → higher recall,
                                lower precision.
 
+Everything after retrieval is identical for both arms, INCLUDING few-shot:
+the baseline gets the same cfg.few_shot_k examples as GraphRAG, so the
+comparison isolates the retrieval strategy (IMPLEMENTATION_DECISIONS.md poin 28).
+
 Usage:
     python src/retrieval/baseline.py                           # default 20% dev-set sample
     python src/retrieval/baseline.py --sample 0.5             # 50% dev set
@@ -50,7 +54,9 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.core.config import PipelineConfig
+from src.generation.few_shot import FewShotIndex, build_few_shot_block, build_few_shot_index
 from src.generation.generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
+from src.retrieval.retrieval import k_from_pct
 from src.core.schema import load_spider_schema
 
 logging.basicConfig(
@@ -239,9 +245,11 @@ def trace_table_paths(
     Singer_in_concert is added to ensure the JOIN is possible.
 
     Returns:
-        Deduplicated list of table node IDs.
+        Deduplicated list of table node IDs, detected tables first, in a
+        deterministic order (a set's order changes between Python processes
+        and would reorder the CREATE TABLE blocks in the prompt).
     """
-    all_nodes = set(detected_table_nodes)
+    all_nodes = dict.fromkeys(detected_table_nodes)
 
     for i in range(len(detected_table_nodes)):
         for j in range(i + 1, len(detected_table_nodes)):
@@ -249,7 +257,7 @@ def trace_table_paths(
                 path = nx.shortest_path(
                     graph, detected_table_nodes[i], detected_table_nodes[j]
                 )
-                all_nodes.update(path)
+                all_nodes.update(dict.fromkeys(path))
             except nx.NetworkXNoPath:
                 pass
 
@@ -387,11 +395,56 @@ def evaluate_table_linking(
 
 def _all_table_nodes(graph: nx.Graph, db_id: str) -> list[str]:
     """All table node ids for `db_id` — used whenever retrieval is bypassed
-    or disabled (full-schema bypass, top_k_tables=0, or no tables detected)."""
+    or disabled (full-schema bypass, baseline_top_k_tables_pct=0, or no tables
+    detected)."""
     return [
         n for n, d in graph.nodes(data=True)
         if d.get("database") == db_id and d.get("type") == "table"
     ]
+
+
+def retrieve_baseline_tables(
+    graph: nx.Graph,
+    db_id: str,
+    question: str,
+    table_index: TableSchemaIndex,
+    embed_model: SentenceTransformer,
+    cfg: PipelineConfig,
+) -> list[str]:
+    """
+    The whole Baseline retrieval step for one question, shared by
+    run_single_baseline(), ablation.py, sweep.py and the notebook:
+    top-k tables (k = k_from_pct(cfg.baseline_top_k_tables_pct, tables in DB))
+    -> FK path tracing. baseline_top_k_tables_pct=0 or full-schema bypass ->
+    every table, same semantics as GraphRAG's top_k_tables_pct=0.
+    """
+    if cfg.use_full_schema_bypass or cfg.baseline_top_k_tables_pct <= 0:
+        return _all_table_nodes(graph, db_id)
+
+    k = k_from_pct(cfg.baseline_top_k_tables_pct, len(table_index.table_node_ids))
+    detected = semantic_linking_table_level(table_index, question, embed_model, top_k=k)
+    if not detected:
+        return _all_table_nodes(graph, db_id)
+    return trace_table_paths(graph, detected)
+
+
+def table_nodes_to_schema(graph: nx.Graph, table_nodes: list[str]) -> list[str]:
+    """
+    Table node ids -> sorted ["table.column", ...] (raw_logs predicted_schema /
+    SLA input). Baseline sends ALL columns of the selected tables, so every
+    column of each table node is listed, not just the table names.
+    """
+    out = set()
+    for node in table_nodes:
+        d = graph.nodes[node]
+        table = d.get("table")
+        if not table:
+            continue
+        for col_info in d.get("columns", []):
+            column = col_info.get("Column")
+            if column and column != "*":
+                out.add(f"{table.lower()}.{column.lower()}")
+    return sorted(out)
 
 
 def run_single_baseline(
@@ -404,10 +457,14 @@ def run_single_baseline(
     tokenizer,
     cfg: PipelineConfig,
     table_index: TableSchemaIndex,
+    few_shot_index: FewShotIndex | None = None,
 ) -> tuple[str, float, float, list, int, int]:
     """
     Run the full BASELINE pipeline for one question:
-        embed → link tables → trace paths → build context → generate SQL.
+        embed → link tables → trace paths → build context → few-shot → generate SQL.
+
+    few_shot_index : same index GraphRAG uses; cfg.few_shot_k examples are
+                     added exactly like run_single() does. None -> zero-shot.
 
     Returns:
         (pred_sql, recall, precision, table_nodes, n_in, n_out)
@@ -417,39 +474,19 @@ def run_single_baseline(
                       generate_sql_with_token_count() pattern as pipeline.py's
                       run_single() and ablation.py's _run_k()
     """
-    if cfg.use_full_schema_bypass:
-        # Bypass: feed all tables in the database
-        table_nodes = _all_table_nodes(graph, db_id)
-    elif cfg.top_k_tables == 0:
-        # Two-stage disabled -- consider all tables. Same semantics as
-        # retrieve_candidate_tables() in src/retrieval/retrieval.py's
-        # GraphRAG path (see config.py's top_k_tables docstring: "Set to 0
-        # to disable ... all tables are considered"). Previously this arm
-        # silently substituted top_k=3 instead, diverging from GraphRAG's
-        # documented behavior for the same config value.
-        table_nodes = _all_table_nodes(graph, db_id)
-    else:
-        detected = semantic_linking_table_level(
-            table_index, question, embed_model,
-            top_k=cfg.top_k_tables,
-        )
-        if not detected:
-            # Fallback: use all tables
-            table_nodes = _all_table_nodes(graph, db_id)
-        else:
-            table_nodes = trace_table_paths(graph, detected)
-
+    table_nodes = retrieve_baseline_tables(graph, db_id, question, table_index, embed_model, cfg)
     if not table_nodes:
         return "SELECT 1", 0.0, 0.0, [], 0, 0
 
     recall, precision = evaluate_table_linking(gold_sql, table_nodes, graph, db_id)
     schema_context = build_table_schema_context(graph, table_nodes)
+    few_shot_block = build_few_shot_block(question, few_shot_index, embed_model, cfg)
 
     extracted_values = {
         "strings": re.findall(r"'([^']*)'", question),
         "numbers": re.findall(r"\d+", question),
     }
-    prompt = build_prompt(question, schema_context, extracted_values, few_shot_block="")
+    prompt = build_prompt(question, schema_context, extracted_values, few_shot_block)
     pred_sql, n_out = generate_sql_with_token_count(prompt, model, tokenizer, cfg)
     n_in = len(tokenizer.encode(prompt))
 
@@ -602,7 +639,13 @@ def run_baseline(
         for db_id in tqdm(unique_db_ids, desc="Indexing tables")
     }
 
-    # 6. Main loop
+    # 6. Few-shot index — same k as GraphRAG (cfg.few_shot_k)
+    few_shot_idx: FewShotIndex | None = None
+    if cfg.few_shot_k > 0:
+        logger.info("Building few-shot index (k=%d) …", cfg.few_shot_k)
+        few_shot_idx = build_few_shot_index(cfg.train_json, embed_model)
+
+    # 7. Main loop
     results: list[BaselineResult] = []
 
     with open(pred_path, "w", encoding="utf-8") as pf:
@@ -616,6 +659,7 @@ def run_baseline(
                     question, gold_sql, db_id,
                     table_graph, embed_model, llm, tokenizer, cfg,
                     table_index=table_cache[db_id],
+                    few_shot_index=few_shot_idx,
                 )
             except Exception:
                 logger.exception("Error on sample %d (db=%s)", i, db_id)
@@ -640,12 +684,12 @@ def run_baseline(
                     i + 1, len(dev_data), db_id, recall, precision,
                 )
 
-    # 7. Save artefacts
+    # 8. Save artefacts
     _save_log(results, log_path)
     _save_csv(results, csv_path)
     _print_summary(results, label="Baseline (table/node)")
 
-    # 8. Spider eval
+    # 9. Spider eval
     if run_eval:
         _run_spider_eval(pred_path, cfg)
 
