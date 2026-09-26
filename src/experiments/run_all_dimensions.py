@@ -399,6 +399,20 @@ def _summary_text(results: dict, selected: List[int]) -> str:
 # CLI
 # ---------------------------------------------------------------------------
 
+def save_dimension_outputs(results: dict, report: str, out_dir: Path) -> Tuple[Path, Path]:
+    """Tulis dimensions_results.json + dimensions_report.txt ke out_dir (dipakai CLI, pipeline.py, notebook)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "dimensions_results.json"
+    report_path = out_dir / "dimensions_report.txt"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    print(f"Tersimpan: {json_path}")
+    print(f"Tersimpan: {report_path}")
+    return json_path, report_path
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Jalankan 6 dimensi analisis skripsi atas data/raw_logs/.")
@@ -438,16 +452,7 @@ def main() -> int:
     print(report)
 
     if not args.no_save:
-        out_dir = Path(args.out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        json_path = out_dir / "dimensions_results.json"
-        report_path = out_dir / "dimensions_report.txt"
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(report)
-        print(f"Tersimpan: {json_path}")
-        print(f"Tersimpan: {report_path}")
+        save_dimension_outputs(results, report, Path(args.out_dir))
 
     # Exit code 1 HANYA untuk error tak terduga -- "data belum ada" itu kondisi
     # normal di tahap ini dan tidak boleh bikin CI/script pemanggil gagal.

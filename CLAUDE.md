@@ -12,9 +12,9 @@ Environment: Kaggle Notebook (GPU T4, memory terbatas)
 Penelitian ini menganalisis trade-off antara performa SQL generation dan efisiensi token consumption. Ada dua pendekatan utama yang dibandingkan:
 
 - **Baseline RAG** — table-level retrieval: retrieve top-k tabel, kirim semua kolom dari tabel terpilih ke LLM
-- **GraphRAG** — two-stage column-level retrieval + graph traversal + path pruning: kirim hanya kolom yang relevan
+- **GraphRAG** — two-stage column-level retrieval + graph traversal: kirim hanya kolom yang relevan
 
-Token efficiency GraphRAG berasal dari selektivitas retrieval — bukan dari seluruh database, hanya k tabel → k kolom → pruned columns yang masuk ke prompt.
+Token efficiency GraphRAG berasal dari selektivitas retrieval — bukan dari seluruh database, hanya k tabel → k kolom → kolom hasil traversal yang masuk ke prompt.
 
 ---
 
@@ -27,13 +27,13 @@ thesis-2803/
 │   │   ├── config.py       — semua hyperparameter dan path (sumber kebenaran tunggal)
 │   │   └── schema.py       — parsing tables.json Spider → DataFrame → NetworkX graph (column-level)
 │   ├── retrieval/
-│   │   ├── retrieval.py    — GraphRAG: two-stage semantic linking, graph traversal, path pruning, context builder
+│   │   ├── retrieval.py    — GraphRAG: two-stage semantic linking, graph traversal, context builder
 │   │   └── baseline.py     — Baseline: table-level graph, table-level semantic linking, context builder
 │   ├── generation/
 │   │   ├── generation.py   — prompt builder, SQL cleaner, model loading (4-bit quantized), greedy decode
 │   │   └── few_shot.py     — few-shot index: pre-compute training set embeddings, dynamic retrieval
 │   ├── experiments/
-│   │   ├── pipeline.py     — orchestration utama, CLI entry point, Spider evaluation
+│   │   ├── pipeline.py     — orchestration utama, CLI entry point, Spider evaluation; `--baseline` juga memicu QVT + 6 dimensi lewat `run_dimension_analysis()`
 │   │   ├── sweep.py        — hyperparameter sweep: top_k_tables × top_k_columns (tanpa LLM)
 │   │   ├── ablation.py     — ablation study: few-shot k={0,1,3,5} × {baseline, graphrag}
 │   │   ├── build_qvt_variations.py — bangun data/qvt_variations/*.json dari paraphrase alami dev.json + raw_logs (lihat IMPLEMENTATION_DECISIONS.md poin 21)
@@ -54,7 +54,7 @@ thesis-2803/
 │   ├── DIMENSIONS_EXPLAINED.md — satu level di atas METRICS_EXPLAINED.md: apa yang disimpulkan satu DIMENSI (kombinasi beberapa metrik) yang tidak kelihatan dari satu metrik saja (Dimensi 1 sejauh ini — sisanya ditambah seiring progres)
 │   └── RESEARCHER_TODO.md — checklist hal yang jadi tanggung jawab PENELITI (bukan Claude Code): data yang harus disiapkan/dikumpulkan manual, eksperimen yang harus dijalankan (butuh GPU/Kaggle), keputusan yang perlu didiskusikan dulu. **Baca file ini setiap kali peneliti bertanya "hal apa yang belum kita siapkan?"** atau pertanyaan sejenis soal kesiapan/prasyarat
 ├── notebooks/               — EDA notebooks + notebooks/compiled/ (Kaggle-ready compiled notebook)
-│   └── eval_pipeline.ipynb  — notebook GraphRAG vs Baseline side-by-side (ESM/EX via Spider eval + schema recall/precision). Ditulis SEBELUM refactor foldering — import & path masih flat layout (`from config import ...`, `evaluation.py` di cwd), belum disesuaikan ke `src.*`/`external/spider_eval/`
+│   └── eval_pipeline.ipynb  — notebook GraphRAG vs Baseline side-by-side (walk-through per tahap, loop kedua pipeline, evaluasi in-process + cross-check Spider resmi, `raw_logs`, 6 dimensi lewat `run_dimension_analysis()`). Satu-satunya salinan (duplikat di root dihapus 2026-09-26). Sel setup pertama otomatis `chdir` ke root repo kalau dijalankan dari `notebooks/` (atau `git clone` di Kaggle), jadi aman dari lokasi mana pun
 ├── outputs/
 │   ├── plots/               — EDA plot PNGs
 │   ├── predictions/         — predictions.txt, baseline_predictions.txt, ablation_*_predictions_k*.txt, ablation_*_prompts_k*.jsonl
@@ -70,7 +70,7 @@ Semua modul di `src/` dipanggil sebagai `src.<paket>.<modul>` (mis. `from src.co
 - **`src/metrics/` — SEMUA sudah diimplementasi penuh** (bukan lagi stub): `sla.py`, `esm_ex_cm.py`, `token_consumption.py`, `tep.py`, `qvt.py`. `src/utils/` juga penuh: `schema_utils.py`, `sql_normalize.py` (fix parser JOIN-keyword, lihat `IMPLEMENTATION_DECISIONS.md` poin 11), `raw_logs.py` (helper grouping per difficulty, dipakai lintas `src/dimensions/`).
 - **`src/dimensions/` — KEENAM dimensi sudah diimplementasi** (tidak ada stub tersisa): Dimensi 1 (Efisiensi), 2 (Struktur SQL), 3 (Komponen SQL), 4 (Robustness/QVT), 5 (Bottleneck), 6 (Ablation Few-Shot, interpretasi saja — belum ada data nyata dari `ablation.py`). Dimensi 4 diimplementasi 2026-09-14 (lihat `IMPLEMENTATION_DECISIONS.md` poin 23) — `run_dimension_4()` menerima raw_logs opsional untuk silang-ESM langkah 6, karena data QVT sengaja cuma membawa EX (poin 10). - **`run_all_dimensions.py` — SUDAH terisi** (2026-09-17, lihat `IMPLEMENTATION_DECISIONS.md` poin 24), bukan skeleton lagi. Merangkai raw_logs → 6 dimensi jadi satu run, tulis `outputs/tables/dimensions_results.json` + `dimensions_report.txt`. Perilaku penting: setiap dimensi yang prasyarat datanya belum ada di-**skip dengan alasan + perintah remedy**, bukan crash (exit code 1 HANYA untuk bug tak terduga, bukan untuk "data belum ada") — jadi file ini aman dijalankan kapan saja sebagai checklist kesiapan. Dimensi 5 di-gate oleh hasil Dimensi 2 sesuai guide (`--always-dim5` untuk menimpa); Dimensi 6 butuh `--ex-per-k` manual (lihat open item D); Dimensi 1 di-import lazy dan ter-skip lokal karena `config.py` butuh `torch` (lihat open item C).
 - ✅ **Sudah divalidasi terhadap Spider dev set ASLI** (2026-08-26, bukan cuma sanity test SQLite sintetis lagi) — 1034 query dev set real (`data/spider_data/`, di luar git, lihat `.gitignore`), round-trip test lewat `esm_ex_cm.py`/`sla.py`: 0 exception, 0 kegagalan ESM. Satu limitation data upstream ditemukan (1 baris rusak encoding di `wta_1.sqlite`, pengaruh 0.19% dev set) dan didokumentasikan, bukan diperbaiki (lihat `IMPLEMENTATION_DECISIONS.md` poin 16 untuk alasan lengkap). `run_comparison()` di `pipeline.py` yang menulis `data/raw_logs/*.json` dari pipeline GraphRAG/Baseline sungguhan masih belum pernah dijalankan (butuh GPU/Kaggle, lihat `RESEARCHER_TODO.md`) — yang sudah divalidasi adalah lapisan metrics (`src/metrics/`), bukan pipeline retrieval+generation penuh.
-- **Semua keputusan implementasi** (konflik guide vs kode yang sudah ada, konflik guide vs keterbatasan tooling resmi SPIDER, dan open items yang belum diputuskan) ada di **`context/IMPLEMENTATION_DECISIONS.md`** — 23 keputusan tercatat sejauh ini, termasuk formula Token Consumption, EX order-sensitivity, label difficulty, casing CM clause, keterbatasan `union_all`, fix parser JOIN-keyword, hasil validasi dev set asli, bug fix `_set_op_clause_match()` (UNION/INTERSECT/EXCEPT salah skor akibat mutasi in-place), definisi Baseline final (poin 18), proxy schema-linking vs SLA (poin 19), confound diagnostics read-only (poin 20), QVT variations dari paraphrase alami dev.json (poin 21), penghapusan `few_shot_same_db_first` (poin 22), kontrak silang QVT×ESM di Dimensi 4 (poin 23), dan orkestrasi 6 dimensi (poin 24). Open items yang masih terbuka: B (metrics jalan di mana), C (`config.py` mengikat lapisan dimensi ke torch), D (EX per k Dimensi 6 tidak tersimpan machine-readable).
+- **Semua keputusan implementasi** (konflik guide vs kode yang sudah ada, konflik guide vs keterbatasan tooling resmi SPIDER, dan open items yang belum diputuskan) ada di **`context/IMPLEMENTATION_DECISIONS.md`** — 26 keputusan tercatat sejauh ini, termasuk formula Token Consumption, EX order-sensitivity, label difficulty, casing CM clause, keterbatasan `union_all`, fix parser JOIN-keyword, hasil validasi dev set asli, bug fix `_set_op_clause_match()` (UNION/INTERSECT/EXCEPT salah skor akibat mutasi in-place), definisi Baseline final (poin 18), proxy schema-linking vs SLA (poin 19), confound diagnostics read-only (poin 20), QVT variations dari paraphrase alami dev.json (poin 21), penghapusan `few_shot_same_db_first` (poin 22), kontrak silang QVT×ESM di Dimensi 4 (poin 23), orkestrasi 6 dimensi (poin 24), penghapusan `prune_path_nodes()` (poin 25), dan integrasi pipeline → dimensi (poin 26). Open items yang masih terbuka: B (metrics jalan di mana), C (`config.py` mengikat lapisan dimensi ke torch), D (EX per k Dimensi 6 tidak tersimpan machine-readable).
 
 ---
 
@@ -88,13 +88,11 @@ Pertanyaan user (bahasa alami)
         │  Input: kolom hasil retrieval sebagai anchor nodes
         │  Output: jalur konektivitas antar tabel (untuk JOIN)
         ▼
-[3] Path Pruning                  ← buang intermediate nodes yang bukan PK/FK/direct hit
+[3] Schema Context Builder        ← CREATE TABLE DDL dengan FK annotations
         ▼
-[4] Schema Context Builder        ← CREATE TABLE DDL dengan FK annotations
+[4] Few-Shot Retrieval            ← cosine similarity terhadap training set embeddings
         ▼
-[5] Few-Shot Retrieval            ← cosine similarity terhadap training set embeddings
-        ▼
-[6] Prompt Builder                ← Hybrid: ASP + CRP + TRP + ODP
+[5] Prompt Builder                ← Hybrid: ASP + CRP + TRP + ODP
         │  ### Task
         │  ### Database Schema   (DDL hasil retrieval)
         │  ### Examples          (few-shot, jika k > 0)
@@ -102,9 +100,9 @@ Pertanyaan user (bahasa alami)
         │  ### Instructions
         │  ### Answer\n```sql
         ▼
-[7] LLM Inference                 ← Qwen2.5-Coder-7B-Instruct, 4-bit NF4 quantized
+[6] LLM Inference                 ← Qwen2.5-Coder-7B-Instruct, 4-bit NF4 quantized
         ▼
-[8] SQL Cleaner                   ← strip markdown, fix dialect quirks, normalize aliases
+[7] SQL Cleaner                   ← strip markdown, fix dialect quirks, normalize aliases
         ▼
 predictions.txt → Spider Official Eval (EM + EX)
 ```
@@ -354,5 +352,7 @@ python src/experiments/run_all_dimensions.py
 
 # Idem, subset dimensi + data ablation untuk Dimensi 6
 python src/experiments/run_all_dimensions.py --only 1 2 3
+python src/experiments/pipeline.py --baseline --sample 1.0 --ex-per-k 0=45.2,1=52.1,3=54.0,5=53.8   # comparison + QVT + 6 dimensi sekaligus
+python src/experiments/pipeline.py --baseline --no-dimensions                                      # comparison saja
 python src/experiments/run_all_dimensions.py --ex-per-k 0=45.2,1=52.1,3=54.0,5=53.8
 ```

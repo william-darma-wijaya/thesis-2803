@@ -126,26 +126,7 @@ def preview_qvt(qvt_data: List[dict]) -> None:
           f"{excluded_n} dibuang -- semua variasinya EX=0)")
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Bangun data/qvt_variations/*.json dari paraphrase alami dev.json + raw_logs.")
-    ap.add_argument("--dev-json", default="data/spider_data/dev.json",
-                     help="Path ke dev.json SPIDER (default: data/spider_data/dev.json)")
-    ap.add_argument("--raw-logs-dir", default="data/raw_logs")
-    ap.add_argument("--out-dir", default="data/qvt_variations")
-    ap.add_argument("--dry-run", action="store_true",
-                     help="Cuma tampilkan statistik grouping, jangan baca raw_logs / tulis output "
-                          "(dipakai sebelum pipeline --baseline dijalankan di Kaggle).")
-    args = ap.parse_args()
-
-    dev_json_path = Path(args.dev_json)
-    raw_logs_dir = Path(args.raw_logs_dir)
-    out_dir = Path(args.out_dir)
-
-    with open(dev_json_path, encoding="utf-8") as f:
-        dev_data = json.load(f)
-
-    groups = build_groups(dev_data)
+def _print_grouping_stats(dev_data: List[dict], groups: List[List[dict]]) -> None:
     rows_covered = sum(len(g) for g in groups)
     print("=" * 70)
     print("QVT grouping -- paraphrase alami dari dev.json")
@@ -155,12 +136,21 @@ def main():
     print(f"  Dev rows tercakup     : {rows_covered} ({rows_covered / len(dev_data) * 100:.1f}%)")
     print(f"  Rows di luar skema (singleton, 1 pertanyaan saja): {len(dev_data) - rows_covered}")
 
-    if args.dry_run:
-        print("\n[--dry-run] Berhenti di sini -- tidak baca raw_logs / tidak menulis output.")
-        return
 
+def build_qvt_files(dev_data: List[dict], raw_logs_dir: Path, out_dir: Path) -> dict:
+    """
+    Bangun {baseline,graphrag}_qvt.json di out_dir dari dev_data + raw_logs_dir.
+    Dipanggil dari main() (CLI) dan dari pipeline.run_dimension_analysis() /
+    notebook -- satu-satunya implementasi, supaya tidak ada dua jalur yang drift.
+
+    Returns: {kondisi: jumlah grup tertulis}; kondisi yang dilewati (raw_logs
+    tidak ada / hasil subsampling) tidak muncul di dict.
+    """
+    groups = build_groups(dev_data)
+    _print_grouping_stats(dev_data, groups)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    written = {}
     for condition in ("baseline", "graphrag"):
         raw_logs_path = raw_logs_dir / f"{condition}_log.json"
         print(f"\n-- kondisi: {condition} --")
@@ -185,6 +175,31 @@ def main():
             json.dump(qvt_data, f, ensure_ascii=False, indent=2)
         print(f"  Ditulis: {out_path} ({len(qvt_data)} query x 2 variasi)")
         preview_qvt(qvt_data)
+        written[condition] = len(qvt_data)
+    return written
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Bangun data/qvt_variations/*.json dari paraphrase alami dev.json + raw_logs.")
+    ap.add_argument("--dev-json", default="data/spider_data/dev.json",
+                     help="Path ke dev.json SPIDER (default: data/spider_data/dev.json)")
+    ap.add_argument("--raw-logs-dir", default="data/raw_logs")
+    ap.add_argument("--out-dir", default="data/qvt_variations")
+    ap.add_argument("--dry-run", action="store_true",
+                     help="Cuma tampilkan statistik grouping, jangan baca raw_logs / tulis output "
+                          "(dipakai sebelum pipeline --baseline dijalankan di Kaggle).")
+    args = ap.parse_args()
+
+    with open(Path(args.dev_json), encoding="utf-8") as f:
+        dev_data = json.load(f)
+
+    if args.dry_run:
+        _print_grouping_stats(dev_data, build_groups(dev_data))
+        print("\n[--dry-run] Berhenti di sini -- tidak baca raw_logs / tidak menulis output.")
+        return
+
+    build_qvt_files(dev_data, Path(args.raw_logs_dir), Path(args.out_dir))
 
 
 if __name__ == "__main__":
