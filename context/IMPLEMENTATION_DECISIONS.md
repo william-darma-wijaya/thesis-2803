@@ -459,6 +459,28 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 
 **Verifikasi (lokal, tanpa torch):** `run_dimension_analysis()` diuji dengan fixture 1034 query (run penuh: QVT terbentuk dan Dimensi 2/3/4/5/6 `ok`; subsample: Dimensi 4 tidak muncul walau ada QVT lama; run penuh dengan raw_logs subsample: Dimensi 4 `skipped`, tanpa crash). Dimensi 1 ter-skip lokal karena `torch` (open item C), akan jalan di Kaggle. Pipeline penuh belum pernah dijalankan end-to-end.
 
+## 27. Seleksi kolom GraphRAG: global (bukan per n-gram), threshold + cap, traversal by node ID (2026-09-26)
+
+**Masalah yang ditemukan:** run trial melaporkan precision proxy GraphRAG 16.9% vs Baseline 15.3% dengan recall sama-sama ~99.5% — GraphRAG praktis tidak memangkas apa pun. Dua penyebab di `retrieval.py`:
+1. `retrieve_candidate_columns()` mengambil top-`top_k_columns` **per n-gram**, lalu meng-union. Pertanyaan 10 kata punya ~27 n-gram; kata umum ("how", "many", "are") tetap dipaksa mengembalikan k kolom. Union-nya hampir seluruh kolom di top-k tabel, jadi `top_k_columns` tidak benar-benar membatasi apa pun.
+2. `trace_schema_paths()` mencocokkan `d["column"] in detected_columns` — **nama** kolom, di seluruh DB. Kolom `id`/`name` di tabel lain (bahkan yang tidak lolos Stage 1) ikut masuk.
+
+**Keputusan (mengubah perilaku retrieval inti):**
+- Tiap kolom diskor dengan **max cosine lintas n-gram**; kolom dengan skor `< semantic_similarity_threshold` dibuang; lalu maksimal `top_k_columns` kolom dipertahankan untuk **seluruh pertanyaan**. `top_k_columns` adalah **cap, bukan target** (`min(k, jumlah lolos threshold)`); `top_k_columns=0` = threshold-only tanpa cap.
+- **Fallback:** kalau tidak ada yang lolos threshold, 1 kolom terbaik dipertahankan supaya schema tidak pernah kosong.
+- `retrieve_candidate_columns()` / `semantic_schema_linking()` sekarang mengembalikan **node ID** (`db.table.kolom`), dan `trace_schema_paths()` mencocokkan node ID persis. Caller (`pipeline.py`, `ablation.py`, `sweep.py`, notebook) tidak perlu berubah karena hanya meneruskan hasilnya.
+- Cabang threshold lama (`top_k_columns=0`, ambil 1 kolom terbaik per n-gram) dihapus, digantikan skema di atas.
+
+**Sweep:** `semantic_similarity_threshold` jadi dimensi ketiga (`SIM_THRESHOLD_VALUES = [0.0, 0.3, 0.4, 0.5]`; 0.0 = tanpa threshold). `run_sweep_and_get_best()` sekarang mengembalikan **3-tuple** `(tables, cols, threshold)` (`pipeline.py` dan notebook sudah disesuaikan). Sweep juga melaporkan diagnostik selektivitas `avg_cols_sent / avg_cols_available` (kolom yang dikirim vs total kolom di tabel kandidat Stage 1); nilai mendekati 1.0 = kolom tidak dipangkas. `ablation.py` sekarang ikut menyalin threshold ke cfg-nya (sebelumnya hanya `top_k_*`).
+
+**Yang perlu diingat:**
+- Threshold 0.35 belum terkalibrasi untuk BGE-M3 — nilainya harus dibaca dari sweep, bukan ditebak. Sweep memilih dengan F6 (recall 36× precision), yang cenderung memilih setelan terlongar; baca kolom precision dan `sent/avail` sebelum memutuskan.
+- Angka proxy sebelum/sesudah perubahan ini **tidak sebanding** (perilaku retrieval berubah). `top_k_columns`/threshold di `config.py` masih TBD sampai sweep dijalankan ulang di Kaggle.
+- Proxy `_parse_gold_elements` masih memecah SQL tanpa memisah `.`, jadi `T1.name` tidak dikenali sebagai `name` — bias proxy (bukan SLA) tidak diperbaiki di sini; SLA resmi tetap dari `src/metrics/sla.py` (poin 19).
+- `notebooks/compiled/graphrag_text2sql.ipynb` (salinan compiled) TIDAK diperbarui dan masih berisi logika lama.
+
+**Verifikasi (lokal, embedding palsu terkontrol):** cap global tidak pernah terlampaui berapa pun jumlah n-gram; threshold tinggi memberi < k kolom; fallback = tepat 1 kolom; `k=0` tanpa cap; kolom bernama sama di tabel lain tidak ikut masuk; jalur `sweep.py` (`_run_combination`, `_run_grid`, CSV) jalan. **Belum** diuji dengan BGE-M3/Spider asli.
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER

@@ -111,6 +111,7 @@ def _run_k(
         data_path=base_cfg.data_path,
         top_k_tables=base_cfg.top_k_tables,
         top_k_columns=base_cfg.top_k_columns,
+        semantic_similarity_threshold=base_cfg.semantic_similarity_threshold,
         few_shot_k=k,
         use_full_schema_bypass=False,
     )

@@ -1028,20 +1028,24 @@ if __name__ == "__main__":
         logger.info("=" * 60)
         logger.info("STEP 0: Precision sweep (pass --skip-sweep to skip)")
         logger.info("=" * 60)
-        best_tables, best_cols = run_sweep_and_get_best(
+        best_tables, best_cols, best_threshold = run_sweep_and_get_best(
             sample_ratio=args.sweep_sample,
             cfg=config,
         )
         logger.info(
-            "Sweep done — updating config: top_k_tables=%d, top_k_columns=%d",
-            best_tables, best_cols,
+            "Sweep done — updating config: top_k_tables=%d, top_k_columns=%d, "
+            "semantic_similarity_threshold=%.2f",
+            best_tables, best_cols, best_threshold,
         )
         config.top_k_tables  = best_tables
         config.top_k_columns = best_cols
+        config.semantic_similarity_threshold = best_threshold
     else:
         logger.info(
-            "Skipping sweep — using config: top_k_tables=%d, top_k_columns=%d",
+            "Skipping sweep — using config: top_k_tables=%d, top_k_columns=%d, "
+            "semantic_similarity_threshold=%.2f",
             config.top_k_tables, config.top_k_columns,
+            config.semantic_similarity_threshold,
         )
 
     if args.baseline:

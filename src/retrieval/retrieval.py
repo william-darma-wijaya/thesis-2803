@@ -2,15 +2,17 @@
 GraphRAG schema linking: semantic retrieval + graph path tracing.
 
 Two improvements over the baseline:
-  1. Top-k column selection   — instead of a hard similarity threshold, keep
-                                 only the k best column matches per query phrase.
+  1. Global column selection  — each column is scored by its best n-gram match,
+                                 columns below the similarity threshold are
+                                 dropped, and at most top_k_columns are kept for
+                                 the WHOLE query (a cap, not a target).
   2. Two-stage retrieval      — first narrow down to the top-k most relevant
                                  *tables*, then retrieve columns only within
                                  those tables. This bounds precision regardless
                                  of database size.
 
-Both features are controlled via PipelineConfig and degrade gracefully to the
-original single-stage threshold behaviour when disabled (set to 0).
+Both features are controlled via PipelineConfig; setting top_k_tables /
+top_k_columns to 0 disables the table restriction / the column cap.
 """
 
 import logging
@@ -171,11 +173,21 @@ def retrieve_candidate_columns(
     cfg: PipelineConfig,
 ) -> list[str]:
     """
-    Return column names relevant to `query`, restricted to `candidate_tables`.
+    Return node IDs ("db.table.column") of the columns relevant to `query`,
+    restricted to `candidate_tables`.
 
-    Selection strategy:
-      - If cfg.top_k_columns > 0: keep the top-k columns per query phrase.
-      - Otherwise: keep every column whose best phrase score exceeds the threshold.
+    Selection is GLOBAL per query, not per n-gram:
+      1. Each column is scored by the best (max) cosine similarity any query
+         n-gram gives it.
+      2. Columns scoring below cfg.semantic_similarity_threshold are dropped.
+      3. If cfg.top_k_columns > 0, at most that many columns are kept
+         (k is a cap, never a target: fewer columns pass -> fewer are returned).
+         top_k_columns == 0 means threshold-only, no cap.
+      4. If nothing passes the threshold, the single best column is kept so the
+         prompt never ends up with an empty schema.
+
+    Returning node IDs (not bare names) keeps same-named columns of other tables
+    (e.g. `id`, `name`) from being pulled in by trace_schema_paths().
     """
     if index.col_embeddings is None:
         return []
@@ -192,7 +204,7 @@ def retrieve_candidate_columns(
 
     # Filter embeddings and metadata to candidate tables only
     filtered_emb = index.col_embeddings[col_mask]            # (n_filtered, d)
-    filtered_cols = [c for c, m in zip(index.columns, col_mask.tolist()) if m]
+    filtered_node_ids = [n for n, m in zip(index.col_node_ids, col_mask.tolist()) if m]
 
     phrases = _extract_phrases(query, cfg.max_ngram)
     if not phrases:
@@ -201,22 +213,19 @@ def retrieve_candidate_columns(
     phrase_emb = embed_model.encode(phrases, convert_to_tensor=True)
     scores = util.cos_sim(phrase_emb, filtered_emb)  # (n_phrases, n_filtered)
 
-    detected: set[str] = set()
+    # Max-pool across phrases: best score any n-gram gave each column
+    col_scores, _ = scores.max(dim=0)                # (n_filtered,)
+    ranked = torch.argsort(col_scores, descending=True).tolist()
 
+    kept = [i for i in ranked if col_scores[i].item() >= cfg.semantic_similarity_threshold]
     if cfg.top_k_columns > 0:
-        # Top-k strategy: for each phrase, pick the k best columns
-        for i in range(len(phrases)):
-            for col_idx in _top_k_indices(scores[i], cfg.top_k_columns):
-                detected.add(filtered_cols[col_idx])
-    else:
-        # Threshold strategy (original behaviour)
-        for i in range(len(phrases)):
-            best_score = torch.max(scores[i]).item()
-            if best_score > cfg.semantic_similarity_threshold:
-                detected.add(filtered_cols[torch.argmax(scores[i]).item()])
+        kept = kept[: cfg.top_k_columns]
+    if not kept:
+        kept = ranked[:1]  # fallback: never return an empty schema
 
-    logger.debug("Stage 2 — detected columns: %s", list(detected))
-    return list(detected)
+    detected = [filtered_node_ids[i] for i in kept]
+    logger.debug("Stage 2 — detected columns: %s", detected)
+    return detected
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +249,7 @@ def semantic_schema_linking(
 
     Falls back gracefully:
       - If top_k_tables == 0, Stage 1 is skipped (all tables considered).
-      - If top_k_columns == 0, Stage 2 uses the similarity threshold instead.
+      - If top_k_columns == 0, Stage 2 is threshold-only (no cap on column count).
       - If `index` is None, a SchemaIndex is built on-the-fly from the legacy
         `all_columns` / `col_embeddings` arguments (backward compatible).
     """
@@ -282,15 +291,19 @@ def trace_schema_paths(
     """
     For every pair of detected column nodes, find the shortest path in the graph.
 
+    `detected_columns` are full node IDs ("db.table.column") as returned by
+    semantic_schema_linking(). They are matched exactly, so a column that merely
+    shares its name with a detected one (in another table) is NOT pulled in.
+
     Returns:
-        column_nodes : node IDs for the detected columns
+        column_nodes : the detected node IDs that exist in this database's graph
         paths        : list of node-ID paths
         relations    : list of {from, to, relation} dicts
     """
     column_nodes = [
         n
-        for n, d in graph.nodes(data=True)
-        if d.get("database") == db_name and d.get("column") in detected_columns
+        for n in dict.fromkeys(detected_columns)
+        if n in graph and graph.nodes[n].get("database") == db_name
     ]
 
     paths, relations = [], []

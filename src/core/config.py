@@ -45,11 +45,14 @@ class PipelineConfig:
     bnb_compute_dtype: torch.dtype = torch.float16
 
     # --- Schema Linking ---
+    # Minimum cosine similarity (best n-gram match) for a column to be kept.
+    # Uncalibrated for BGE-M3 -- chosen by sweep.py, do not trust 0.35 blindly.
     semantic_similarity_threshold: float = 0.35
     max_ngram: int = 3
 
-    # Top-k: keep only the k best column matches per query n-gram.
-    # Set to 0 to disable (falls back to threshold-only filtering).
+    # Cap on columns kept for the WHOLE query (after the threshold filter).
+    # A cap, not a target: fewer columns pass the threshold -> fewer are kept.
+    # Set to 0 to disable the cap (threshold-only filtering).
     top_k_columns: int = 5
 
     # Two-stage retrieval: first select candidate tables, then restrict
