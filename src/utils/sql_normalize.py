@@ -34,7 +34,7 @@ Dipakai oleh:
     default, karena string mentah untuk eksekusi (eval_exec_match()) TETAP
     dioper terpisah, tidak pernah lewat fungsi ini.
   - src/experiments/pipeline.py, src/experiments/ablation.py,
-    notebooks/eval_pipeline.ipynb Bagian 10 (jalur subprocess, CLI resmi
+    notebooks/eval_pipeline.ipynb Bagian 14 (jalur subprocess, CLI resmi
     evaluation.py) -- lewat normalize_sql_file_for_parsing(), WAJIB
     execution_safe_only=True untuk --etype exec (CLI resmi memakai string yang
     SAMA untuk parsing maupun eksekusi, tidak ada pemisahan seperti jalur

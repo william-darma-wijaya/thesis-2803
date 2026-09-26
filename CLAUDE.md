@@ -54,7 +54,7 @@ thesis-2803/
 │   ├── DIMENSIONS_EXPLAINED.md — satu level di atas METRICS_EXPLAINED.md: apa yang disimpulkan satu DIMENSI (kombinasi beberapa metrik) yang tidak kelihatan dari satu metrik saja (Dimensi 1 sejauh ini — sisanya ditambah seiring progres)
 │   └── RESEARCHER_TODO.md — checklist hal yang jadi tanggung jawab PENELITI (bukan Claude Code): data yang harus disiapkan/dikumpulkan manual, eksperimen yang harus dijalankan (butuh GPU/Kaggle), keputusan yang perlu didiskusikan dulu. **Baca file ini setiap kali peneliti bertanya "hal apa yang belum kita siapkan?"** atau pertanyaan sejenis soal kesiapan/prasyarat
 ├── notebooks/               — EDA notebooks + notebooks/compiled/ (Kaggle-ready compiled notebook)
-│   └── eval_pipeline.ipynb  — notebook GraphRAG vs Baseline side-by-side (ESM/EX via Spider eval + schema recall/precision). Sudah disesuaikan ke `src.*`/`external/spider_eval/` (bootstrap `sys.path.insert(0, str(Path(".").resolve()))` — hanya resolve dengan benar kalau kernel dijalankan dengan cwd di root project `thesis-2803/`, bukan dari dalam `notebooks/`)
+│   └── eval_pipeline.ipynb  — notebook GraphRAG vs Baseline side-by-side (walk-through per tahap, loop kedua pipeline, evaluasi in-process + cross-check Spider resmi, `raw_logs`, 6 dimensi lewat `run_dimension_analysis()`). Satu-satunya salinan (duplikat di root dihapus 2026-09-26). Sel setup pertama otomatis `chdir` ke root repo kalau dijalankan dari `notebooks/` (atau `git clone` di Kaggle), jadi aman dari lokasi mana pun
 ├── outputs/
 │   ├── plots/               — EDA plot PNGs
 │   ├── predictions/         — predictions.txt, baseline_predictions.txt, ablation_*_predictions_k*.txt, ablation_*_prompts_k*.jsonl

@@ -156,13 +156,13 @@ Format tiap entri: **Konflik/ambiguitas** → **Keputusan** → **Alasan** → *
 
 Penerapan beda per jalur, karena constraint arsitektur beda:
 - **Jalur in-process** (`src/metrics/esm_ex_cm.py`'s `_evaluate_single_query_inner()`) — Python call langsung, jadi raw-string-untuk-eksekusi vs normalized-string-untuk-parsing bisa dipisah bersih sebagai dua argumen berbeda. `get_sql()` di baris ~195/199 menerima salinan ternormalisasi PENUH (`execution_safe_only=False`); `eval_exec_match()` di baris ~251 TETAP menerima `predicted_sql`/`gold_sql` mentah, tidak diubah sama sekali. **Fix penuh, semua join type, termasuk EX.**
-- **Jalur subprocess** (`pipeline.py`'s `run_official_evaluation()`, `ablation.py`'s `_run_ablation_evals()`, notebook `eval_pipeline.ipynb` Bagian 10) — `evaluation.py` CLI resmi membaca SATU file `--pred`/`--gold` dan memakai string yang SAMA untuk parsing MAUPUN eksekusi (dikonfirmasi `evaluation.py`'s `evaluate()`, baris ~501-547: `p_str = p[0]` di-`get_sql()` DAN dioper mentah ke `eval_exec_match(db, p_str, ...)`) — tidak ada cara memisahkan keduanya tanpa mengubah script resmi. Karena itu:
+- **Jalur subprocess** (`pipeline.py`'s `run_official_evaluation()`, `ablation.py`'s `_run_ablation_evals()`, notebook `notebooks/eval_pipeline.ipynb` Bagian 14) — `evaluation.py` CLI resmi membaca SATU file `--pred`/`--gold` dan memakai string yang SAMA untuk parsing MAUPUN eksekusi (dikonfirmasi `evaluation.py`'s `evaluate()`, baris ~501-547: `p_str = p[0]` di-`get_sql()` DAN dioper mentah ke `eval_exec_match(db, p_str, ...)`) — tidak ada cara memisahkan keduanya tanpa mengubah script resmi. Karena itu:
   - `--etype match` (dikonfirmasi baris ~546: `eval_exec_match` cuma dipanggil kalau `etype in ["all","exec"]`, jadi `match` TIDAK PERNAH mengeksekusi apapun) → file dinormalisasi PENUH, aman.
   - `--etype exec` → file HANYA dinormalisasi `execution_safe_only=True` (INNER/CROSS saja). **`LEFT`/`RIGHT`/`FULL JOIN` TETAP gagal parse di jalur subprocess-exec ini** — residual limitation yang diterima, bukan bug baru. Kalau nanti mau di-fix juga, satu-satunya cara adalah patch `external/spider_eval/process_sql.py` langsung, yang melanggar konvensi "kode resmi apa adanya" — **belum diputuskan, tanyakan ke peneliti dulu** kalau ini jadi prioritas.
 
 **Alasan:** kode resmi SPIDER (`external/spider_eval/`) tetap byte-identical/tidak disentuh (konvensi atribusi di `CLAUDE.md`) — normalisasi selalu terjadi di teks INPUT sebelum masuk ke kode resmi, bukan modifikasi kode resminya. Satu fungsi regex dipakai semua call site (diminta peneliti) supaya tidak ada logic normalisasi yang duplikat/drift antar file.
 
-**Lokasi implementasi:** `src/utils/sql_normalize.py` (baru), `src/metrics/esm_ex_cm.py` (`_evaluate_single_query_inner()`, baris ~195-204), `src/experiments/pipeline.py` (`run_official_evaluation()`), `src/experiments/ablation.py` (`_run_ablation_evals()`), `notebooks/eval_pipeline.ipynb` Bagian 10 (`run_spider_eval()`, cell markdown diupdate dengan catatan residual limitation).
+**Lokasi implementasi:** `src/utils/sql_normalize.py` (baru), `src/metrics/esm_ex_cm.py` (`_evaluate_single_query_inner()`, baris ~195-204), `src/experiments/pipeline.py` (`run_official_evaluation()`), `src/experiments/ablation.py` (`_run_ablation_evals()`), `notebooks/eval_pipeline.ipynb` Bagian 14 (`run_spider_official()`, cell markdown diupdate dengan catatan residual limitation).
 
 ---
 
@@ -443,7 +443,7 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 
 **Yang perlu diingat di metodologi:** GraphRAG = two-stage retrieval + graph traversal (shortest path antar kolom terpilih; node jalur masuk konteks apa adanya). Selektivitas berasal dari `top_k_tables`/`top_k_columns`, bukan dari pruning. Node perantara dari traversal ikut dikirim ke LLM, jadi `avg_precision` proxy bisa lebih rendah dari desain awal.
 
-**Notebook:** `eval_pipeline.ipynb` (root) ditulis ulang 2026-09-19 mengikuti `pipeline.py` saat ini — import `src.*`, unpack `run_single`/`run_single_baseline` 7/6 nilai, evaluasi in-process + `raw_logs`, confound diagnostics, normalisasi JOIN untuk cross-check Spider, walk-through per tahap. Ini menggantikan catatan "TIDAK di-port" di poin sebelumnya untuk notebook root tersebut.
+**Notebook:** `notebooks/eval_pipeline.ipynb` (dulu di root, dipindah ke `notebooks/` 2026-09-26 dan versi lama di `notebooks/` ditimpa) ditulis ulang 2026-09-19 mengikuti `pipeline.py` saat ini — import `src.*`, unpack `run_single`/`run_single_baseline` 7/6 nilai, evaluasi in-process + `raw_logs`, confound diagnostics, normalisasi JOIN untuk cross-check Spider, walk-through per tahap. Ini menggantikan catatan "TIDAK di-port" di poin sebelumnya untuk notebook root tersebut.
 
 ## 26. Integrasi pipeline -> metrics -> 6 dimensi (`run_dimension_analysis()`), 2026-09-19
 
