@@ -57,6 +57,10 @@ class PipelineConfig:
     # Minimum cosine similarity (best n-gram match) for a column to be kept.
     # Uncalibrated for BGE-M3 -- do not trust 0.35 blindly (sweep.py --thresholds).
     semantic_similarity_threshold: float = 0.35
+    # Stage 1 counterpart: minimum cosine similarity (best n-gram match) for a TABLE
+    # to become a candidate. 0.0 = disabled (only top_k_tables_pct limits tables).
+    # Tuned separately from the column threshold (the score scales differ).
+    table_similarity_threshold: float = 0.0
     max_ngram: int = 3
 
     # Top-k is a FRACTION in (0, 1], not an absolute count, so the budget scales
@@ -122,6 +126,7 @@ _CLI_OVERRIDES = (
     ("--columns-pct", "top_k_columns_pct", float),
     ("--baseline-tables-pct", "baseline_top_k_tables_pct", float),
     ("--threshold", "semantic_similarity_threshold", float),
+    ("--table-threshold", "table_similarity_threshold", float),
     ("--few-shot-k", "few_shot_k", int),
     ("--llm-model", "llm_model", str),
 )

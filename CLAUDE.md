@@ -172,6 +172,7 @@ Semua parameter ada di `PipelineConfig` dataclass. **Jangan hardcode nilai di fi
 | `baseline_top_k_tables_pct` | `0.6` | TBD | Baseline: `ceil(pct × #tabel DB)`. Dituning terpisah (Baseline tidak punya tahap kolom). Ablation tahap 1 |
 | `top_k_frame` | `[0.4, 0.5, 0.6, 0.8]` | Final | Grid tahap 1: GraphRAG tabel×kolom (16), Baseline tabel (4) |
 | `semantic_similarity_threshold` | `0.35` | TBD | Skor minimum (max cosine lintas n-gram) agar kolom dipertahankan; belum terkalibrasi untuk BGE-M3. Tetap di nilai config saat sweep kecuali `sweep.py --thresholds` (poin 27, 28) |
+| `table_similarity_threshold` | `0.0` | TBD | GraphRAG Stage 1: skor minimum (max cosine lintas n-gram) agar TABEL jadi kandidat; `0.0` = nonaktif (hanya `top_k_tables_pct` yang membatasi). Dituning terpisah dari threshold kolom, lewat notebook `graphrag_sla_trial.ipynb` (`sweep.py` belum menyapunya) |
 | `few_shot_k` | `3` | TBD | Dipakai GraphRAG DAN Baseline (selalu sama). Ablation tahap 2 (EX) |
 | `few_shot_frame` | `[0, 1, 3, 5]` | Final | Grid tahap 2 |
 | `max_ngram` | `3` | Final | Segmentasi query sampai trigram |

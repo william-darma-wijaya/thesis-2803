@@ -161,12 +161,21 @@ def retrieve_candidate_tables(
     cfg: PipelineConfig,
 ) -> list[str]:
     """
-    Return the top-k most relevant table names for `query`, with
-    k = k_from_pct(cfg.top_k_tables_pct, number of tables in the database).
+    Return the candidate table names for `query`.
 
-    If `cfg.top_k_tables_pct` is 0, all tables are returned (two-stage disabled).
+    Each table is scored by the best (max) cosine similarity any query n-gram
+    gives it, then:
+      1. tables scoring below cfg.table_similarity_threshold are dropped
+         (0.0 = no threshold);
+      2. at most k = k_from_pct(cfg.top_k_tables_pct, tables in the database)
+         are kept (a cap, never a target; top_k_tables_pct == 0 = no cap);
+      3. if nothing passes the threshold, the single best table is kept so the
+         schema is never empty.
+
+    Both limits off (pct == 0 and threshold <= 0) -> all tables (two-stage disabled).
     """
-    if cfg.top_k_tables_pct <= 0 or index.table_embeddings is None:
+    no_cap = cfg.top_k_tables_pct <= 0
+    if (no_cap and cfg.table_similarity_threshold <= 0) or index.table_embeddings is None:
         return index.tables
 
     phrases = _extract_phrases(query, cfg.max_ngram)
@@ -178,10 +187,15 @@ def retrieve_candidate_tables(
 
     # Max-pool across phrases: best score any phrase gave each table
     max_scores, _ = scores.max(dim=0)  # (n_tables,)
+    ranked = torch.argsort(max_scores, descending=True).tolist()
 
-    k = k_from_pct(cfg.top_k_tables_pct, len(index.tables))
-    selected_indices = _top_k_indices(max_scores, k)
-    selected_tables = [index.tables[i] for i in selected_indices]
+    kept = [i for i in ranked if max_scores[i].item() >= cfg.table_similarity_threshold]
+    if not no_cap:
+        kept = kept[: k_from_pct(cfg.top_k_tables_pct, len(index.tables))]
+    if not kept:
+        kept = ranked[:1]  # fallback: never return an empty schema
+
+    selected_tables = [index.tables[i] for i in kept]
 
     logger.debug("Stage 1 — candidate tables for '%s': %s", query[:50], selected_tables)
     return selected_tables
