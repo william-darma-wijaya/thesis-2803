@@ -27,6 +27,7 @@ import torch
 from sentence_transformers import SentenceTransformer, util
 
 from src.core.config import PipelineConfig
+from src.core.schema import normalize_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -71,17 +72,19 @@ def build_schema_index(
     col_node_ids = [n for n, _ in col_nodes]
     columns = [d["column"] for _, d in col_nodes]
     col_table_map = [d["table"] for _, d in col_nodes]
-    # Encode as "table.column" — gives the embedder full relational context.
-    # "employees.name" is unambiguous; "column name" loses the table context.
+    # Encode as "table column" (humanized) — gives the embedder full relational
+    # context. "employees name" is unambiguous; "name" alone loses the table.
     col_texts = [
-        f"{t}.{c}" for t, c in zip(col_table_map, columns)
+        f"{normalize_identifier(t)} {normalize_identifier(c)}"
+        for t, c in zip(col_table_map, columns)
     ]
     col_embeddings = embed_model.encode(col_texts, convert_to_tensor=True)
 
     # --- Table index (unique tables, deduplicated) ---
     tables = list(dict.fromkeys(col_table_map))  # preserves order, deduplicates
-    # Raw table name — no prefix needed, BGE-M3 understands bare names
-    table_embeddings = embed_model.encode(tables, convert_to_tensor=True)
+    table_embeddings = embed_model.encode(
+        [normalize_identifier(t) for t in tables], convert_to_tensor=True
+    )
 
     return SchemaIndex(
         db_name=db_name,
@@ -279,7 +282,10 @@ def semantic_schema_linking(
         tables = list(dict.fromkeys(d["table"] for _, d in col_nodes))
         col_table_map = [d["table"] for _, d in col_nodes]
 
-        table_embeddings = embed_model.encode(tables, convert_to_tensor=True) if tables else None
+        table_embeddings = (
+            embed_model.encode([normalize_identifier(t) for t in tables], convert_to_tensor=True)
+            if tables else None
+        )
 
         index = SchemaIndex(
             db_name=db_name,

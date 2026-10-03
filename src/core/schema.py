@@ -4,12 +4,25 @@ Schema processing and graph construction for the Spider dataset.
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import networkx as nx
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_identifier(name: str) -> str:
+    """
+    Humanize a raw SQL identifier for embedding: Stadium_ID -> "stadium id",
+    HomeGames -> "home games", stuId -> "stu id". Only used for the text sent
+    to the embedder; node ids and DDL keep the original names.
+    """
+    s = name.replace("_", " ")
+    s = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", s)    # camelCase boundary
+    s = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", s)  # "HTMLParser" -> "HTML Parser"
+    return re.sub(r"\s+", " ", s).strip().lower()
 
 
 def load_spider_schema(json_path: Path) -> pd.DataFrame:

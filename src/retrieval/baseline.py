@@ -57,7 +57,7 @@ from src.core.config import PipelineConfig
 from src.generation.few_shot import FewShotIndex, build_few_shot_block, build_few_shot_index
 from src.generation.generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
 from src.retrieval.retrieval import k_from_pct
-from src.core.schema import load_spider_schema
+from src.core.schema import load_spider_schema, normalize_identifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -183,8 +183,8 @@ def build_table_index(
     table_node_ids = []
     texts = []
     for node_id, d in nodes:
-        col_names = " ".join(c["Column"] for c in d["columns"])
-        texts.append(f"table {d['table']} columns {col_names}")
+        col_names = " ".join(normalize_identifier(c["Column"]) for c in d["columns"])
+        texts.append(f"table {normalize_identifier(d['table'])} columns {col_names}")
         table_node_ids.append(node_id)
 
     embeddings = embed_model.encode(texts, convert_to_tensor=True)
