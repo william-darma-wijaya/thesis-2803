@@ -54,10 +54,19 @@ def build_schema_index(
     graph: nx.Graph,
     db_name: str,
     embed_model: SentenceTransformer,
+    include_table_in_text: bool = False,
 ) -> SchemaIndex:
     """
     Precompute table-level and column-level embeddings for `db_name`.
     Call once per database before running queries against it.
+
+    Column embeddings use the humanized COLUMN name only ("song release year"),
+    not "table column": the table name leaked into every column of a table
+    (n-gram "singer" lifted all singer.* columns to ~0.8), which made Stage 2
+    behave like table selection again. The table is already known from Stage 1
+    (columns are scored only inside candidate tables) and from the graph node
+    id, so nothing is lost. `include_table_in_text=True` restores the old
+    "table column" text, for A/B comparison.
     """
     col_nodes = [
         (n, d)
@@ -72,10 +81,9 @@ def build_schema_index(
     col_node_ids = [n for n, _ in col_nodes]
     columns = [d["column"] for _, d in col_nodes]
     col_table_map = [d["table"] for _, d in col_nodes]
-    # Encode as "table column" (humanized) — gives the embedder full relational
-    # context. "employees name" is unambiguous; "name" alone loses the table.
     col_texts = [
-        f"{normalize_identifier(t)} {normalize_identifier(c)}"
+        f"{normalize_identifier(t)} {normalize_identifier(c)}" if include_table_in_text
+        else normalize_identifier(c)
         for t, c in zip(col_table_map, columns)
     ]
     col_embeddings = embed_model.encode(col_texts, convert_to_tensor=True)
