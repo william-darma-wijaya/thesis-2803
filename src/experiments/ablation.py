@@ -73,9 +73,18 @@ RESULTS_CSV = Path("outputs/tables/ablation_results.csv")
 CSV_FIELDS = [
     "mode", "k", "avg_ex", "avg_esm", "avg_recall", "avg_precision",
     "avg_prompt_tokens", "avg_output_tokens", "avg_token_consumption",
-    "n_samples", "tables_pct", "columns_pct", "llm_model",
+    "n_samples", "tables_pct", "columns_pct", "llm_model", "few_shot_selection",
     "predictions_file", "prompts_file",
 ]
+
+
+def _run_tag(mode: str, cfg: PipelineConfig) -> str:
+    """File-name tag; "question" keeps the old names so earlier runs stay valid."""
+    return mode if cfg.few_shot_selection == "question" else f"{mode}_{cfg.few_shot_selection}"
+
+
+def _selection(row: dict) -> str:
+    return row.get("few_shot_selection") or "question"  # rows written before the column existed
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +159,9 @@ def _run_k(
     """
     cfg = replace(base_cfg, few_shot_k=k, use_full_schema_bypass=False)
 
-    pred_path   = output_dir / f"ablation_{mode}_predictions_k{k}.txt"
-    prompt_path = output_dir / f"ablation_{mode}_prompts_k{k}.jsonl"
+    tag         = _run_tag(mode, cfg)
+    pred_path   = output_dir / f"ablation_{tag}_predictions_k{k}.txt"
+    prompt_path = output_dir / f"ablation_{tag}_prompts_k{k}.jsonl"
     recalls, precisions = [], []
     prompt_tokens_list, output_tokens_list, consumption_list = [], [], []
     evals = []
@@ -278,7 +288,8 @@ def _print_table(results: list[AblationResult], cfg: PipelineConfig) -> None:
     W = 110
     print("\n" + "=" * W)
     print("FEW-SHOT ABLATION RESULTS  (EX/ESM in-process, esm_ex_cm.py)")
-    print(f"  Token Consumption T = T_in + {cfg.token_output_weight}×T_out")
+    print(f"  Token Consumption T = T_in + {cfg.token_output_weight}×T_out   "
+          f"few-shot selection: {cfg.few_shot_selection}")
     print("=" * W)
     print(f"{'mode':<10} {'k':>3} {'EX':>7} {'ESM':>7} {'recall':>8} {'precision':>10} "
           f"{'T_consume':>10} {'T_in':>8} {'T_out':>7}  predictions file")
@@ -351,14 +362,15 @@ def _run_ablation_evals(results: list[AblationResult], cfg: PipelineConfig) -> N
 
 def _save_results(results: list[AblationResult], cfg: PipelineConfig, mode: str) -> list[dict]:
     """
-    Merge this run into ablation_results.csv (rows of the OTHER mode are kept,
-    so the two separate Kaggle runs end up in one file) and write the Dimension 6
-    EX-per-k JSON. Returns all rows now in the CSV.
+    Merge this run into ablation_results.csv (rows of the OTHER mode or few-shot
+    selection are kept, so separate Kaggle runs end up in one file) and write
+    the Dimension 6 EX-per-k JSON. Returns all rows now in the CSV.
     """
     rows = []
     if RESULTS_CSV.exists():
         with open(RESULTS_CSV, newline="", encoding="utf-8") as f:
-            rows = [row for row in csv.DictReader(f) if row.get("mode") != mode]
+            rows = [row for row in csv.DictReader(f)
+                    if (row.get("mode"), _selection(row)) != (mode, cfg.few_shot_selection)]
 
     for r in sorted(results, key=lambda x: x.k):
         rows.append({
@@ -375,6 +387,7 @@ def _save_results(results: list[AblationResult], cfg: PipelineConfig, mode: str)
             "tables_pct":            cfg.top_k_tables_pct if mode == "graphrag" else cfg.baseline_top_k_tables_pct,
             "columns_pct":           cfg.top_k_columns_pct if mode == "graphrag" else "",
             "llm_model":             cfg.llm_model,
+            "few_shot_selection":    cfg.few_shot_selection,
             "predictions_file":      str(r.predictions_file),
             "prompts_file":          str(r.prompts_file),
         })
@@ -386,7 +399,7 @@ def _save_results(results: list[AblationResult], cfg: PipelineConfig, mode: str)
         writer.writerows(rows)
     logger.info("CSV saved to %s", RESULTS_CSV)
 
-    ex_path = RESULTS_CSV.parent / f"ablation_ex_per_k_{mode}.json"
+    ex_path = RESULTS_CSV.parent / f"ablation_ex_per_k_{_run_tag(mode, cfg)}.json"
     ex_path.write_text(
         json.dumps({str(r.k): round(r.avg_ex, 2) for r in sorted(results, key=lambda x: x.k)}, indent=2),
         encoding="utf-8",
@@ -458,7 +471,7 @@ def main(
     few_shot_index: FewShotIndex | None = None
     if any(k > 0 for k in k_values):
         logger.info("Building few-shot index from training set …")
-        few_shot_index = build_few_shot_index(cfg.train_json, embed_model)
+        few_shot_index = build_few_shot_index(cfg.train_json, embed_model, cfg)
 
     logger.info("Loading foreign-key maps for in-process ESM/EX …")
     evaluate = _make_evaluator(cfg)
@@ -480,7 +493,8 @@ def main(
     _print_table(results, cfg)
     rows = _save_results(results, cfg, mode)
 
-    best = recommend_k(rows)
+    # k is chosen within one few-shot selection method, never across them.
+    best = recommend_k([row for row in rows if _selection(row) == cfg.few_shot_selection])
     print(f"\nBest k by EX for {mode}: {best[mode]}")
     if "shared" in best:
         print(f"Shared few_shot_k for BOTH modes (highest mean EX): {best['shared']}"

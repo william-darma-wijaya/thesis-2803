@@ -30,7 +30,9 @@ thesis-2803/
 │   │   ├── retrieval.py    — GraphRAG: two-stage semantic linking, graph traversal, context builder
 │   │   └── baseline.py     — Baseline: table-level graph, table-level semantic linking, context builder
 │   ├── skeleton/
-│   │   └── masking.py      — de-semanticization (Guo et al., 2023, disederhanakan): pertanyaan → skeleton [MASK] untuk seleksi few-shot; dijalankan lokal (spaCy), tulis data/skeletons/{train,dev}.json. Retrieval berbasis skeleton BELUM disambung ke pipeline (poin 29)
+│   │   ├── masking.py      — de-semanticization (Guo et al., 2023, disederhanakan): pertanyaan → skeleton [MASK] untuk seleksi few-shot; dijalankan lokal (spaCy), tulis data/skeletons/{train,dev}.json (poin 29)
+│   │   ├── compare_retrieval.py — cek tanpa LLM: contoh by skeleton vs by pertanyaan mentah, kemiripan struktur SQL ke gold (Kaggle, hasil di outputs/tables/skeleton_retrieval_check.json)
+│   │   └── compare_ab.py   — A/B `few_shot_selection` dari dua run ablation.py: EX/ESM berpasangan (McNemar) + leak rate
 │   ├── generation/
 │   │   ├── generation.py   — prompt builder, SQL cleaner, model loading (4-bit quantized), greedy decode
 │   │   └── few_shot.py     — few-shot index: pre-compute training set embeddings, dynamic retrieval
@@ -177,6 +179,7 @@ Semua parameter ada di `PipelineConfig` dataclass. **Jangan hardcode nilai di fi
 | `semantic_similarity_threshold` | `0.35` | TBD | Skor minimum (max cosine lintas n-gram) agar kolom dipertahankan; belum terkalibrasi untuk BGE-M3. Tetap di nilai config saat sweep kecuali `sweep.py --thresholds` (poin 27, 28) |
 | `few_shot_k` | `3` | TBD | Dipakai GraphRAG DAN Baseline (selalu sama). Ablation tahap 2 (EX) |
 | `few_shot_frame` | `[0, 1, 3, 5]` | Final | Grid tahap 2 |
+| `few_shot_selection` | `"question"` | TBD | Seleksi few-shot by pertanyaan mentah atau `"skeleton"` (de-semanticization, `data/skeletons/`). Prompt selalu berisi pertanyaan + SQL contoh yang asli. Tunggu A/B EX (`compare_ab.py`, poin 29) |
 | `max_ngram` | `3` | Final | Segmentasi query sampai trigram |
 | `max_new_tokens` | `256` | Final | Budget generasi LLM. `config.py` = `256`; baris ini sebelumnya keliru tertulis `200` — kode selalu pakai `cfg.max_new_tokens`. |
 | `temperature` | `0.0` | Final | Greedy decoding, deterministik |
@@ -189,7 +192,7 @@ Parameter bertanda **TBD** akan diupdate setelah sweep dan ablation selesai.
 
 ## Ablation Study
 
-**Bertahap, 3 tahap** (keputusan peneliti 2026-09-26, `IMPLEMENTATION_DECISIONS.md` poin 28). Tiap tahap memakai pemenang tahap sebelumnya — tulis ke `config.py`, atau oper lewat flag override (`--tables-pct`, `--columns-pct`, `--baseline-tables-pct`, `--threshold`, `--few-shot-k`, `--llm-model`, tersedia di `pipeline.py` dan `ablation.py`).
+**Bertahap, 3 tahap** (keputusan peneliti 2026-09-26, `IMPLEMENTATION_DECISIONS.md` poin 28). Tiap tahap memakai pemenang tahap sebelumnya — tulis ke `config.py`, atau oper lewat flag override (`--tables-pct`, `--columns-pct`, `--baseline-tables-pct`, `--threshold`, `--few-shot-k`, `--few-shot-selection`, `--llm-model`, tersedia di `pipeline.py` dan `ablation.py`).
 
 | Tahap | Parameter | Grid (`config.py`) | Dipilih dengan | Butuh LLM |
 |---|---|---|---|---|
@@ -361,6 +364,12 @@ python src/experiments/sweep.py --rank-by col_recall --thresholds 0.0 0.3 0.35 0
 # Ablation tahap 2 — few-shot k (default few_shot_frame), EX in-process, dua mode terpisah
 python src/experiments/ablation.py --mode baseline --sample 1.0
 python src/experiments/ablation.py --mode graphrag --sample 1.0 --tables-pct 0.6 --columns-pct 0.5
+
+# A/B seleksi few-shot (poin 29): sama k, question vs skeleton, lalu bandingkan
+python src/experiments/ablation.py --mode graphrag --sample 1.0 --k-values 3 --few-shot-selection skeleton
+python src/skeleton/compare_ab.py
+python src/skeleton/masking.py                              # bangun ulang data/skeletons/ (lokal, spaCy)
+USE_TF=0 python tests/test_few_shot_selection.py            # tes lokal seleksi few-shot
 
 # Ablation tahap 3 — semua model di llm_model_frame (atau sebut nama model)
 python src/experiments/pipeline.py --baseline --skip-sweep --models all --sample 1.0

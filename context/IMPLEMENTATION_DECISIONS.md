@@ -532,7 +532,31 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 - Kata kerja domain ikut ter-mask kalau cocok nama tabel/kolom (`hire` dari tabel `hiring`, `won` dari `Winning_Pilot`).
 - Angka-angka di poin ini (dan contoh Fig. 1 / skor EX di spec peneliti) dari paper belum dicek ulang terhadap paper asli.
 
-**Verifikasi (lokal, Spider asli):** self-check di `masking.py` (contoh spec peneliti `What are the names of the singers who are not French?` → `What are the [MASK] of the [MASK] who are not [MASK]?`, kata intent selamat walau jadi nama kolom, `id` satu token, value berkutip ter-mask utuh, kutip possessive `singers'` bukan value) dijalankan tiap build. Di seluruh 8034 pertanyaan: 0 artefak tokenizer (satu-satunya `[MASK]` menempel adalah `150cm`), 0 value berkutip yang lolos. **Belum:** retrieval skeleton dengan BGE-M3 (cek urutan kemiripan Fig. 1 paper), integrasi ke `few_shot.py`, dan EX.
+**Verifikasi (lokal, Spider asli):** self-check di `masking.py` (contoh spec peneliti `What are the names of the singers who are not French?` → `What are the [MASK] of the [MASK] who are not [MASK]?`, kata intent selamat walau jadi nama kolom, `id` satu token, value berkutip ter-mask utuh, kutip possessive `singers'` bukan value) dijalankan tiap build. Di seluruh 8034 pertanyaan: 0 artefak tokenizer (satu-satunya `[MASK]` menempel adalah `150cm`), 0 value berkutip yang lolos.
+
+**Langkah 1 — cek retrieval tanpa LLM (Kaggle, BGE-M3, 2026-10-17):** `src/skeleton/compare_retrieval.py`, hasil di `outputs/tables/skeleton_retrieval_check.json`. Untuk tiap pertanyaan dev, top-k contoh train diambil by kemiripan pertanyaan mentah (perilaku `few_shot.py` sekarang) vs skeleton, lalu SQL contoh dibandingkan dengan gold SQL dev. Kriteria lanjut (ditetapkan SEBELUM run): `struct_jaccard` k=3 naik dengan p < 0.05 DAN Fig. 1 terbalik. **Keduanya lolos:**
+
+| k=3 (1034 dev × 7000 train) | pertanyaan | skeleton | Wilcoxon p |
+|---|---|---|---|
+| `struct_jaccard` (Jaccard fitur keyword SQL — proxy custom) | 0.442 | 0.635 | 1.3e-68 |
+| `exact_struct` (set fitur identik) | 0.212 | 0.376 | 7.5e-34 |
+| `same_hardness` (`eval_hardness` resmi SPIDER) | 0.449 | 0.570 | 1.6e-19 |
+
+- Konsisten di k=1 (0.461 → 0.656) dan k=5 (0.430 → 0.621).
+- Fig. 1: pertanyaan Q1~Q2 = 0.498 < Q1~Q3 = 0.823; skeleton Q1~Q2 = 0.922 > Q1~Q3 = 0.728 — arah sama dengan paper.
+- Contoh terpilih hampir seluruhnya berbeda: overlap top-k hanya 2.6% / 5.2% / 6.8% (k=1/3/5), top-1 beda di 1007/1034 pertanyaan. Ini perubahan besar pada isi prompt, jadi EX bisa bergeser ke dua arah.
+- Kenaikan `struct_jaccard` per hardness (k=3): easy +0.241, medium +0.218, hard +0.149, extra +0.100 — struktur query sulit (subquery, set operation, JOIN berlapis) kurang terlihat dari kata intent di permukaan.
+
+**Batasan interpretasi:** `struct_jaccard`/`exact_struct` adalah proxy struktural custom, bukan EX, dan menghukum bentuk SQL yang setara (`min(x)` vs `ORDER BY x LIMIT 1`). Retrieval by pertanyaan mentah kadang menang (query identik dari domain berbeda, J=1.00), dan contoh dengan topik mirip juga membawa petunjuk schema linking — jadi kenaikan proxy belum menjamin kenaikan EX. Tidak ada kebocoran data uji: skeleton dev hanya memakai pertanyaan dev + schema DB-nya (tersedia saat inferensi); hardness dari gold SQL hanya untuk analisis.
+
+**Langkah 2 — integrasi (2026-10-17):** `cfg.few_shot_selection` (`"question"` | `"skeleton"`, CLI `--few-shot-selection`, nilai lain ditolak `validate()`). Default **tetap `"question"`** sampai A/B EX langkah 3 memutuskan — sebelum ada bukti EX, perilaku pipeline tidak berubah.
+- `build_few_shot_index(train_json, embed_model, cfg)`: mode `skeleton` meng-embed skeleton train dari `cfg.skeleton_dir/train.json` (dicek sinkron dengan `train_spider.json`) dan menyimpan peta pertanyaan dev → skeleton. Contoh yang dikembalikan tetap `FewShotExample` asli, jadi **isi prompt tidak berubah** (`build_prompt()` tidak disentuh). Tanpa `cfg` = mode `question` (panggilan lama tetap jalan).
+- `retrieve_few_shot_examples()` error kalau mode index ≠ `cfg.few_shot_selection`, atau pertanyaan tidak ada di `dev.json` skeleton — tidak ada fallback diam-diam ke pertanyaan mentah. Peta di-key teks pertanyaan: 1034 pertanyaan dev semuanya unik.
+- Lima pemanggil (`pipeline.py` ×2, `baseline.py`, `ablation.py`, `eval_pipeline.ipynb`) mengoper `cfg`; GraphRAG dan Baseline tetap memakai index yang sama.
+- `ablation.py`: `few_shot_selection` jadi kolom CSV dan bagian kunci merge; nama file mode `skeleton` diberi akhiran (`ablation_{mode}_skeleton_*`, `ablation_ex_per_k_{mode}_skeleton.json`), mode `question` memakai nama lama. Rekomendasi k hanya membandingkan baris dengan selection yang sama. Juga dicatat di `model_comparison.csv` dan `comparison_report.txt`.
+- Tes lokal (encoder palsu, data Spider asli): `python tests/test_few_shot_selection.py` — mode `question` identik dengan perilaku lama, mode `skeleton` memilih contoh lain tapi prompt tetap berisi teks asli, mismatch/pertanyaan asing gagal keras, run A/B tidak saling menimpa, deteksi leak.
+
+**Langkah 3 — A/B dengan LLM (belum dijalankan):** 4 run `ablation.py --sample 1.0 --k-values 3` (2 mode × 2 selection, subset dev identik karena sampling ber-seed), lalu `src/skeleton/compare_ab.py` → EX/ESM berpasangan (McNemar exact) + leak rate: prediksi yang memakai nama yang tidak ada di schema context/pertanyaannya sendiri tapi ada di contoh few-shot (custom, berbasis teks prompt; alias kolom seperti `AS cnt` ikut terhitung "unknown"). Hasil → `outputs/tables/skeleton_ab.json`.
 
 ## Belum diputuskan / open items
 
