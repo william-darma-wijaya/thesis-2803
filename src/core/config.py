@@ -62,6 +62,24 @@ class PipelineConfig:
     # Tuned separately from the column threshold (the score scales differ).
     table_similarity_threshold: float = 0.0
     max_ngram: int = 3
+    # How stopwords are handled when the question is split into n-grams (GraphRAG
+    # Stage 1 + 2; Baseline embeds the whole question and ignores this):
+    #   "none"   : keep every n-gram (original behaviour)
+    #   "remove" : drop stopwords from the word list FIRST, then build n-grams
+    #              (creates adjacency that is not in the question)
+    #   "edge"   : build n-grams from the original word order, then drop every
+    #              n-gram that STARTS or ENDS with a stopword (inner stopwords stay:
+    #              "number of singers" survives, "of singers" does not)
+    # Deliberately NOT the NLTK list: it contains words that are meaningful in
+    # Spider column names (from, to, no, not, all, before, after, between ...).
+    query_stopword_mode: str = "none"
+    query_stopwords: list[str] = field(default_factory=lambda: [
+        "what", "which", "who", "whom", "whose", "how", "when", "where",
+        "show", "list", "give", "find", "tell", "return", "display", "me",
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "do", "does", "did",
+        "of", "for", "with", "and", "or", "that", "this", "these", "those",
+        "have", "has", "had", "their", "its", "it", "there",
+    ])
 
     # Top-k is a FRACTION in (0, 1], not an absolute count, so the budget scales
     # with database size. Converted per query by retrieval.k_from_pct():
@@ -117,6 +135,8 @@ class PipelineConfig:
             raise ValueError(f"top_k_frame values must be in (0, 1], got {self.top_k_frame!r}")
         if self.few_shot_k < 0 or any(k < 0 for k in self.few_shot_frame):
             raise ValueError("few_shot_k / few_shot_frame must be >= 0")
+        if self.query_stopword_mode not in ("none", "remove", "edge"):
+            raise ValueError(f"query_stopword_mode must be none|remove|edge, got {self.query_stopword_mode!r}")
 
 
 # CLI overrides shared by pipeline.py and ablation.py, so a Kaggle run can use
@@ -127,6 +147,7 @@ _CLI_OVERRIDES = (
     ("--baseline-tables-pct", "baseline_top_k_tables_pct", float),
     ("--threshold", "semantic_similarity_threshold", float),
     ("--table-threshold", "table_similarity_threshold", float),
+    ("--stopword-mode", "query_stopword_mode", str),
     ("--few-shot-k", "few_shot_k", int),
     ("--llm-model", "llm_model", str),
 )

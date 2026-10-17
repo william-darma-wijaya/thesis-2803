@@ -173,6 +173,7 @@ Semua parameter ada di `PipelineConfig` dataclass. **Jangan hardcode nilai di fi
 | `top_k_frame` | `[0.4, 0.5, 0.6, 0.8]` | Final | Grid tahap 1: GraphRAG tabel×kolom (16), Baseline tabel (4) |
 | `semantic_similarity_threshold` | `0.35` | TBD | Skor minimum (max cosine lintas n-gram) agar kolom dipertahankan; belum terkalibrasi untuk BGE-M3. Tetap di nilai config saat sweep kecuali `sweep.py --thresholds` (poin 27, 28) |
 | `table_similarity_threshold` | `0.0` | TBD | GraphRAG Stage 1: skor minimum (max cosine lintas n-gram) agar TABEL jadi kandidat; `0.0` = nonaktif (hanya `top_k_tables_pct` yang membatasi). Dituning terpisah dari threshold kolom, lewat notebook `graphrag_sla_trial.ipynb` (`sweep.py` belum menyapunya) |
+| `query_stopword_mode` | `none` | TBD | GraphRAG saja (Baseline meng-embed seluruh pertanyaan): `none` / `remove` (buang stopword lalu n-gram) / `edge` (buang n-gram yang diawali/diakhiri stopword). Daftar kata di `query_stopwords` (kustom, bukan NLTK). Diuji di `graphrag_sla_trial.ipynb` bagian 10 |
 | `few_shot_k` | `3` | TBD | Dipakai GraphRAG DAN Baseline (selalu sama). Ablation tahap 2 (EX) |
 | `few_shot_frame` | `[0, 1, 3, 5]` | Final | Grid tahap 2 |
 | `max_ngram` | `3` | Final | Segmentasi query sampai trigram |

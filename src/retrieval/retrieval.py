@@ -120,17 +120,44 @@ def precompute_column_embeddings(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _extract_phrases(query: str, max_ngram: int) -> list[str]:
-    """Return all unique word n-grams (up to max_ngram) from a cleaned query."""
+def _extract_phrases(
+    query: str,
+    max_ngram: int,
+    stopword_mode: str = "none",
+    stopwords: frozenset[str] | set[str] | list[str] = (),
+) -> list[str]:
+    """
+    Return all unique word n-grams (up to max_ngram) from a cleaned query.
+
+    stopword_mode (see PipelineConfig.query_stopword_mode):
+      "none"   : every n-gram.
+      "remove" : stopwords are dropped from the word list before n-grams are built.
+      "edge"   : n-grams are built from the original order; those that start or end
+                 with a stopword are dropped (inner stopwords are kept).
+    If filtering would leave nothing (e.g. a question made only of stopwords) the
+    unfiltered n-grams are returned, so the caller never gets an empty list for a
+    non-empty question.
+    """
     clean = re.sub(r"[^\w\s]", "", query.lower())
     words = clean.split()
-    return list(
-        {
-            " ".join(words[i : i + length])
+    stop = set(stopwords)
+
+    def ngrams(ws: list[str]) -> list[str]:
+        return list(dict.fromkeys(
+            " ".join(ws[i : i + length])
             for length in range(1, max_ngram + 1)
-            for i in range(len(words) - length + 1)
-        }
-    )
+            for i in range(len(ws) - length + 1)
+        ))
+
+    all_phrases = ngrams(words)
+    if stopword_mode == "remove":
+        phrases = ngrams([w for w in words if w not in stop])
+    elif stopword_mode == "edge":
+        phrases = [p for p in all_phrases
+                   if p.split(" ", 1)[0] not in stop and p.rsplit(" ", 1)[-1] not in stop]
+    else:
+        return all_phrases
+    return phrases or all_phrases
 
 
 def k_from_pct(pct: float, n: int) -> int:
@@ -178,7 +205,7 @@ def retrieve_candidate_tables(
     if (no_cap and cfg.table_similarity_threshold <= 0) or index.table_embeddings is None:
         return index.tables
 
-    phrases = _extract_phrases(query, cfg.max_ngram)
+    phrases = _extract_phrases(query, cfg.max_ngram, cfg.query_stopword_mode, cfg.query_stopwords)
     if not phrases:
         return index.tables
 
@@ -247,7 +274,7 @@ def retrieve_candidate_columns(
     filtered_emb = index.col_embeddings[col_mask]            # (n_filtered, d)
     filtered_node_ids = [n for n, m in zip(index.col_node_ids, col_mask.tolist()) if m]
 
-    phrases = _extract_phrases(query, cfg.max_ngram)
+    phrases = _extract_phrases(query, cfg.max_ngram, cfg.query_stopword_mode, cfg.query_stopwords)
     if not phrases:
         return []
 
