@@ -81,6 +81,17 @@ class PipelineConfig:
         "have", "has", "had", "their", "its", "it", "there",
     ])
 
+    # --- Value linking (GraphRAG, exact match; src/retrieval/value_linking.py) ---
+    # Question n-grams that exactly equal a cell value ("asia") add that column
+    # (country.Continent) as an extra traversal anchor. Index built once per DB.
+    use_value_linking: bool = False
+    value_max_rows_per_column: int = 2000    # SELECT DISTINCT ... LIMIT N per column
+    value_min_chars: int = 3                 # shorter values are ignored
+    value_max_chars: int = 50                # longer values ignored; column skipped if mean length exceeds it
+    value_max_numeric_ratio: float = 0.5     # column skipped if more values than this are pure numbers
+    value_max_columns_per_value: int = 3     # value in more columns than this = too common, ignored
+    value_max_linked_columns: int = 5        # max columns added per question
+
     # Top-k is a FRACTION in (0, 1], not an absolute count, so the budget scales
     # with database size. Converted per query by retrieval.k_from_pct():
     #   tables  : ceil(pct x number of tables in the database)

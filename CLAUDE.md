@@ -28,7 +28,8 @@ thesis-2803/
 │   │   └── schema.py       — parsing tables.json Spider → DataFrame → NetworkX graph (column-level)
 │   ├── retrieval/
 │   │   ├── retrieval.py    — GraphRAG: two-stage semantic linking, graph traversal, context builder
-│   │   └── baseline.py     — Baseline: table-level graph, table-level semantic linking, context builder
+│   │   ├── baseline.py     — Baseline: table-level graph, table-level semantic linking, context builder
+│   │   └── value_linking.py — GraphRAG: exact-match value linking (nilai sel DB → kolom anchor), indeks per DB di-cache
 │   ├── generation/
 │   │   ├── generation.py   — prompt builder, SQL cleaner, model loading (4-bit quantized), greedy decode
 │   │   └── few_shot.py     — few-shot index: pre-compute training set embeddings, dynamic retrieval
@@ -174,6 +175,7 @@ Semua parameter ada di `PipelineConfig` dataclass. **Jangan hardcode nilai di fi
 | `semantic_similarity_threshold` | `0.35` | TBD | Skor minimum (max cosine lintas n-gram) agar kolom dipertahankan; belum terkalibrasi untuk BGE-M3. Tetap di nilai config saat sweep kecuali `sweep.py --thresholds` (poin 27, 28) |
 | `table_similarity_threshold` | `0.0` | TBD | GraphRAG Stage 1: skor minimum (max cosine lintas n-gram) agar TABEL jadi kandidat; `0.0` = nonaktif (hanya `top_k_tables_pct` yang membatasi). Dituning terpisah dari threshold kolom, lewat notebook `graphrag_sla_trial.ipynb` (`sweep.py` belum menyapunya) |
 | `query_stopword_mode` | `none` | TBD | GraphRAG saja (Baseline meng-embed seluruh pertanyaan): `none` / `remove` (buang stopword lalu n-gram) / `edge` (buang n-gram yang diawali/diakhiri stopword). Daftar kata di `query_stopwords` (kustom, bukan NLTK). Diuji di `graphrag_sla_trial.ipynb` bagian 10 |
+| `use_value_linking` (+ `value_*`) | `False` | TBD | GraphRAG saja: n-gram pertanyaan yang PERSIS sama dengan nilai sel DB (kolom `text`, bukan PK/FK/id/code) menambahkan kolomnya sebagai anchor sebelum traversal (`src/retrieval/value_linking.py`). Indeks dibangun sekali per DB, di-cache. Angka tidak ditangani. Diuji di `graphrag_sla_trial.ipynb` bagian 11 |
 | `few_shot_k` | `3` | TBD | Dipakai GraphRAG DAN Baseline (selalu sama). Ablation tahap 2 (EX) |
 | `few_shot_frame` | `[0, 1, 3, 5]` | Final | Grid tahap 2 |
 | `max_ngram` | `3` | Final | Segmentasi query sampai trigram |
