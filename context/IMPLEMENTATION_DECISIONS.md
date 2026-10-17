@@ -507,6 +507,33 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 
 **Verifikasi (lokal, fixture Spider sintetis 2 DB / 6 query, embedding & LLM palsu):** sweep menghasilkan 16 + 4 konfigurasi dan pemenang per mode; persentase benar-benar mengubah jumlah tabel/kolom terkirim; ablation dua mode ter-merge di satu CSV, Baseline k=0 → EX 0 dan k≥1 → EX 100 (few-shot benar-benar masuk ke prompt Baseline), `recommend_k` memilih k bersama; `run_model_comparison` menulis direktori per model + `model_comparison.csv`, semua prompt kedua arm berisi tepat k contoh; semua sel kode `eval_pipeline.ipynb` jalan (model default dan model non-default). **Belum** diuji dengan BGE-M3/Qwen/Spider asli. `notebooks/compiled/graphrag_text2sql.ipynb` tetap TIDAK diperbarui (poin 27).
 
+## 29. De-semanticization pertanyaan untuk seleksi few-shot — tahap masking (2026-10-17)
+
+**Masalah (diamati peneliti):** SQL output terpengaruh nama tabel/kolom/value dari contoh few-shot. Contoh dipilih by cosine similarity pertanyaan **mentah**, jadi yang terpilih cenderung yang *topiknya* mirip (sama-sama menyebut "singer", "country"), bukan yang *struktur SQL*-nya mirip.
+
+**Keputusan peneliti:** ikuti Guo et al. (2023), *Prompting GPT-3.5 for Text-to-SQL with De-semanticization and Skeleton Retrieval* (arXiv:2304.13301), versi disederhanakan: kata domain di pertanyaan di-mask jadi `[MASK]`, dan contoh nanti dipilih berdasarkan kemiripan **skeleton**. LLM tetap menerima pertanyaan dan SQL contoh yang **asli** — skeleton hanya untuk seleksi. Tahap ini **masking saja**; retrieval berbasis skeleton belum disambung ke `few_shot.py` (dipikirkan belakangan). Sebelumnya sempat dicoba masking SQL contoh (bukan pertanyaan), dibatalkan sebelum di-commit.
+
+**Implementasi (kode custom skripsi — bukan dari paper, bukan SPIDER):** `src/skeleton/masking.py`. Token di-mask kalau:
+1. angka (POS `NUM` atau digit) — **bukan** `like_num`, karena itu ikut menandai ordinal (`second highest`);
+2. value: di dalam entitas spaCy DAN ber-POS NOUN/PROPN, atau entitas NORP (`French`) — bukan "semua noun", karena itu menghapus `number`/`average`;
+3. kata isi (NOUN/PROPN/ADJ/VERB/NUM) yang lemma-nya cocok kata di nama tabel/kolom DB pertanyaan itu sendiri (`table_names`/`column_names` di `tables.json`, word-by-word, tanpa sinonim);
+4. di dalam tanda kutip (`'Fail'`, `"Homeland Security"`) — **tambahan di luar paper**, pengganti pencocokan isi DB yang dilewati. Sebelum aturan ini, 493 dari 903 pertanyaan ber-kutip masih membawa value yang tidak ter-mask.
+
+`INTENT_WORDS` (number, total, count, average, max/min, sum, most/least, highest/lowest, order, distinct, different, have, be) tidak pernah di-mask oleh aturan 1–3. Alasannya data: di 1030/8034 pertanyaan train+dev, kata intent juga merupakan nama kolom DB-nya (`number` 463, `order` 138, `total` 78, `count` 41 — dari kolom seperti `Number_of_...`, `Order_ID`); lemma-match polos akan menghapusnya. `have`/`be` karena tabel seperti `Has_Pet`/`Is_male` (pola "have … but do not have" = `EXCEPT`). `first`/`last` sengaja TIDAK dilindungi — hampir selalu merujuk `first_name`/`last_name`.
+
+**Penyimpangan dari spec peneliti (md) dan alasannya:**
+- Stopword **tidak** dibuang dari kata skema: spaCy menandai `name` sebagai stopword, jadi `names` tidak akan pernah ter-mask. Tidak perlu juga — sisi pertanyaan hanya mencocokkan kata isi, jadi `in`/`of` di nama skema tidak pernah cocok apa pun.
+- Tokenizer spaCy memecah `id` seperti kontraksi `I'd` (→ `i`, `d`); aturan khusus itu dihapus di `load_nlp()`. Tanpa ini kata skema berisi `i`/`d` dan skeleton rusak (`Find i[MASK] of`).
+
+**Output:** `data/skeletons/{train,dev}.json` (`{db_id, question, skeleton, query}`, 7000 + 1034 pertanyaan), dihitung lokal (`python src/skeleton/masking.py`, ±20 detik) supaya Kaggle tidak butuh spaCy. Rata-rata 4.2 `[MASK]` per pertanyaan; 0.4% train / 0.2% dev tanpa `[MASK]` sama sekali.
+
+**Keterbatasan yang perlu disebut di metodologi:**
+- Noun yang bukan nama skema dan bukan entitas tidak ter-mask: value huruf kecil tanpa kutip (`dog`, `cat`, `fiat`), sinonim (`people` untuk tabel `person`), kata seperti `student` di DB yang tidak punya tabel student.
+- Kata kerja domain ikut ter-mask kalau cocok nama tabel/kolom (`hire` dari tabel `hiring`, `won` dari `Winning_Pilot`).
+- Angka-angka di poin ini (dan contoh Fig. 1 / skor EX di spec peneliti) dari paper belum dicek ulang terhadap paper asli.
+
+**Verifikasi (lokal, Spider asli):** self-check di `masking.py` (contoh spec peneliti `What are the names of the singers who are not French?` → `What are the [MASK] of the [MASK] who are not [MASK]?`, kata intent selamat walau jadi nama kolom, `id` satu token, value berkutip ter-mask utuh, kutip possessive `singers'` bukan value) dijalankan tiap build. Di seluruh 8034 pertanyaan: 0 artefak tokenizer (satu-satunya `[MASK]` menempel adalah `150cm`), 0 value berkutip yang lolos. **Belum:** retrieval skeleton dengan BGE-M3 (cek urutan kemiripan Fig. 1 paper), integrasi ke `few_shot.py`, dan EX.
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER

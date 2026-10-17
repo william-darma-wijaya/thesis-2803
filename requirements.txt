@@ -14,6 +14,10 @@ sqlglot>=23.0.0
 pandas>=2.0.0
 numpy>=1.24.0
 
+# De-semanticization (src/skeleton/masking.py), lokal saja — hasilnya di-commit ke
+# data/skeletons/, jadi Kaggle tidak butuh spaCy. Model: python -m spacy download en_core_web_sm
+spacy>=3.7
+
 # SQLite eksekusi sudah built-in Python (sqlite3), tidak perlu install
 
 # Untuk testing
