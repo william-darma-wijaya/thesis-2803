@@ -91,6 +91,12 @@ class PipelineConfig:
     value_max_numeric_ratio: float = 0.5     # column skipped if more values than this are pure numbers
     value_max_columns_per_value: int = 3     # value in more columns than this = too common, ignored
     value_max_linked_columns: int = 5        # max columns added per question
+    # Numbers ("played in 2013" -> matches.year). Off by default; needs use_value_linking.
+    value_link_numbers: bool = False
+    value_max_columns_per_number: int = 2    # stricter than text: small numbers sit in many columns
+    value_number_skip_after: list[str] = field(default_factory=lambda: [
+        "top", "first", "last", "limit",       # "top 3" is a LIMIT, not a cell value
+    ])
 
     # Top-k is a FRACTION in (0, 1], not an absolute count, so the budget scales
     # with database size. Converted per query by retrieval.k_from_pct():

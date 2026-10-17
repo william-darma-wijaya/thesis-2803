@@ -28,7 +28,7 @@ from sentence_transformers import SentenceTransformer, util
 
 from src.core.config import PipelineConfig
 from src.core.schema import normalize_identifier
-from src.retrieval.value_linking import get_value_index, link_values
+from src.retrieval.value_linking import extract_question_numbers, get_value_index, link_values
 
 logger = logging.getLogger(__name__)
 
@@ -406,9 +406,10 @@ def _all_column_nodes(graph: nx.Graph, db_name: str) -> list[str]:
 
 
 def value_linked_columns(graph: nx.Graph, db_name: str, question: str, cfg: PipelineConfig) -> list[str]:
-    """Column node ids whose cell values exactly match a question n-gram (value_linking.py)."""
+    """Column node ids whose cell values exactly match a question n-gram or number (value_linking.py)."""
     phrases = _extract_phrases(question, cfg.max_ngram, cfg.query_stopword_mode, cfg.query_stopwords)
-    return link_values(phrases, get_value_index(graph, db_name, cfg), cfg)
+    numbers = extract_question_numbers(question, cfg) if cfg.value_link_numbers else []
+    return link_values(phrases, get_value_index(graph, db_name, cfg), cfg, numbers)
 
 
 def retrieve_graphrag_schema(
