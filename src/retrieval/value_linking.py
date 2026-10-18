@@ -13,7 +13,9 @@ lookup per n-gram / number. No embeddings, no GPU.
 
 Text values (always on with use_value_linking):
   - column_type == "text", not a primary key, not part of a foreign-key edge,
-    name not ending in "id"/"code" (codes like "ABW" never appear in questions)
+    name not ending in "id". "*_code" columns ARE indexed: questions do name codes
+    ("players from the USA" -> players.country_code); numeric codes fall out via
+    the numeric-ratio check below, and key-like codes are already PK/FK
   - content checks on the sampled values: mean length <= value_max_chars
     (drops description columns), numeric ratio <= value_max_numeric_ratio
   - normalized exactly like the question in retrieval._extract_phrases()
@@ -90,8 +92,8 @@ def _key_column_reason(node_data: dict, is_fk: bool) -> str | None:
     if is_fk:
         return "foreign key"
     last = normalize_identifier(node_data["column"]).split()[-1:]
-    if last and last[0] in ("id", "code"):
-        return "id/code name"
+    if last and last[0] == "id":
+        return "id name"
     return None
 
 

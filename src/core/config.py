@@ -81,6 +81,14 @@ class PipelineConfig:
         "have", "has", "had", "their", "its", "it", "there",
     ])
 
+    # Which nodes of the traversal paths go into the prompt (GraphRAG):
+    #   "full"    : every node on every shortest path between anchors (original).
+    #               Paths run through primary keys (belongs_to_pk edges), so two
+    #               anchors of ONE table pull in that table's PK even without a join
+    #   "fk_only" : anchors + only the two endpoints of each foreign_key edge on
+    #               the paths, i.e. the JOIN columns. Same paths, fewer nodes
+    traversal_mode: str = "full"
+
     # --- Value linking (GraphRAG, exact match; src/retrieval/value_linking.py) ---
     # Question n-grams that exactly equal a cell value ("asia") add that column
     # (country.Continent) as an extra traversal anchor. Index built once per DB.
@@ -154,6 +162,8 @@ class PipelineConfig:
             raise ValueError("few_shot_k / few_shot_frame must be >= 0")
         if self.query_stopword_mode not in ("none", "remove", "edge"):
             raise ValueError(f"query_stopword_mode must be none|remove|edge, got {self.query_stopword_mode!r}")
+        if self.traversal_mode not in ("full", "fk_only"):
+            raise ValueError(f"traversal_mode must be full|fk_only, got {self.traversal_mode!r}")
 
 
 # CLI overrides shared by pipeline.py and ablation.py, so a Kaggle run can use
@@ -165,6 +175,7 @@ _CLI_OVERRIDES = (
     ("--threshold", "semantic_similarity_threshold", float),
     ("--table-threshold", "table_similarity_threshold", float),
     ("--stopword-mode", "query_stopword_mode", str),
+    ("--traversal-mode", "traversal_mode", str),
     ("--few-shot-k", "few_shot_k", int),
     ("--llm-model", "llm_model", str),
 )

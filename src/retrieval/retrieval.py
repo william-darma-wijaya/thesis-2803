@@ -427,7 +427,8 @@ def retrieve_graphrag_schema(
 
     Returns:
         column_nodes     : node IDs whose DDL goes into the prompt (detected
-                           columns + every node on the traversal paths), in a
+                           columns + every node on the traversal paths, or only
+                           the FK-edge endpoints with traversal_mode="fk_only"), in a
                            deterministic order so the prompt is reproducible
         candidate_tables : Stage-1 tables (for the sweep's selectivity diagnostic)
 
@@ -447,10 +448,16 @@ def retrieve_graphrag_schema(
     if not detected:
         return _all_column_nodes(graph, db_name), candidate_tables
 
-    c_nodes, paths, _ = trace_schema_paths(graph, db_name, detected)
+    c_nodes, paths, relations = trace_schema_paths(graph, db_name, detected)
+    if cfg.traversal_mode == "fk_only":
+        # Only the JOIN columns of the paths: a PK reached through belongs_to_pk
+        # edges stays out unless it is itself an FK endpoint (or an anchor).
+        path_nodes = [n for r in relations if r["relation"] == "foreign_key" for n in (r["from"], r["to"])]
+    else:
+        path_nodes = [n for path in paths for n in path]
     # dict.fromkeys, not set(): set order follows string hashing, which changes
     # between Python processes and would reorder the CREATE TABLE blocks.
-    column_nodes = list(dict.fromkeys(c_nodes + [n for path in paths for n in path]))
+    column_nodes = list(dict.fromkeys(c_nodes + path_nodes))
     return column_nodes, candidate_tables
 
 
