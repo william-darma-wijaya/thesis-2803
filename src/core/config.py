@@ -54,13 +54,18 @@ class PipelineConfig:
     bnb_compute_dtype: torch.dtype = torch.float16
 
     # --- Schema Linking ---
-    # Minimum cosine similarity (best n-gram match) for a column to be kept.
-    # Uncalibrated for BGE-M3 -- do not trust 0.35 blindly (sweep.py --thresholds).
-    semantic_similarity_threshold: float = 0.35
+    # GraphRAG: the two thresholds below are the ONLY retrieval choices. Every other
+    # GraphRAG schema-linking field in this section is fixed PREPROCESSING (researcher
+    # decision 2026-10-19, picked by SLA in notebooks/graphrag_sla_trial.ipynb, trial
+    # G7). Their flags exist only so that notebook can reproduce trials G1-G7; do not
+    # change them for experiments.
+    #
+    # Minimum cosine similarity (best n-gram match) for a column to be kept (Stage 2).
+    semantic_similarity_threshold: float = 0.70
     # Stage 1 counterpart: minimum cosine similarity (best n-gram match) for a TABLE
-    # to become a candidate. 0.0 = disabled (only top_k_tables_pct limits tables).
-    # Tuned separately from the column threshold (the score scales differ).
-    table_similarity_threshold: float = 0.0
+    # to become a candidate. 0.0 = disabled. Tuned separately from the column
+    # threshold (the score scales differ).
+    table_similarity_threshold: float = 0.60
     max_ngram: int = 3
     # How stopwords are handled when the question is split into n-grams (GraphRAG
     # Stage 1 + 2; Baseline embeds the whole question and ignores this):
@@ -72,7 +77,7 @@ class PipelineConfig:
     #              "number of singers" survives, "of singers" does not)
     # Deliberately NOT the NLTK list: it contains words that are meaningful in
     # Spider column names (from, to, no, not, all, before, after, between ...).
-    query_stopword_mode: str = "none"
+    query_stopword_mode: str = "edge"            # preprocessing (fixed)
     query_stopwords: list[str] = field(default_factory=lambda: [
         "what", "which", "who", "whom", "whose", "how", "when", "where",
         "show", "list", "give", "find", "tell", "return", "display", "me",
@@ -87,29 +92,30 @@ class PipelineConfig:
     #               anchors of ONE table pull in that table's PK even without a join
     #   "fk_only" : anchors + only the two endpoints of each foreign_key edge on
     #               the paths, i.e. the JOIN columns. Same paths, fewer nodes
-    traversal_mode: str = "full"
+    traversal_mode: str = "fk_only"              # preprocessing (fixed)
     # Tables without a primary key (junction tables such as pets_1.Has_Pet) get no
     # belongs_to_pk edges, so their columns are isolated and traversal cannot cross
     # them (Student -> Has_Pet -> Pets has no path). True = connect the columns of
     # each PK-less table to each other ("same_table" edges) in the TRAVERSAL graph
     # only; the schema graph from schema.py and the DDL stay unchanged.
-    connect_no_pk_tables: bool = False
-    # Embedding text for Stage 1/2: False = humanized ORIGINAL names ("stuid");
-    # True = Spider's annotated natural names from tables.json ("student id").
-    # SQL, DDL and node ids always use the original names.
-    embed_natural_names: bool = False
+    connect_no_pk_tables: bool = True            # preprocessing (fixed)
+    # Embedding text for Stage 1/2 (and the Baseline table text): False = humanized
+    # ORIGINAL names ("stuid"); True = Spider's annotated natural names from
+    # tables.json ("student id"). SQL, DDL and node ids always use the original names.
+    embed_natural_names: bool = True             # preprocessing (fixed)
 
     # --- Value linking (GraphRAG, exact match; src/retrieval/value_linking.py) ---
     # Question n-grams that exactly equal a cell value ("asia") add that column
     # (country.Continent) as an extra traversal anchor. Index built once per DB.
-    use_value_linking: bool = False
+    use_value_linking: bool = True               # preprocessing (fixed), text values only
     value_max_rows_per_column: int = 2000    # SELECT DISTINCT ... LIMIT N per column
     value_min_chars: int = 3                 # shorter values are ignored
     value_max_chars: int = 50                # longer values ignored; column skipped if mean length exceeds it
     value_max_numeric_ratio: float = 0.5     # column skipped if more values than this are pure numbers
     value_max_columns_per_value: int = 3     # value in more columns than this = too common, ignored
     value_max_linked_columns: int = 5        # max columns added per question
-    # Numbers ("played in 2013" -> matches.year). Off by default; needs use_value_linking.
+    # Numbers ("played in 2013" -> matches.year). Off (fixed): in the SLA trial they
+    # added more false positives than recall (graphrag_sla_trial.ipynb, G4).
     value_link_numbers: bool = False
     value_max_columns_per_number: int = 2    # stricter than text: small numbers sit in many columns
     value_number_skip_after: list[str] = field(default_factory=lambda: [
@@ -123,8 +129,9 @@ class PipelineConfig:
     # Always at least 1. Set to 0 to disable (all tables / no column cap).
     # The column count is a cap, not a target: fewer columns passing the
     # similarity threshold -> fewer are kept.
-    top_k_tables_pct: float = 0.6
-    top_k_columns_pct: float = 0.6
+    # GraphRAG: 0 / 0 = no cap, only the thresholds select (preprocessing, fixed).
+    top_k_tables_pct: float = 0.0
+    top_k_columns_pct: float = 0.0
     # Baseline has no column stage, so only its table fraction is tuned
     # (separately from GraphRAG's, by the same SLA sweep).
     baseline_top_k_tables_pct: float = 0.6
@@ -145,8 +152,9 @@ class PipelineConfig:
     #   "skeleton" -- de-semanticized question from src/skeleton/masking.py
     #                 (picks examples with the same intent / SQL structure)
     # The prompt always shows the ORIGINAL question + SQL of each example.
-    # Stays "question" until the EX A/B (IMPLEMENTATION_DECISIONS.md point 29).
-    few_shot_selection: str = "question"
+    # Default "skeleton" (researcher decision 2026-10-19, IMPLEMENTATION_DECISIONS.md
+    # point 29/30); "question" kept for the EX A/B (src/skeleton/compare_ab.py).
+    few_shot_selection: str = "skeleton"
     skeleton_dir: Path = Path("data/skeletons")
 
     # --- Generation ---

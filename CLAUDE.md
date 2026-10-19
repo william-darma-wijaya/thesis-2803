@@ -124,7 +124,7 @@ Pertanyaan user
         ▼
 [1] Table-Level Semantic Linking  ← single query embedding vs table embeddings
         │  (bukan n-gram, bukan two-stage), top ceil(baseline_top_k_tables_pct × #tabel)
-        │  Embed format: "table <name> columns <col1> <col2> ..."
+        │  Embed format: "table <name> columns <col1> <col2> ..." (nama natural Spider, sama dengan GraphRAG)
         ▼
 [2] Table Path Tracing            ← shortest path antar tabel via FK edges
         ▼
@@ -174,27 +174,27 @@ Semua parameter ada di `PipelineConfig` dataclass. **Jangan hardcode nilai di fi
 | `embedding_model` | `BAAI/bge-m3` | Final | |
 | `llm_model` | `Qwen/Qwen2.5-Coder-7B-Instruct` | TBD | Model tahap 1-2; model final dari ablation tahap 3 |
 | `llm_model_frame` | Qwen2.5-Coder 1.5B/3B/7B/14B | Final | Grid ablation tahap 3 (`pipeline.py --baseline --models all`) |
-| `top_k_tables_pct` | `0.6` | TBD | GraphRAG Stage 1: `ceil(pct × #tabel DB)`, min 1, `0` = semua. Ablation tahap 1 (`sweep.py`, SLA) |
-| `top_k_columns_pct` | `0.6` | TBD | GraphRAG Stage 2: cap `ceil(pct × #kolom di tabel kandidat)` untuk SELURUH pertanyaan, setelah filter threshold; `0` = tanpa cap. Ablation tahap 1 |
+| `top_k_tables_pct` | `0.0` | Preprocessing | GraphRAG Stage 1 (tetap `0` = tanpa batas, poin 30): `ceil(pct × #tabel DB)`, min 1, `0` = semua. Ablation tahap 1 (`sweep.py`, SLA) |
+| `top_k_columns_pct` | `0.0` | Preprocessing | GraphRAG Stage 2 (tetap `0` = tanpa cap, poin 30): cap `ceil(pct × #kolom di tabel kandidat)` untuk SELURUH pertanyaan, setelah filter threshold; `0` = tanpa cap. Ablation tahap 1 |
 | `baseline_top_k_tables_pct` | `0.6` | TBD | Baseline: `ceil(pct × #tabel DB)`. Dituning terpisah (Baseline tidak punya tahap kolom). Ablation tahap 1 |
 | `top_k_frame` | `[0.4, 0.5, 0.6, 0.8]` | Final | Grid tahap 1: GraphRAG tabel×kolom (16), Baseline tabel (4) |
-| `semantic_similarity_threshold` | `0.35` | TBD | Skor minimum (max cosine lintas n-gram) agar kolom dipertahankan; belum terkalibrasi untuk BGE-M3. Tetap di nilai config saat sweep kecuali `sweep.py --thresholds` (poin 27, 28) |
-| `table_similarity_threshold` | `0.0` | TBD | GraphRAG Stage 1: skor minimum (max cosine lintas n-gram) agar TABEL jadi kandidat; `0.0` = nonaktif (hanya `top_k_tables_pct` yang membatasi). Dituning terpisah dari threshold kolom, lewat notebook `graphrag_sla_trial.ipynb` (`sweep.py` belum menyapunya) |
-| `query_stopword_mode` | `none` | TBD | GraphRAG saja (Baseline meng-embed seluruh pertanyaan): `none` / `remove` (buang stopword lalu n-gram) / `edge` (buang n-gram yang diawali/diakhiri stopword). Daftar kata di `query_stopwords` (kustom, bukan NLTK). Diuji di `graphrag_sla_trial.ipynb` bagian 10 |
-| `traversal_mode` | `full` | TBD | GraphRAG saja: node mana dari jalur traversal yang masuk prompt. `full` = semua node di jalur terpendek (jalur lewat PK via `belongs_to_pk`, jadi dua anchor di SATU tabel ikut menarik PK-nya); `fk_only` = jalur sama, tapi hanya kedua ujung edge `foreign_key` (kolom JOIN) yang ditambahkan. Graph di `schema.py` tidak berubah. Diuji di `graphrag_sla_trial.ipynb` bagian 12 (termasuk oracle: traversal dari kolom gold) |
-| `connect_no_pk_tables` | `False` | TBD | GraphRAG saja: tabel tanpa PK (tabel penghubung, mis. `pets_1.Has_Pet`) tidak punya edge di dalam tabel sehingga graph terputus di situ. `True` = kolom-kolomnya disambung (edge `same_table`) di salinan graph yang dipakai traversal (`traversal_graph()` di `retrieval.py`); graph `schema.py` dan DDL tidak berubah. Diuji di `graphrag_sla_trial.ipynb` bagian 9 (G6) dan 11 |
-| `embed_natural_names` | `False` | TBD | GraphRAG saja: teks embed Stage 1/2 memakai nama anotasi Spider (`table_names`/`column_names` di `tables.json`, mis. `StuID` -> `student id`) alih-alih nama asli yang dinormalisasi. SQL, DDL, node id tetap nama asli (`load_spider_schema()` menyimpan keduanya; node graph punya atribut `table_natural`/`column_natural`). Diuji di notebook bagian 9 (G7) |
-| `use_value_linking` (+ `value_*`) | `False` | TBD | GraphRAG saja: n-gram pertanyaan yang PERSIS sama dengan nilai sel DB (kolom `text`, bukan PK/FK, nama tidak berakhiran `id`; kolom `*_code` ikut diindeks karena kode seperti `USA` disebut di pertanyaan) menambahkan kolomnya sebagai anchor sebelum traversal (`src/retrieval/value_linking.py`). Indeks dibangun sekali per DB, di-cache. Angka opsional lewat `value_link_numbers` (kolom `number` + tahun di kolom `time`; angka di > `value_max_columns_per_number` kolom diabaikan, angka setelah `top`/`first`/`last` diabaikan). Diuji di `graphrag_sla_trial.ipynb` bagian 11 |
+| `semantic_similarity_threshold` | `0.70` | Tuning | **Pilihan GraphRAG (bersama threshold tabel), poin 30.** Skor minimum (max cosine lintas n-gram) agar kolom dipertahankan; dituning dengan SLA di `graphrag_sla_trial.ipynb`. Tetap di nilai config saat sweep kecuali `sweep.py --thresholds` (poin 27, 28) |
+| `table_similarity_threshold` | `0.60` | Tuning | **Pilihan GraphRAG, poin 30.** Stage 1: skor minimum (max cosine lintas n-gram) agar TABEL jadi kandidat; `0.0` = nonaktif. Dituning terpisah dari threshold kolom, lewat notebook `graphrag_sla_trial.ipynb` (`sweep.py` belum menyapunya) |
+| `query_stopword_mode` | `edge` | Preprocessing | GraphRAG saja (Baseline meng-embed seluruh pertanyaan): `none` / `remove` (buang stopword lalu n-gram) / `edge` (buang n-gram yang diawali/diakhiri stopword). Daftar kata di `query_stopwords` (kustom, bukan NLTK). Diuji di `graphrag_sla_trial.ipynb` bagian 10 |
+| `traversal_mode` | `fk_only` | Preprocessing | GraphRAG saja: node mana dari jalur traversal yang masuk prompt. `full` = semua node di jalur terpendek (jalur lewat PK via `belongs_to_pk`, jadi dua anchor di SATU tabel ikut menarik PK-nya); `fk_only` = jalur sama, tapi hanya kedua ujung edge `foreign_key` (kolom JOIN) yang ditambahkan. Graph di `schema.py` tidak berubah. Diuji di `graphrag_sla_trial.ipynb` bagian 12 (termasuk oracle: traversal dari kolom gold) |
+| `connect_no_pk_tables` | `True` | Preprocessing | GraphRAG saja: tabel tanpa PK (tabel penghubung, mis. `pets_1.Has_Pet`) tidak punya edge di dalam tabel sehingga graph terputus di situ. `True` = kolom-kolomnya disambung (edge `same_table`) di salinan graph yang dipakai traversal (`traversal_graph()` di `retrieval.py`); graph `schema.py` dan DDL tidak berubah. Diuji di `graphrag_sla_trial.ipynb` bagian 9 (G6) dan 11 |
+| `embed_natural_names` | `True` | Preprocessing | GraphRAG DAN Baseline (teks tabel `"table <t> columns <c1> ..."`): teks embed Stage 1/2 memakai nama anotasi Spider (`table_names`/`column_names` di `tables.json`, mis. `StuID` -> `student id`) alih-alih nama asli yang dinormalisasi. SQL, DDL, node id tetap nama asli (`load_spider_schema()` menyimpan keduanya; node graph punya atribut `table_natural`/`column_natural`). Diuji di notebook bagian 9 (G7) |
+| `use_value_linking` (+ `value_*`) | `True` (teks, tanpa angka) | Preprocessing | GraphRAG saja: n-gram pertanyaan yang PERSIS sama dengan nilai sel DB (kolom `text`, bukan PK/FK, nama tidak berakhiran `id`; kolom `*_code` ikut diindeks karena kode seperti `USA` disebut di pertanyaan) menambahkan kolomnya sebagai anchor sebelum traversal (`src/retrieval/value_linking.py`). Indeks dibangun sekali per DB, di-cache. Angka opsional lewat `value_link_numbers` (kolom `number` + tahun di kolom `time`; angka di > `value_max_columns_per_number` kolom diabaikan, angka setelah `top`/`first`/`last` diabaikan). Diuji di `graphrag_sla_trial.ipynb` bagian 11 |
 | `few_shot_k` | `3` | TBD | Dipakai GraphRAG DAN Baseline (selalu sama). Ablation tahap 2 (EX) |
 | `few_shot_frame` | `[0, 1, 3, 5]` | Final | Grid tahap 2 |
-| `few_shot_selection` | `"question"` | TBD | Seleksi few-shot by pertanyaan mentah atau `"skeleton"` (de-semanticization, `data/skeletons/`). Prompt selalu berisi pertanyaan + SQL contoh yang asli. Tunggu A/B EX (`compare_ab.py`, poin 29) |
+| `few_shot_selection` | `"skeleton"` | Final | Seleksi few-shot by skeleton pertanyaan (de-semanticization, `data/skeletons/`) — default sejak keputusan peneliti 2026-10-19 (poin 30); `"question"` (pertanyaan mentah) tetap ada untuk A/B EX (`compare_ab.py`, poin 29). Prompt selalu berisi pertanyaan + SQL contoh yang asli. Sama untuk GraphRAG dan Baseline |
 | `max_ngram` | `3` | Final | Segmentasi query sampai trigram |
 | `max_new_tokens` | `256` | Final | Budget generasi LLM. `config.py` = `256`; baris ini sebelumnya keliru tertulis `200` — kode selalu pakai `cfg.max_new_tokens`. |
 | `temperature` | `0.0` | Final | Greedy decoding, deterministik |
 | `load_in_4bit` | `True` | Final | Kuantisasi NF4 |
 | `token_output_weight` | `3.0` | Final | α/μ dalam T = T_in + α×T_out — fixed dari proposal subbab 3.8.2.5, diupdate dari 1.0 (lihat riwayat resolusi konflik di "Evaluasi Metrik") |
 
-Parameter bertanda **TBD** akan diupdate setelah sweep dan ablation selesai.
+Parameter bertanda **TBD** akan diupdate setelah sweep dan ablation selesai. **Preprocessing** = langkah schema linking GraphRAG yang tetap (keputusan peneliti 2026-10-19, `IMPLEMENTATION_DECISIONS.md` poin 30): flag-nya ada hanya untuk mereproduksi trial G1-G7 di `graphrag_sla_trial.ipynb`, jangan diubah untuk eksperimen. **Tuning** = satu-satunya pilihan retrieval GraphRAG (threshold tabel & kolom).
 
 ---
 

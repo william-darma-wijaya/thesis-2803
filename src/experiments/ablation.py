@@ -463,7 +463,7 @@ def main(
         logger.info("Building table-level graph (Baseline) …")
         graph = build_table_graph(schema_df)
         cache = {
-            db_id: build_table_index(graph, db_id, embed_model)
+            db_id: build_table_index(graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
             for db_id in tqdm(unique_db_ids, desc="Indexing tables")
         }
 

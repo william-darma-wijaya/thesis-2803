@@ -549,7 +549,7 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 
 **Batasan interpretasi:** `struct_jaccard`/`exact_struct` adalah proxy struktural custom, bukan EX, dan menghukum bentuk SQL yang setara (`min(x)` vs `ORDER BY x LIMIT 1`). Retrieval by pertanyaan mentah kadang menang (query identik dari domain berbeda, J=1.00), dan contoh dengan topik mirip juga membawa petunjuk schema linking — jadi kenaikan proxy belum menjamin kenaikan EX. Tidak ada kebocoran data uji: skeleton dev hanya memakai pertanyaan dev + schema DB-nya (tersedia saat inferensi); hardness dari gold SQL hanya untuk analisis.
 
-**Langkah 2 — integrasi (2026-10-17):** `cfg.few_shot_selection` (`"question"` | `"skeleton"`, CLI `--few-shot-selection`, nilai lain ditolak `validate()`). Default **tetap `"question"`** sampai A/B EX langkah 3 memutuskan — sebelum ada bukti EX, perilaku pipeline tidak berubah.
+**Langkah 2 — integrasi (2026-10-17):** `cfg.few_shot_selection` (`"question"` | `"skeleton"`, CLI `--few-shot-selection`, nilai lain ditolak `validate()`). Default awalnya `"question"` sampai A/B EX langkah 3 memutuskan. **Update 2026-10-19 (poin 30):** peneliti menetapkan default `"skeleton"`; `"question"` tetap tersedia untuk A/B langkah 3.
 - `build_few_shot_index(train_json, embed_model, cfg)`: mode `skeleton` meng-embed skeleton train dari `cfg.skeleton_dir/train.json` (dicek sinkron dengan `train_spider.json`) dan menyimpan peta pertanyaan dev → skeleton. Contoh yang dikembalikan tetap `FewShotExample` asli, jadi **isi prompt tidak berubah** (`build_prompt()` tidak disentuh). Tanpa `cfg` = mode `question` (panggilan lama tetap jalan).
 - `retrieve_few_shot_examples()` error kalau mode index ≠ `cfg.few_shot_selection`, atau pertanyaan tidak ada di `dev.json` skeleton — tidak ada fallback diam-diam ke pertanyaan mentah. Peta di-key teks pertanyaan: 1034 pertanyaan dev semuanya unik.
 - Lima pemanggil (`pipeline.py` ×2, `baseline.py`, `ablation.py`, `eval_pipeline.ipynb`) mengoper `cfg`; GraphRAG dan Baseline tetap memakai index yang sama.
@@ -557,6 +557,42 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 - Tes lokal (encoder palsu, data Spider asli): `python tests/test_few_shot_selection.py` — mode `question` identik dengan perilaku lama, mode `skeleton` memilih contoh lain tapi prompt tetap berisi teks asli, mismatch/pertanyaan asing gagal keras, run A/B tidak saling menimpa, deteksi leak.
 
 **Langkah 3 — A/B dengan LLM (belum dijalankan):** 4 run `ablation.py --sample 1.0 --k-values 3` (2 mode × 2 selection, subset dev identik karena sampling ber-seed), lalu `src/skeleton/compare_ab.py` → EX/ESM berpasangan (McNemar exact) + leak rate: prediksi yang memakai nama yang tidak ada di schema context/pertanyaannya sendiri tapi ada di contoh few-shot (custom, berbasis teks prompt; alias kolom seperti `AS cnt` ikut terhitung "unknown"). Hasil → `outputs/tables/skeleton_ab.json`.
+
+## 30. Preprocessing GraphRAG tetap; yang dituning hanya threshold tabel & kolom (2026-10-19)
+
+**Keputusan peneliti:** semua langkah schema linking GraphRAG yang lolos trial SLA (`notebooks/graphrag_sla_trial.ipynb`, rekap bagian 9) adalah **preprocessing wajib**, bukan konfigurasi yang bisa dipilih. Yang tetap jadi pilihan hanya `table_similarity_threshold` (T) dan `semantic_similarity_threshold` (K), default **0.60 / 0.70**.
+
+| # | Preprocessing (default `config.py`) | Field |
+|---|---|---|
+| 1 | Normalisasi nama (`_`/camelCase → spasi, lowercase) | `normalize_identifier()` (selalu) |
+| 2 | Teks embed = nama natural anotasi Spider (`StuID` → `student id`); SQL/DDL/node id tetap nama asli | `embed_natural_names=True` |
+| 3 | Teks kolom = nama kolom saja, tanpa prefix tabel | `build_schema_index(include_table_in_text=False)` |
+| 4 | n-gram 1-3, buang n-gram yang diawali/diakhiri stopword | `max_ngram=3`, `query_stopword_mode="edge"` |
+| 5 | Tanpa batas top-k%, hanya threshold yang menyaring | `top_k_tables_pct=top_k_columns_pct=0` |
+| 6 | Value linking teks (exact match), tanpa angka | `use_value_linking=True`, `value_link_numbers=False`, `value_*` |
+| 7 | Tabel tanpa PK disambung (`same_table`) di graph traversal | `connect_no_pk_tables=True` |
+| 8 | Dari jalur traversal hanya kolom JOIN yang masuk prompt | `traversal_mode="fk_only"` |
+
+**Bukti (rekap trial, T0.60/K0.70, SLA kolom resmi `sla.py`, dev penuh n=1034 untuk G1-G5):** G1 threshold saja P 37.7 / R 84.6 → G2 + stopword `edge` P 39.5 / R 84.0 → G3 + value linking teks P 40.1 / R 87.5 → G4 + angka P 39.8 / R 88.5 (ditolak: R +1.0 tapi lebih banyak FP, mis. tahun yang muncul di dua tabel) → G5 + `fk_only` P 42.3 / R 87.1 → G7 + sambung tabel tanpa PK + nama natural P 44.5 / R 91.8 (dilaporkan peneliti; ukuran sampel run itu belum dipastikan, ulangi dengan `SAMPLE_RATIO = 1`). Oracle traversal (anchor = kolom gold): `full` P 88.7 vs `fk_only` P 99.4, jadi `fk_only` menghapus hampir semua FP yang berasal dari traversal. 42 query dev bergold kosong selalu P = R = 0 di SLA resmi (batas atas recall 95.9%); notebook trial juga menampilkan `col_P_ne`/`col_R_ne` tanpa query itu, sebagai diagnostik, bukan angka yang dilaporkan.
+
+**Konsekuensi implementasi:**
+- Default `config.py` diubah ke nilai di tabel; flag-nya **tetap ada** hanya supaya `graphrag_sla_trial.ipynb` bisa mereproduksi trial G1-G7 (riwayat kontribusi tiap langkah, untuk bab hasil). `eval_pipeline.ipynb` hanya mengekspos T dan K.
+- `sweep.py`: `best_config()` sekarang hanya mengembalikan `baseline_top_k_tables_pct`. Grid top-k% GraphRAG tetap dicetak untuk referensi, tapi tidak lagi ditulis balik ke `cfg` (termasuk `pipeline.py` tanpa `--skip-sweep`), karena akan melanggar preprocessing 5. Ablation tahap 1 (poin 28) untuk GraphRAG kini = tuning T/K di notebook trial.
+- `traversal_graph()` (`retrieval.py`) membangun salinan graph sekali per graph; graph `schema.py` dan DDL tidak berubah (struktur graph tidak disentuh).
+
+**Baseline ikut preprocessing teks schema (keputusan peneliti 2026-10-19):** Baseline = table-level retrieval (poin 18) yang meng-embed `"table <t> columns <c1> <c2> ..."`, jadi nama kolom ikut menentukan tabel yang terpilih. Supaya selisih GraphRAG vs Baseline murni dari cara retrieval (kolom + graph vs tabel), bukan dari kualitas teks schema, preprocessing 1-2 (normalisasi + nama natural) juga dipakai Baseline: `build_table_index(..., use_natural_names=cfg.embed_natural_names)`, nama natural disimpan di node graph tabel (`table_natural`, `columns[*].ColumnNatural`). DDL Baseline tetap nama asli. Preprocessing 3-8 khusus tahap GraphRAG (kolom, n-gram, value linking, traversal) dan tidak punya padanan di Baseline.
+
+**Few-shot (keputusan peneliti 2026-10-19):** default `few_shot_selection = "skeleton"` (poin 29), sama untuk kedua pipeline. `few_shot_k` tetap dipilih lewat ablation tahap 2 (EX).
+
+## 31. Bug fix DDL Baseline: arah FOREIGN KEY dan FK ganda antar tabel yang sama (2026-10-19)
+
+**Masalah (ditemukan saat menguji nama natural Baseline):** `build_table_schema_context()` (`baseline.py`) menentukan tabel pemilik FK hanya dari **nama kolom** (`from_col in kolom tabel ini`). Graph tabel Baseline tidak berarah, jadi edge `Has_Pet — Student` terlihat dari kedua tabel; karena `Student` juga punya kolom bernama `StuID` (PK-nya), DDL `Student` ikut mendapat baris palsu `FOREIGN KEY (StuID) REFERENCES Has_Pet(StuID)`. Ini terjadi untuk setiap FK yang nama kolomnya sama dengan PK yang direferensikan, pola yang sangat umum di Spider. Bug kedua: `build_table_graph()` hanya membuat edge `if not G.has_edge(src, tgt)`, jadi tabel dengan beberapa FK ke tabel yang sama (`matches.winner_id`, `matches.loser_id` → `players`) hanya membawa FK pertama ke DDL.
+
+**Bukan masalah dataset:** `tables.json` Spider benar; kesalahan ada di kode yang menulis DDL Baseline ke prompt. GraphRAG tidak terdampak (`build_schema_context()` mengecek PK di sisi tabel lain). SLA tidak terdampak (hanya himpunan kolom yang dihitung).
+
+**Perbaikan:** edge FK menyimpan `fks = [{from_table, from_col, to_col}, ...]` (arah + semua FK antar pasangan tabel); DDL menulis baris FK hanya di tabel `from_table`. `from_col`/`to_col` lama tetap ada (FK pertama). Diuji dengan skema sintetis: tabel penghubung (`Has_Pet`), dua FK ke tabel yang sama, FK ke tabel sendiri (`employee.manager_id`), dan `trace_table_paths()` tidak berubah. `eval_pipeline.ipynb` sel 5b mencetak FK langsung dari `tables.json` di samping DDL Baseline untuk cek di data asli.
+
+**Konsekuensi:** prompt Baseline dari run apa pun **sebelum** perbaikan ini memuat baris FK yang salah/kurang; EX Baseline lama tidak sebanding dengan run sesudahnya.
 
 ## Belum diputuskan / open items
 

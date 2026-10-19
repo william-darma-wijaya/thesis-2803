@@ -101,13 +101,18 @@ def build_table_graph(schema_df) -> nx.Graph:
     Node attributes:
         database   : str  — Spider db_id
         table      : str  — table name
-        columns    : list[dict]  — [{"Column": ..., "Type": ..., "is_pk": ...}]
+        table_natural : str  — Spider's annotated table name (embedding text only)
+        columns    : list[dict]  — [{"Column": ..., "Type": ..., "is_pk": ..., "ColumnNatural": ...}]
         type       : "table"
 
     Edge attributes:
         relation   : "foreign_key"
-        from_col   : source column name
-        to_col     : target column name
+        fks        : list of {"from_table": node id of the REFERENCING table,
+                     "from_col": ..., "to_col": ...}. The graph is undirected and
+                     one table pair can have several FKs (matches.winner_id and
+                     matches.loser_id -> players), so direction and every FK live here
+        from_col   : first FK's source column (kept for older readers)
+        to_col     : first FK's target column
 
     This is the baseline described in the notebook: coarser granularity means
     the schema context given to the LLM is always at the full-table level,
@@ -119,8 +124,9 @@ def build_table_graph(schema_df) -> nx.Graph:
     # One node per (database, table) pair
     for (db, table), group in df_clean.groupby(["Database", "Table"]):
         node_id = f"{db}.{table}"
+        natural_cols = ["ColumnNatural"] if "ColumnNatural" in group else []
         columns = (
-            group[["Column", "Type", "PK"]]
+            group[["Column", "Type", "PK"] + natural_cols]
             .rename(columns={"PK": "is_pk"})
             .to_dict("records")
         )
@@ -128,6 +134,7 @@ def build_table_graph(schema_df) -> nx.Graph:
             node_id,
             database=db,
             table=table,
+            table_natural=str(group["TableNatural"].iloc[0]) if "TableNatural" in group else table,
             columns=columns,
             type="table",
         )
@@ -141,13 +148,14 @@ def build_table_graph(schema_df) -> nx.Graph:
             continue
         tgt_table, tgt_col = parts
         tgt = f"{row['Database']}.{tgt_table}"
-        if G.has_node(src) and G.has_node(tgt) and not G.has_edge(src, tgt):
-            G.add_edge(
-                src, tgt,
-                relation="foreign_key",
-                from_col=row["Column"],
-                to_col=tgt_col,
-            )
+        if not (G.has_node(src) and G.has_node(tgt)):
+            continue
+        fk = {"from_table": src, "from_col": row["Column"], "to_col": tgt_col}
+        if G.has_edge(src, tgt):
+            G.edges[src, tgt]["fks"].append(fk)
+        else:
+            G.add_edge(src, tgt, relation="foreign_key", fks=[fk],
+                       from_col=row["Column"], to_col=tgt_col)
 
     n_nodes = G.number_of_nodes()
     n_edges = G.number_of_edges()
@@ -163,6 +171,7 @@ def build_table_index(
     graph: nx.Graph,
     db_name: str,
     embed_model: SentenceTransformer,
+    use_natural_names: bool = False,
 ) -> TableSchemaIndex:
     """
     Encode each table as a text string that includes the table name AND all
@@ -170,6 +179,11 @@ def build_table_index(
     name alone, and mirrors the approach from the notebook.
 
     Text format: "table <name> columns <col1> <col2> ..."
+
+    `use_natural_names=True` (PipelineConfig.embed_natural_names, the same schema
+    preprocessing as GraphRAG) embeds Spider's annotated names ("student id")
+    instead of the original ones ("StuID"). Node ids and the DDL keep the
+    original names.
     """
     nodes = [
         (n, d)
@@ -183,8 +197,13 @@ def build_table_index(
     table_node_ids = []
     texts = []
     for node_id, d in nodes:
-        col_names = " ".join(normalize_identifier(c["Column"]) for c in d["columns"])
-        texts.append(f"table {normalize_identifier(d['table'])} columns {col_names}")
+        if use_natural_names:
+            t_name = d.get("table_natural") or d["table"]
+            c_names = [c.get("ColumnNatural") or c["Column"] for c in d["columns"]]
+        else:
+            t_name, c_names = d["table"], [c["Column"] for c in d["columns"]]
+        col_names = " ".join(normalize_identifier(c) for c in c_names)
+        texts.append(f"table {normalize_identifier(t_name)} columns {col_names}")
         table_node_ids.append(node_id)
 
     embeddings = embed_model.encode(texts, convert_to_tensor=True)
@@ -298,16 +317,20 @@ def build_table_schema_context(
             col_lines.append(line)
 
         fk_lines = []
-        this_cols = {col["Column"] for col in d["columns"]}
         for _, neighbor, ed in graph.edges(node, data=True):
-            # Only annotate if this node is the FK source (from_col lives here,
-            # not on the referenced/parent side of the edge).
-            if ed.get("relation") == "foreign_key" and ed.get("from_col") in this_cols:
-                neighbor_table = graph.nodes[neighbor]["table"]
-                fk_lines.append(
-                    f"    FOREIGN KEY ({ed['from_col']}) "
-                    f"REFERENCES {neighbor_table}({ed['to_col']})"
-                )
+            if ed.get("relation") != "foreign_key":
+                continue
+            # Only the REFERENCING table gets the FOREIGN KEY line. Matching on the
+            # column name alone (the old check) also annotated the referenced table
+            # whenever both key columns share a name (Student.StuID <- Has_Pet.StuID),
+            # producing "FOREIGN KEY (StuID) REFERENCES Has_Pet(StuID)" in Student.
+            neighbor_table = graph.nodes[neighbor]["table"]
+            for fk in ed.get("fks", []):
+                if fk["from_table"] == node:
+                    fk_lines.append(
+                        f"    FOREIGN KEY ({fk['from_col']}) "
+                        f"REFERENCES {neighbor_table}({fk['to_col']})"
+                    )
 
         lines.append(",\n".join(col_lines + fk_lines))
         lines.append(");\n")
@@ -635,7 +658,7 @@ def run_baseline(
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_data))
     logger.info("Building table indices for %d databases …", len(unique_db_ids))
     table_cache: dict[str, TableSchemaIndex] = {
-        db_id: build_table_index(table_graph, db_id, embed_model)
+        db_id: build_table_index(table_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
         for db_id in tqdm(unique_db_ids, desc="Indexing tables")
     }
 

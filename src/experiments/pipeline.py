@@ -737,7 +737,7 @@ def run_comparison(
     logger.info("Building table graph (Baseline) …")
     tbl_graph = build_table_graph(schema_df)
     tbl_cache = {
-        db_id: build_table_index(tbl_graph, db_id, embed_model)
+        db_id: build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
         for db_id in tqdm(unique_db_ids, desc="Indexing tables")
     }
 
