@@ -56,6 +56,7 @@ def build_schema_index(
     db_name: str,
     embed_model: SentenceTransformer,
     include_table_in_text: bool = False,
+    use_natural_names: bool = False,
 ) -> SchemaIndex:
     """
     Precompute table-level and column-level embeddings for `db_name`.
@@ -68,6 +69,10 @@ def build_schema_index(
     (columns are scored only inside candidate tables) and from the graph node
     id, so nothing is lost. `include_table_in_text=True` restores the old
     "table column" text, for A/B comparison.
+
+    `use_natural_names=True` (PipelineConfig.embed_natural_names) embeds Spider's
+    annotated names ("student id") instead of the original ones ("StuID"); the
+    index still returns original names and node ids.
     """
     col_nodes = [
         (n, d)
@@ -82,17 +87,22 @@ def build_schema_index(
     col_node_ids = [n for n, _ in col_nodes]
     columns = [d["column"] for _, d in col_nodes]
     col_table_map = [d["table"] for _, d in col_nodes]
+    if use_natural_names:
+        text_col = [d.get("column_natural") or d["column"] for _, d in col_nodes]
+        text_tbl = {d["table"]: d.get("table_natural") or d["table"] for _, d in col_nodes}
+    else:
+        text_col, text_tbl = columns, {t: t for t in col_table_map}
     col_texts = [
-        f"{normalize_identifier(t)} {normalize_identifier(c)}" if include_table_in_text
+        f"{normalize_identifier(text_tbl[t])} {normalize_identifier(c)}" if include_table_in_text
         else normalize_identifier(c)
-        for t, c in zip(col_table_map, columns)
+        for t, c in zip(col_table_map, text_col)
     ]
     col_embeddings = embed_model.encode(col_texts, convert_to_tensor=True)
 
     # --- Table index (unique tables, deduplicated) ---
     tables = list(dict.fromkeys(col_table_map))  # preserves order, deduplicates
     table_embeddings = embed_model.encode(
-        [normalize_identifier(t) for t in tables], convert_to_tensor=True
+        [normalize_identifier(text_tbl[t]) for t in tables], convert_to_tensor=True
     )
 
     return SchemaIndex(
@@ -398,6 +408,44 @@ def trace_schema_paths(
     return column_nodes, paths, relations
 
 
+# One augmented copy per schema graph (built once, reused by every question).
+_TRAVERSAL_GRAPHS: dict[int, tuple[nx.Graph, nx.Graph]] = {}
+
+
+def traversal_graph(graph: nx.Graph, cfg: PipelineConfig) -> nx.Graph:
+    """
+    The graph trace_schema_paths() walks on. With cfg.connect_no_pk_tables, a copy
+    in which the columns of every table WITHOUT a primary key are connected to
+    each other ("same_table" edges): junction tables like Has_Pet(StuID, PetID)
+    otherwise have no intra-table edge and split the graph. Tables with a PK are
+    untouched (their columns already meet at the PK).
+    """
+    if not cfg.connect_no_pk_tables:
+        return graph
+    hit = _TRAVERSAL_GRAPHS.get(id(graph))
+    if hit is not None and hit[0] is graph:
+        return hit[1]
+    aug = graph.copy()
+    by_table: dict[tuple[str, str], list[str]] = {}
+    has_pk: set[tuple[str, str]] = set()
+    for n, d in graph.nodes(data=True):
+        if d.get("type") != "column":
+            continue
+        key = (d["database"], d["table"])
+        by_table.setdefault(key, []).append(n)
+        if d.get("is_pk"):
+            has_pk.add(key)
+    for key, cols in by_table.items():
+        if key in has_pk:
+            continue
+        for i in range(len(cols)):
+            for j in range(i + 1, len(cols)):
+                if not aug.has_edge(cols[i], cols[j]):
+                    aug.add_edge(cols[i], cols[j], relation="same_table")
+    _TRAVERSAL_GRAPHS[id(graph)] = (graph, aug)
+    return aug
+
+
 def _all_column_nodes(graph: nx.Graph, db_name: str) -> list[str]:
     return [
         n for n, d in graph.nodes(data=True)
@@ -448,7 +496,7 @@ def retrieve_graphrag_schema(
     if not detected:
         return _all_column_nodes(graph, db_name), candidate_tables
 
-    c_nodes, paths, relations = trace_schema_paths(graph, db_name, detected)
+    c_nodes, paths, relations = trace_schema_paths(traversal_graph(graph, cfg), db_name, detected)
     if cfg.traversal_mode == "fk_only":
         # Only the JOIN columns of the paths: a PK reached through belongs_to_pk
         # edges stays out unless it is itself an FK endpoint (or an anchor).

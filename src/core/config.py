@@ -88,6 +88,16 @@ class PipelineConfig:
     #   "fk_only" : anchors + only the two endpoints of each foreign_key edge on
     #               the paths, i.e. the JOIN columns. Same paths, fewer nodes
     traversal_mode: str = "full"
+    # Tables without a primary key (junction tables such as pets_1.Has_Pet) get no
+    # belongs_to_pk edges, so their columns are isolated and traversal cannot cross
+    # them (Student -> Has_Pet -> Pets has no path). True = connect the columns of
+    # each PK-less table to each other ("same_table" edges) in the TRAVERSAL graph
+    # only; the schema graph from schema.py and the DDL stay unchanged.
+    connect_no_pk_tables: bool = False
+    # Embedding text for Stage 1/2: False = humanized ORIGINAL names ("stuid");
+    # True = Spider's annotated natural names from tables.json ("student id").
+    # SQL, DDL and node ids always use the original names.
+    embed_natural_names: bool = False
 
     # --- Value linking (GraphRAG, exact match; src/retrieval/value_linking.py) ---
     # Question n-grams that exactly equal a cell value ("asia") add that column

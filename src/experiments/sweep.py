@@ -271,7 +271,7 @@ def run_sweep(
     embed_model = SentenceTransformer(cfg.embedding_model)
 
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item, _ in samples))
-    col_cache = {db_id: build_schema_index(col_graph, db_id, embed_model)
+    col_cache = {db_id: build_schema_index(col_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
                  for db_id in tqdm(unique_db_ids, desc="Indexing columns")}
     tbl_cache = {db_id: build_table_index(tbl_graph, db_id, embed_model)
                  for db_id in tqdm(unique_db_ids, desc="Indexing tables")}

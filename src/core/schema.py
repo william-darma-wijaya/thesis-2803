@@ -29,7 +29,11 @@ def load_spider_schema(json_path: Path) -> pd.DataFrame:
     """
     Parse Spider's tables.json into a flat DataFrame with one row per column.
 
-    Columns: Database, Table, Column, Type, PK, FK_Relation
+    Columns: Database, Table, Column, Type, PK, FK_Relation, TableNatural, ColumnNatural
+
+    TableNatural / ColumnNatural are Spider's human-annotated names ("table_names" /
+    "column_names", e.g. StuID -> "student id"); they are only used as embedding text
+    (PipelineConfig.embed_natural_names), never in SQL or DDL.
     """
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -39,6 +43,8 @@ def load_spider_schema(json_path: Path) -> pd.DataFrame:
         db_id = db["db_id"]
         table_names = db["table_names_original"]
         column_names = db["column_names_original"]
+        table_natural = db.get("table_names", table_names)
+        column_natural = db.get("column_names", column_names)
         column_types = db["column_types"]
         primary_keys = set(db["primary_keys"])
         fk_map = {fk[0]: fk[1] for fk in db["foreign_keys"]}
@@ -60,6 +66,8 @@ def load_spider_schema(json_path: Path) -> pd.DataFrame:
                     "Type": column_types[col_idx],
                     "PK": "Yes" if col_idx in primary_keys else "No",
                     "FK_Relation": fk_relation,
+                    "TableNatural": table_natural[table_idx] if table_idx != -1 else "ALL",
+                    "ColumnNatural": column_natural[col_idx][1],
                 }
             )
 
@@ -97,6 +105,8 @@ def build_schema_graph(df: pd.DataFrame) -> nx.Graph:
             column=col,
             column_type=str(row["Type"]).strip(),
             is_pk=is_pk,
+            table_natural=str(row.get("TableNatural", table)).strip(),
+            column_natural=str(row.get("ColumnNatural", col)).strip(),
         )
 
         if db not in pk_map:
