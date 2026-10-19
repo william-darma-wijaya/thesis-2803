@@ -62,6 +62,19 @@ pemenangnya ke `config.py`** (atau oper lewat flag `--tables-pct` dkk).
   Baca juga `avg_cols_sent` vs `avg_cols_candidate` di `sweep_results.csv`:
   kalau semua persentase kolom memberi hasil sama, threshold 0.35 yang
   memotong — pertimbangkan `--thresholds 0.0 0.3 0.35 0.5`.
+- [ ] **Sebelum tahap 2 — A/B seleksi few-shot** (GPU, `IMPLEMENTATION_DECISIONS.md`
+  poin 29, branch `few-shot/skeleton`): `question` vs `skeleton` di k=3, full
+  dev set, dengan top-k pemenang tahap 1. Hasil cek tanpa LLM sudah positif
+  (`outputs/tables/skeleton_retrieval_check.json`); yang ini memutuskan dengan EX.
+  ```bash
+  python src/experiments/ablation.py --mode graphrag --sample 1.0 --k-values 3 --few-shot-selection question
+  python src/experiments/ablation.py --mode graphrag --sample 1.0 --k-values 3 --few-shot-selection skeleton
+  python src/experiments/ablation.py --mode baseline --sample 1.0 --k-values 3 --few-shot-selection question
+  python src/experiments/ablation.py --mode baseline --sample 1.0 --k-values 3 --few-shot-selection skeleton
+  python src/skeleton/compare_ab.py
+  ```
+  Pemenangnya → `few_shot_selection` di `config.py`, lalu tahap 2 dijalankan
+  dengan selection itu (run k=3 di atas bisa dipakai ulang).
 - [ ] **Tahap 2 — `ablation.py`** (Run 1 — Baseline, Run 2 — GraphRAG, GPU):
   pilih `few_shot_k` by EX (satu k untuk kedua pipeline; script mencetak
   rekomendasi "shared" setelah dua mode selesai). Juga menghasilkan

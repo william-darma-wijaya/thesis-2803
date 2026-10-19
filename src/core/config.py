@@ -140,6 +140,14 @@ class PipelineConfig:
     few_shot_k: int = 3
     # Stage 2 of the ablation study (ablation.py, ranked by EX).
     few_shot_frame: list[int] = field(default_factory=lambda: [0, 1, 3, 5])
+    # What the cosine similarity compares when picking examples:
+    #   "question" -- raw question text (picks examples on the same topic)
+    #   "skeleton" -- de-semanticized question from src/skeleton/masking.py
+    #                 (picks examples with the same intent / SQL structure)
+    # The prompt always shows the ORIGINAL question + SQL of each example.
+    # Stays "question" until the EX A/B (IMPLEMENTATION_DECISIONS.md point 29).
+    few_shot_selection: str = "question"
+    skeleton_dir: Path = Path("data/skeletons")
 
     # --- Generation ---
     max_new_tokens: int = 256
@@ -174,6 +182,8 @@ class PipelineConfig:
             raise ValueError(f"query_stopword_mode must be none|remove|edge, got {self.query_stopword_mode!r}")
         if self.traversal_mode not in ("full", "fk_only"):
             raise ValueError(f"traversal_mode must be full|fk_only, got {self.traversal_mode!r}")
+        if self.few_shot_selection not in ("question", "skeleton"):
+            raise ValueError(f"few_shot_selection must be 'question' or 'skeleton', got {self.few_shot_selection!r}")
 
 
 # CLI overrides shared by pipeline.py and ablation.py, so a Kaggle run can use
@@ -187,6 +197,7 @@ _CLI_OVERRIDES = (
     ("--stopword-mode", "query_stopword_mode", str),
     ("--traversal-mode", "traversal_mode", str),
     ("--few-shot-k", "few_shot_k", int),
+    ("--few-shot-selection", "few_shot_selection", str),
     ("--llm-model", "llm_model", str),
 )
 

@@ -493,7 +493,7 @@ def main(cfg: PipelineConfig) -> None:
     few_shot_idx: FewShotIndex | None = None
     if cfg.few_shot_k > 0:
         logger.info("Building few-shot index from training set …")
-        few_shot_idx = build_few_shot_index(cfg.train_json, embed_model)
+        few_shot_idx = build_few_shot_index(cfg.train_json, embed_model, cfg)
     else:
         logger.info("Few-shot disabled (few_shot_k=0), running zero-shot.")
 
@@ -745,7 +745,7 @@ def run_comparison(
     few_shot_idx = None
     if cfg.few_shot_k > 0:
         logger.info("Building few-shot index (k=%d, GraphRAG + Baseline) …", cfg.few_shot_k)
-        few_shot_idx = build_few_shot_index(cfg.train_json, embed_model)
+        few_shot_idx = build_few_shot_index(cfg.train_json, embed_model, cfg)
 
     # ── Raw-log evaluation setup (SLA/ESM/EX/CM per query -> data/raw_logs/) ──
     # This is what feeds src/dimensions/ later (see context/EVALUATION_ANALYSIS_GUIDE.md
@@ -924,6 +924,7 @@ def run_comparison(
         f"  Top-k tables (pct)    {cfg.top_k_tables_pct:<16} {cfg.baseline_top_k_tables_pct}",
         f"  Top-k columns (pct)   {cfg.top_k_columns_pct:<16} -",
         f"  Few-shot k            {cfg.few_shot_k:<16} {cfg.few_shot_k}",
+        f"  Few-shot selection    {cfg.few_shot_selection:<16} {cfg.few_shot_selection}",
         f"  LLM                   {cfg.llm_model}",
         "=" * 70,
         "",
@@ -1026,6 +1027,7 @@ def run_model_comparison(
                 "avg_t_in": round(s.get("t_in", 0.0), 1), "avg_t_out": round(s.get("t_out", 0.0), 1),
                 "avg_token_consumption": round(s.get("t", 0.0), 1),
                 "few_shot_k": cfg.few_shot_k,
+                "few_shot_selection": cfg.few_shot_selection,
                 "tables_pct": cfg.top_k_tables_pct if mode == "graphrag" else cfg.baseline_top_k_tables_pct,
                 "columns_pct": cfg.top_k_columns_pct if mode == "graphrag" else "",
                 "raw_logs": str(raw_logs_dir / f"{mode}_log.json"),
