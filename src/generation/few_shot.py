@@ -7,6 +7,11 @@ Strategy: similarity-based retrieval.
     question using cosine similarity.
   - Return their (question, gold_sql) pairs as few-shot examples in the prompt.
 
+With cfg.few_shot_selection="skeleton" the similarity is computed on
+de-semanticized questions (data/skeletons/, src/skeleton/masking.py) instead,
+so examples are picked by intent rather than topic. The returned examples, and
+so the prompt, still carry the ORIGINAL question + SQL.
+
 Ranking murni by cosine similarity — tidak ada prioritas berdasarkan db_id.
 (Mode "same-DB-first" pernah ada, dihapus 2026-09-12 karena provably dead code
 untuk Spider: train/dev disjoint total, lihat IMPLEMENTATION_DECISIONS.md poin 22.)
@@ -41,6 +46,8 @@ class FewShotIndex:
     """Precomputed embedding index over the entire training set."""
     examples: list[FewShotExample]          # parallel to embeddings
     embeddings: torch.Tensor                # shape (n_train, d)
+    selection: str = "question"             # what the embeddings encode (cfg.few_shot_selection)
+    query_skeletons: dict[str, str] | None = None  # target question -> skeleton, for "skeleton"
 
 
 # ---------------------------------------------------------------------------
@@ -50,9 +57,11 @@ class FewShotIndex:
 def build_few_shot_index(
     train_json_path: Path,
     embed_model: SentenceTransformer,
+    cfg: PipelineConfig | None = None,
 ) -> FewShotIndex:
     """
-    Load the Spider training set and encode every question.
+    Load the Spider training set and encode every question (or its skeleton,
+    when cfg.few_shot_selection == "skeleton"; no cfg = "question").
 
     This is the only expensive step — it runs once and the result is reused
     for every dev question.
@@ -69,16 +78,28 @@ def build_few_shot_index(
         for item in train_data
     ]
 
-    logger.info("Encoding %d training questions for few-shot index …", len(examples))
+    selection = cfg.few_shot_selection if cfg else "question"
+    texts, query_skeletons = [e.question for e in examples], None
+    if selection == "skeleton":
+        train_sk = json.loads((cfg.skeleton_dir / "train.json").read_text(encoding="utf-8"))
+        if [r["question"] for r in train_sk] != texts:
+            raise ValueError(f"{cfg.skeleton_dir / 'train.json'} is out of sync with {train_json_path}; "
+                             "rerun src/skeleton/masking.py")
+        texts = [r["skeleton"] for r in train_sk]
+        dev_sk = json.loads((cfg.skeleton_dir / "dev.json").read_text(encoding="utf-8"))
+        query_skeletons = {r["question"]: r["skeleton"] for r in dev_sk}
+
+    logger.info("Encoding %d training %ss for few-shot index …", len(examples), selection)
     embeddings = embed_model.encode(
-        [e.question for e in examples],
+        texts,
         convert_to_tensor=True,
         show_progress_bar=True,
         batch_size=256,
     )
 
-    logger.info("Few-shot index ready.")
-    return FewShotIndex(examples=examples, embeddings=embeddings)
+    logger.info("Few-shot index ready (selection=%s).", selection)
+    return FewShotIndex(examples=examples, embeddings=embeddings,
+                        selection=selection, query_skeletons=query_skeletons)
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +128,18 @@ def retrieve_few_shot_examples(
     """
     if cfg.few_shot_k == 0 or index is None:
         return []
+    if index.selection != cfg.few_shot_selection:
+        raise ValueError(f"few-shot index was built with selection={index.selection!r} but "
+                         f"cfg.few_shot_selection={cfg.few_shot_selection!r}; pass cfg to build_few_shot_index()")
 
-    query_emb = embed_model.encode(question, convert_to_tensor=True)
+    query = question
+    if index.selection == "skeleton":
+        if question not in index.query_skeletons:
+            raise KeyError(f"No skeleton for question {question!r} in {cfg.skeleton_dir / 'dev.json'}; "
+                           "rerun src/skeleton/masking.py")
+        query = index.query_skeletons[question]
+
+    query_emb = embed_model.encode(query, convert_to_tensor=True)
     scores = util.cos_sim(query_emb, index.embeddings)[0]  # (n_train,)
 
     top_indices = torch.topk(scores, cfg.few_shot_k).indices.tolist()

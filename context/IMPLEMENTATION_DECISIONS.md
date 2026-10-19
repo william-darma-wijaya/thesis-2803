@@ -507,6 +507,57 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 
 **Verifikasi (lokal, fixture Spider sintetis 2 DB / 6 query, embedding & LLM palsu):** sweep menghasilkan 16 + 4 konfigurasi dan pemenang per mode; persentase benar-benar mengubah jumlah tabel/kolom terkirim; ablation dua mode ter-merge di satu CSV, Baseline k=0 → EX 0 dan k≥1 → EX 100 (few-shot benar-benar masuk ke prompt Baseline), `recommend_k` memilih k bersama; `run_model_comparison` menulis direktori per model + `model_comparison.csv`, semua prompt kedua arm berisi tepat k contoh; semua sel kode `eval_pipeline.ipynb` jalan (model default dan model non-default). **Belum** diuji dengan BGE-M3/Qwen/Spider asli. `notebooks/compiled/graphrag_text2sql.ipynb` tetap TIDAK diperbarui (poin 27).
 
+## 29. De-semanticization pertanyaan untuk seleksi few-shot — tahap masking (2026-10-17)
+
+**Masalah (diamati peneliti):** SQL output terpengaruh nama tabel/kolom/value dari contoh few-shot. Contoh dipilih by cosine similarity pertanyaan **mentah**, jadi yang terpilih cenderung yang *topiknya* mirip (sama-sama menyebut "singer", "country"), bukan yang *struktur SQL*-nya mirip.
+
+**Keputusan peneliti:** ikuti Guo et al. (2023), *Prompting GPT-3.5 for Text-to-SQL with De-semanticization and Skeleton Retrieval* (arXiv:2304.13301), versi disederhanakan: kata domain di pertanyaan di-mask jadi `[MASK]`, dan contoh nanti dipilih berdasarkan kemiripan **skeleton**. LLM tetap menerima pertanyaan dan SQL contoh yang **asli** — skeleton hanya untuk seleksi. Tahap ini **masking saja**; retrieval berbasis skeleton belum disambung ke `few_shot.py` (dipikirkan belakangan). Sebelumnya sempat dicoba masking SQL contoh (bukan pertanyaan), dibatalkan sebelum di-commit.
+
+**Implementasi (kode custom skripsi — bukan dari paper, bukan SPIDER):** `src/skeleton/masking.py`. Token di-mask kalau:
+1. angka (POS `NUM` atau digit) — **bukan** `like_num`, karena itu ikut menandai ordinal (`second highest`);
+2. value: di dalam entitas spaCy DAN ber-POS NOUN/PROPN, atau entitas NORP (`French`) — bukan "semua noun", karena itu menghapus `number`/`average`;
+3. kata isi (NOUN/PROPN/ADJ/VERB/NUM) yang lemma-nya cocok kata di nama tabel/kolom DB pertanyaan itu sendiri (`table_names`/`column_names` di `tables.json`, word-by-word, tanpa sinonim);
+4. di dalam tanda kutip (`'Fail'`, `"Homeland Security"`) — **tambahan di luar paper**, pengganti pencocokan isi DB yang dilewati. Sebelum aturan ini, 493 dari 903 pertanyaan ber-kutip masih membawa value yang tidak ter-mask.
+
+`INTENT_WORDS` (number, total, count, average, max/min, sum, most/least, highest/lowest, order, distinct, different, have, be) tidak pernah di-mask oleh aturan 1–3. Alasannya data: di 1030/8034 pertanyaan train+dev, kata intent juga merupakan nama kolom DB-nya (`number` 463, `order` 138, `total` 78, `count` 41 — dari kolom seperti `Number_of_...`, `Order_ID`); lemma-match polos akan menghapusnya. `have`/`be` karena tabel seperti `Has_Pet`/`Is_male` (pola "have … but do not have" = `EXCEPT`). `first`/`last` sengaja TIDAK dilindungi — hampir selalu merujuk `first_name`/`last_name`.
+
+**Penyimpangan dari spec peneliti (md) dan alasannya:**
+- Stopword **tidak** dibuang dari kata skema: spaCy menandai `name` sebagai stopword, jadi `names` tidak akan pernah ter-mask. Tidak perlu juga — sisi pertanyaan hanya mencocokkan kata isi, jadi `in`/`of` di nama skema tidak pernah cocok apa pun.
+- Tokenizer spaCy memecah `id` seperti kontraksi `I'd` (→ `i`, `d`); aturan khusus itu dihapus di `load_nlp()`. Tanpa ini kata skema berisi `i`/`d` dan skeleton rusak (`Find i[MASK] of`).
+
+**Output:** `data/skeletons/{train,dev}.json` (`{db_id, question, skeleton, query}`, 7000 + 1034 pertanyaan), dihitung lokal (`python src/skeleton/masking.py`, ±20 detik) supaya Kaggle tidak butuh spaCy. Rata-rata 4.2 `[MASK]` per pertanyaan; 0.4% train / 0.2% dev tanpa `[MASK]` sama sekali.
+
+**Keterbatasan yang perlu disebut di metodologi:**
+- Noun yang bukan nama skema dan bukan entitas tidak ter-mask: value huruf kecil tanpa kutip (`dog`, `cat`, `fiat`), sinonim (`people` untuk tabel `person`), kata seperti `student` di DB yang tidak punya tabel student.
+- Kata kerja domain ikut ter-mask kalau cocok nama tabel/kolom (`hire` dari tabel `hiring`, `won` dari `Winning_Pilot`).
+- Angka-angka di poin ini (dan contoh Fig. 1 / skor EX di spec peneliti) dari paper belum dicek ulang terhadap paper asli.
+
+**Verifikasi (lokal, Spider asli):** self-check di `masking.py` (contoh spec peneliti `What are the names of the singers who are not French?` → `What are the [MASK] of the [MASK] who are not [MASK]?`, kata intent selamat walau jadi nama kolom, `id` satu token, value berkutip ter-mask utuh, kutip possessive `singers'` bukan value) dijalankan tiap build. Di seluruh 8034 pertanyaan: 0 artefak tokenizer (satu-satunya `[MASK]` menempel adalah `150cm`), 0 value berkutip yang lolos.
+
+**Langkah 1 — cek retrieval tanpa LLM (Kaggle, BGE-M3, 2026-10-17):** `src/skeleton/compare_retrieval.py`, hasil di `outputs/tables/skeleton_retrieval_check.json`. Untuk tiap pertanyaan dev, top-k contoh train diambil by kemiripan pertanyaan mentah (perilaku `few_shot.py` sekarang) vs skeleton, lalu SQL contoh dibandingkan dengan gold SQL dev. Kriteria lanjut (ditetapkan SEBELUM run): `struct_jaccard` k=3 naik dengan p < 0.05 DAN Fig. 1 terbalik. **Keduanya lolos:**
+
+| k=3 (1034 dev × 7000 train) | pertanyaan | skeleton | Wilcoxon p |
+|---|---|---|---|
+| `struct_jaccard` (Jaccard fitur keyword SQL — proxy custom) | 0.442 | 0.635 | 1.3e-68 |
+| `exact_struct` (set fitur identik) | 0.212 | 0.376 | 7.5e-34 |
+| `same_hardness` (`eval_hardness` resmi SPIDER) | 0.449 | 0.570 | 1.6e-19 |
+
+- Konsisten di k=1 (0.461 → 0.656) dan k=5 (0.430 → 0.621).
+- Fig. 1: pertanyaan Q1~Q2 = 0.498 < Q1~Q3 = 0.823; skeleton Q1~Q2 = 0.922 > Q1~Q3 = 0.728 — arah sama dengan paper.
+- Contoh terpilih hampir seluruhnya berbeda: overlap top-k hanya 2.6% / 5.2% / 6.8% (k=1/3/5), top-1 beda di 1007/1034 pertanyaan. Ini perubahan besar pada isi prompt, jadi EX bisa bergeser ke dua arah.
+- Kenaikan `struct_jaccard` per hardness (k=3): easy +0.241, medium +0.218, hard +0.149, extra +0.100 — struktur query sulit (subquery, set operation, JOIN berlapis) kurang terlihat dari kata intent di permukaan.
+
+**Batasan interpretasi:** `struct_jaccard`/`exact_struct` adalah proxy struktural custom, bukan EX, dan menghukum bentuk SQL yang setara (`min(x)` vs `ORDER BY x LIMIT 1`). Retrieval by pertanyaan mentah kadang menang (query identik dari domain berbeda, J=1.00), dan contoh dengan topik mirip juga membawa petunjuk schema linking — jadi kenaikan proxy belum menjamin kenaikan EX. Tidak ada kebocoran data uji: skeleton dev hanya memakai pertanyaan dev + schema DB-nya (tersedia saat inferensi); hardness dari gold SQL hanya untuk analisis.
+
+**Langkah 2 — integrasi (2026-10-17):** `cfg.few_shot_selection` (`"question"` | `"skeleton"`, CLI `--few-shot-selection`, nilai lain ditolak `validate()`). Default **tetap `"question"`** sampai A/B EX langkah 3 memutuskan — sebelum ada bukti EX, perilaku pipeline tidak berubah.
+- `build_few_shot_index(train_json, embed_model, cfg)`: mode `skeleton` meng-embed skeleton train dari `cfg.skeleton_dir/train.json` (dicek sinkron dengan `train_spider.json`) dan menyimpan peta pertanyaan dev → skeleton. Contoh yang dikembalikan tetap `FewShotExample` asli, jadi **isi prompt tidak berubah** (`build_prompt()` tidak disentuh). Tanpa `cfg` = mode `question` (panggilan lama tetap jalan).
+- `retrieve_few_shot_examples()` error kalau mode index ≠ `cfg.few_shot_selection`, atau pertanyaan tidak ada di `dev.json` skeleton — tidak ada fallback diam-diam ke pertanyaan mentah. Peta di-key teks pertanyaan: 1034 pertanyaan dev semuanya unik.
+- Lima pemanggil (`pipeline.py` ×2, `baseline.py`, `ablation.py`, `eval_pipeline.ipynb`) mengoper `cfg`; GraphRAG dan Baseline tetap memakai index yang sama.
+- `ablation.py`: `few_shot_selection` jadi kolom CSV dan bagian kunci merge; nama file mode `skeleton` diberi akhiran (`ablation_{mode}_skeleton_*`, `ablation_ex_per_k_{mode}_skeleton.json`), mode `question` memakai nama lama. Rekomendasi k hanya membandingkan baris dengan selection yang sama. Juga dicatat di `model_comparison.csv` dan `comparison_report.txt`.
+- Tes lokal (encoder palsu, data Spider asli): `python tests/test_few_shot_selection.py` — mode `question` identik dengan perilaku lama, mode `skeleton` memilih contoh lain tapi prompt tetap berisi teks asli, mismatch/pertanyaan asing gagal keras, run A/B tidak saling menimpa, deteksi leak.
+
+**Langkah 3 — A/B dengan LLM (belum dijalankan):** 4 run `ablation.py --sample 1.0 --k-values 3` (2 mode × 2 selection, subset dev identik karena sampling ber-seed), lalu `src/skeleton/compare_ab.py` → EX/ESM berpasangan (McNemar exact) + leak rate: prediksi yang memakai nama yang tidak ada di schema context/pertanyaannya sendiri tapi ada di contoh few-shot (custom, berbasis teks prompt; alias kolom seperti `AS cnt` ikut terhitung "unknown"). Hasil → `outputs/tables/skeleton_ab.json`.
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER

@@ -29,6 +29,10 @@ thesis-2803/
 │   ├── retrieval/
 │   │   ├── retrieval.py    — GraphRAG: two-stage semantic linking, graph traversal, context builder
 │   │   └── baseline.py     — Baseline: table-level graph, table-level semantic linking, context builder
+│   ├── skeleton/
+│   │   ├── masking.py      — de-semanticization (Guo et al., 2023, disederhanakan): pertanyaan → skeleton [MASK] untuk seleksi few-shot; dijalankan lokal (spaCy), tulis data/skeletons/{train,dev}.json (poin 29)
+│   │   ├── compare_retrieval.py — cek tanpa LLM: contoh by skeleton vs by pertanyaan mentah, kemiripan struktur SQL ke gold (Kaggle, hasil di outputs/tables/skeleton_retrieval_check.json)
+│   │   └── compare_ab.py   — A/B `few_shot_selection` dari dua run ablation.py: EX/ESM berpasangan (McNemar) + leak rate
 │   ├── generation/
 │   │   ├── generation.py   — prompt builder, SQL cleaner, model loading (4-bit quantized), greedy decode
 │   │   └── few_shot.py     — few-shot index: pre-compute training set embeddings, dynamic retrieval
@@ -46,6 +50,7 @@ thesis-2803/
 ├── data/
 │   ├── raw_logs/            — INPUT dimensi analisis: baseline_log.json, graphrag_log.json (skema di context/EVALUATION_ANALYSIS_GUIDE.md Bagian 2) — diproduksi oleh `pipeline.py`'s `run_comparison()` (via `--baseline`), BELUM oleh `ablation.py`, lihat TBD di bawah
 │   ├── db_schema/           — schema per db_id untuk validasi SLA
+│   ├── skeletons/           — train.json, dev.json: {db_id, question, skeleton, query}, output `src/skeleton/masking.py`
 │   └── qvt_variations/      — dataset paraphrase NL question untuk metrik QVT (Dimensi 4), dibangun otomatis oleh `build_qvt_variations.py` dari paraphrase alami di `data/spider_data/dev.json` (bukan digenerate manual — lihat IMPLEMENTATION_DECISIONS.md poin 21)
 ├── context/
 │   ├── EVALUATION_ANALYSIS_GUIDE.md — source of truth formula & alur berpikir untuk src/metrics/ dan src/dimensions/ (JANGAN ubah formula/threshold di situ tanpa konfirmasi peneliti)
@@ -70,7 +75,7 @@ Semua modul di `src/` dipanggil sebagai `src.<paket>.<modul>` (mis. `from src.co
 - **`src/metrics/` — SEMUA sudah diimplementasi penuh** (bukan lagi stub): `sla.py`, `esm_ex_cm.py`, `token_consumption.py`, `tep.py`, `qvt.py`. `src/utils/` juga penuh: `schema_utils.py`, `sql_normalize.py` (fix parser JOIN-keyword, lihat `IMPLEMENTATION_DECISIONS.md` poin 11), `raw_logs.py` (helper grouping per difficulty, dipakai lintas `src/dimensions/`).
 - **`src/dimensions/` — KEENAM dimensi sudah diimplementasi** (tidak ada stub tersisa): Dimensi 1 (Efisiensi), 2 (Struktur SQL), 3 (Komponen SQL), 4 (Robustness/QVT), 5 (Bottleneck), 6 (Ablation Few-Shot, interpretasi saja — belum ada data nyata dari `ablation.py`). Dimensi 4 diimplementasi 2026-09-14 (lihat `IMPLEMENTATION_DECISIONS.md` poin 23) — `run_dimension_4()` menerima raw_logs opsional untuk silang-ESM langkah 6, karena data QVT sengaja cuma membawa EX (poin 10). - **`run_all_dimensions.py` — SUDAH terisi** (2026-09-17, lihat `IMPLEMENTATION_DECISIONS.md` poin 24), bukan skeleton lagi. Merangkai raw_logs → 6 dimensi jadi satu run, tulis `outputs/tables/dimensions_results.json` + `dimensions_report.txt`. Perilaku penting: setiap dimensi yang prasyarat datanya belum ada di-**skip dengan alasan + perintah remedy**, bukan crash (exit code 1 HANYA untuk bug tak terduga, bukan untuk "data belum ada") — jadi file ini aman dijalankan kapan saja sebagai checklist kesiapan. Dimensi 5 di-gate oleh hasil Dimensi 2 sesuai guide (`--always-dim5` untuk menimpa); Dimensi 6 butuh `--ex-per-k` manual (lihat open item D); Dimensi 1 di-import lazy dan ter-skip lokal karena `config.py` butuh `torch` (lihat open item C).
 - ✅ **Sudah divalidasi terhadap Spider dev set ASLI** (2026-08-26, bukan cuma sanity test SQLite sintetis lagi) — 1034 query dev set real (`data/spider_data/`, di luar git, lihat `.gitignore`), round-trip test lewat `esm_ex_cm.py`/`sla.py`: 0 exception, 0 kegagalan ESM. Satu limitation data upstream ditemukan (1 baris rusak encoding di `wta_1.sqlite`, pengaruh 0.19% dev set) dan didokumentasikan, bukan diperbaiki (lihat `IMPLEMENTATION_DECISIONS.md` poin 16 untuk alasan lengkap). `run_comparison()` di `pipeline.py` yang menulis `data/raw_logs/*.json` dari pipeline GraphRAG/Baseline sungguhan masih belum pernah dijalankan (butuh GPU/Kaggle, lihat `RESEARCHER_TODO.md`) — yang sudah divalidasi adalah lapisan metrics (`src/metrics/`), bukan pipeline retrieval+generation penuh.
-- **Semua keputusan implementasi** (konflik guide vs kode yang sudah ada, konflik guide vs keterbatasan tooling resmi SPIDER, dan open items yang belum diputuskan) ada di **`context/IMPLEMENTATION_DECISIONS.md`** — 28 keputusan tercatat sejauh ini, termasuk formula Token Consumption, EX order-sensitivity, label difficulty, casing CM clause, keterbatasan `union_all`, fix parser JOIN-keyword, hasil validasi dev set asli, bug fix `_set_op_clause_match()` (UNION/INTERSECT/EXCEPT salah skor akibat mutasi in-place), definisi Baseline final (poin 18), proxy schema-linking vs SLA (poin 19), confound diagnostics read-only (poin 20), QVT variations dari paraphrase alami dev.json (poin 21), penghapusan `few_shot_same_db_first` (poin 22), kontrak silang QVT×ESM di Dimensi 4 (poin 23), orkestrasi 6 dimensi (poin 24), penghapusan `prune_path_nodes()` (poin 25), integrasi pipeline → dimensi (poin 26), seleksi kolom GraphRAG global + threshold + traversal by node ID (poin 27), dan ablation 3 tahap: top-k persentase by SLA, few-shot k sama untuk Baseline & GraphRAG by EX, perbandingan model (poin 28). Open items yang masih terbuka: B (metrics jalan di mana), C (`config.py` mengikat lapisan dimensi ke torch). D (EX per k Dimensi 6) selesai di poin 28.
+- **Semua keputusan implementasi** (konflik guide vs kode yang sudah ada, konflik guide vs keterbatasan tooling resmi SPIDER, dan open items yang belum diputuskan) ada di **`context/IMPLEMENTATION_DECISIONS.md`** — 29 keputusan tercatat sejauh ini, termasuk formula Token Consumption, EX order-sensitivity, label difficulty, casing CM clause, keterbatasan `union_all`, fix parser JOIN-keyword, hasil validasi dev set asli, bug fix `_set_op_clause_match()` (UNION/INTERSECT/EXCEPT salah skor akibat mutasi in-place), definisi Baseline final (poin 18), proxy schema-linking vs SLA (poin 19), confound diagnostics read-only (poin 20), QVT variations dari paraphrase alami dev.json (poin 21), penghapusan `few_shot_same_db_first` (poin 22), kontrak silang QVT×ESM di Dimensi 4 (poin 23), orkestrasi 6 dimensi (poin 24), penghapusan `prune_path_nodes()` (poin 25), integrasi pipeline → dimensi (poin 26), seleksi kolom GraphRAG global + threshold + traversal by node ID (poin 27), dan ablation 3 tahap: top-k persentase by SLA, few-shot k sama untuk Baseline & GraphRAG by EX, perbandingan model (poin 28), de-semanticization pertanyaan untuk seleksi few-shot — tahap masking saja (poin 29). Open items yang masih terbuka: B (metrics jalan di mana), C (`config.py` mengikat lapisan dimensi ke torch). D (EX per k Dimensi 6) selesai di poin 28.
 
 ---
 
@@ -174,6 +179,7 @@ Semua parameter ada di `PipelineConfig` dataclass. **Jangan hardcode nilai di fi
 | `semantic_similarity_threshold` | `0.35` | TBD | Skor minimum (max cosine lintas n-gram) agar kolom dipertahankan; belum terkalibrasi untuk BGE-M3. Tetap di nilai config saat sweep kecuali `sweep.py --thresholds` (poin 27, 28) |
 | `few_shot_k` | `3` | TBD | Dipakai GraphRAG DAN Baseline (selalu sama). Ablation tahap 2 (EX) |
 | `few_shot_frame` | `[0, 1, 3, 5]` | Final | Grid tahap 2 |
+| `few_shot_selection` | `"question"` | TBD | Seleksi few-shot by pertanyaan mentah atau `"skeleton"` (de-semanticization, `data/skeletons/`). Prompt selalu berisi pertanyaan + SQL contoh yang asli. Tunggu A/B EX (`compare_ab.py`, poin 29) |
 | `max_ngram` | `3` | Final | Segmentasi query sampai trigram |
 | `max_new_tokens` | `256` | Final | Budget generasi LLM. `config.py` = `256`; baris ini sebelumnya keliru tertulis `200` — kode selalu pakai `cfg.max_new_tokens`. |
 | `temperature` | `0.0` | Final | Greedy decoding, deterministik |
@@ -186,7 +192,7 @@ Parameter bertanda **TBD** akan diupdate setelah sweep dan ablation selesai.
 
 ## Ablation Study
 
-**Bertahap, 3 tahap** (keputusan peneliti 2026-09-26, `IMPLEMENTATION_DECISIONS.md` poin 28). Tiap tahap memakai pemenang tahap sebelumnya — tulis ke `config.py`, atau oper lewat flag override (`--tables-pct`, `--columns-pct`, `--baseline-tables-pct`, `--threshold`, `--few-shot-k`, `--llm-model`, tersedia di `pipeline.py` dan `ablation.py`).
+**Bertahap, 3 tahap** (keputusan peneliti 2026-09-26, `IMPLEMENTATION_DECISIONS.md` poin 28). Tiap tahap memakai pemenang tahap sebelumnya — tulis ke `config.py`, atau oper lewat flag override (`--tables-pct`, `--columns-pct`, `--baseline-tables-pct`, `--threshold`, `--few-shot-k`, `--few-shot-selection`, `--llm-model`, tersedia di `pipeline.py` dan `ablation.py`).
 
 | Tahap | Parameter | Grid (`config.py`) | Dipilih dengan | Butuh LLM |
 |---|---|---|---|---|
@@ -358,6 +364,12 @@ python src/experiments/sweep.py --rank-by col_recall --thresholds 0.0 0.3 0.35 0
 # Ablation tahap 2 — few-shot k (default few_shot_frame), EX in-process, dua mode terpisah
 python src/experiments/ablation.py --mode baseline --sample 1.0
 python src/experiments/ablation.py --mode graphrag --sample 1.0 --tables-pct 0.6 --columns-pct 0.5
+
+# A/B seleksi few-shot (poin 29): sama k, question vs skeleton, lalu bandingkan
+python src/experiments/ablation.py --mode graphrag --sample 1.0 --k-values 3 --few-shot-selection skeleton
+python src/skeleton/compare_ab.py
+python src/skeleton/masking.py                              # bangun ulang data/skeletons/ (lokal, spaCy)
+USE_TF=0 python tests/test_few_shot_selection.py            # tes lokal seleksi few-shot
 
 # Ablation tahap 3 — semua model di llm_model_frame (atau sebut nama model)
 python src/experiments/pipeline.py --baseline --skip-sweep --models all --sample 1.0

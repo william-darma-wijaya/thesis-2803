@@ -643,7 +643,7 @@ def run_baseline(
     few_shot_idx: FewShotIndex | None = None
     if cfg.few_shot_k > 0:
         logger.info("Building few-shot index (k=%d) …", cfg.few_shot_k)
-        few_shot_idx = build_few_shot_index(cfg.train_json, embed_model)
+        few_shot_idx = build_few_shot_index(cfg.train_json, embed_model, cfg)
 
     # 7. Main loop
     results: list[BaselineResult] = []
