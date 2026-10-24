@@ -122,8 +122,8 @@ predictions.txt → Spider Official Eval (EM + EX)
 Pertanyaan user
         │
         ▼
-[1] Table-Level Semantic Linking  ← single query embedding vs table embeddings
-        │  (bukan n-gram, bukan two-stage), top ceil(baseline_top_k_tables_pct × #tabel)
+[1] Table-Level Semantic Linking  ← n-gram vs table embeddings (sama dengan Stage 1 GraphRAG)
+        │  (n-gram + threshold tabel, SAMA dengan Stage 1 GraphRAG; tanpa tahap kolom; poin 32)
         │  Embed format: "table <name> columns <col1> <col2> ..." (nama natural Spider, sama dengan GraphRAG)
         ▼
 [2] Table Path Tracing            ← shortest path antar tabel via FK edges
@@ -176,7 +176,7 @@ Semua parameter ada di `PipelineConfig` dataclass. **Jangan hardcode nilai di fi
 | `llm_model_frame` | Qwen2.5-Coder 1.5B/3B/7B/14B | Final | Grid ablation tahap 3 (`pipeline.py --baseline --models all`) |
 | `top_k_tables_pct` | `0.0` | Preprocessing | GraphRAG Stage 1 (tetap `0` = tanpa batas, poin 30): `ceil(pct × #tabel DB)`, min 1, `0` = semua. Ablation tahap 1 (`sweep.py`, SLA) |
 | `top_k_columns_pct` | `0.0` | Preprocessing | GraphRAG Stage 2 (tetap `0` = tanpa cap, poin 30): cap `ceil(pct × #kolom di tabel kandidat)` untuk SELURUH pertanyaan, setelah filter threshold; `0` = tanpa cap. Ablation tahap 1 |
-| `baseline_top_k_tables_pct` | `0.6` | TBD | Baseline: `ceil(pct × #tabel DB)`. Dituning terpisah (Baseline tidak punya tahap kolom). Ablation tahap 1 |
+| `baseline_top_k_tables_pct` | `0.0` | Preprocessing | Baseline memilih tabel seperti Stage 1 GraphRAG (n-gram, `table_similarity_threshold`). Ini batas atas opsional `ceil(pct × #tabel DB)`, `0` = tanpa batas (poin 32) |
 | `top_k_frame` | `[0.4, 0.5, 0.6, 0.8]` | Final | Grid tahap 1: GraphRAG tabel×kolom (16), Baseline tabel (4) |
 | `semantic_similarity_threshold` | `0.70` | Tuning | **Pilihan GraphRAG (bersama threshold tabel), poin 30.** Skor minimum (max cosine lintas n-gram) agar kolom dipertahankan; dituning dengan SLA di `graphrag_sla_trial.ipynb`. Tetap di nilai config saat sweep kecuali `sweep.py --thresholds` (poin 27, 28) |
 | `table_similarity_threshold` | `0.60` | Tuning | **Pilihan GraphRAG, poin 30.** Stage 1: skor minimum (max cosine lintas n-gram) agar TABEL jadi kandidat; `0.0` = nonaktif. Dituning terpisah dari threshold kolom, lewat notebook `graphrag_sla_trial.ipynb` (`sweep.py` belum menyapunya) |
@@ -188,7 +188,7 @@ Semua parameter ada di `PipelineConfig` dataclass. **Jangan hardcode nilai di fi
 | `few_shot_k` | `3` | TBD | Dipakai GraphRAG DAN Baseline (selalu sama). Ablation tahap 2 (EX) |
 | `few_shot_frame` | `[0, 1, 3, 5]` | Final | Grid tahap 2 |
 | `few_shot_selection` | `"skeleton"` | Final | Seleksi few-shot by skeleton pertanyaan (de-semanticization, `data/skeletons/`) — default sejak keputusan peneliti 2026-10-19 (poin 30); `"question"` (pertanyaan mentah) tetap ada untuk A/B EX (`compare_ab.py`, poin 29). Prompt selalu berisi pertanyaan + SQL contoh yang asli. Sama untuk GraphRAG dan Baseline |
-| `max_ngram` | `3` | Final | Segmentasi query sampai trigram |
+| `max_ngram` | `2` | Final | Segmentasi query sampai bigram (diubah dari 3, poin 32). Dipakai Stage 1/2 GraphRAG, value linking, dan seleksi tabel Baseline |
 | `max_new_tokens` | `256` | Final | Budget generasi LLM. `config.py` = `256`; baris ini sebelumnya keliru tertulis `200` — kode selalu pakai `cfg.max_new_tokens`. |
 | `temperature` | `0.0` | Final | Greedy decoding, deterministik |
 | `load_in_4bit` | `True` | Final | Kuantisasi NF4 |
@@ -204,7 +204,7 @@ Parameter bertanda **TBD** akan diupdate setelah sweep dan ablation selesai. **P
 
 | Tahap | Parameter | Grid (`config.py`) | Dipilih dengan | Butuh LLM |
 |---|---|---|---|---|
-| 1 | top-k persentase | `top_k_frame`: GraphRAG tabel×kolom (16), Baseline tabel (4) — masing-masing pipeline dapat pemenangnya sendiri | **SLA** (`sla.py`, default F1 level kolom; `--rank-by`) | Tidak |
+| 1 | top-k persentase | `top_k_frame`: GraphRAG tabel×kolom (16), Baseline tabel (4) — **hanya referensi sejak poin 30/32**: kedua pipeline memilih tabel by threshold tanpa top-k%, `sweep.best_config()` = `{}`; threshold dituning di `graphrag_sla_trial.ipynb` | **SLA** (`sla.py`, default F1 level kolom; `--rank-by`) | Tidak |
 | 2 | few-shot k (SAMA untuk kedua pipeline) | `few_shot_frame` | **EX** in-process; k bersama = EX rata-rata kedua mode tertinggi (seri → k lebih kecil) | Ya |
 | 3 | model LLM | `llm_model_frame` | EX (+ token) | Ya |
 

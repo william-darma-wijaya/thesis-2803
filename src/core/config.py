@@ -66,9 +66,12 @@ class PipelineConfig:
     # to become a candidate. 0.0 = disabled. Tuned separately from the column
     # threshold (the score scales differ).
     table_similarity_threshold: float = 0.60
-    max_ngram: int = 3
+    # Longest n-gram of the question (unigram + bigram). Shared by GraphRAG Stage 1/2,
+    # value linking (cell values longer than this many words can no longer match) and
+    # the Baseline table linking.
+    max_ngram: int = 2
     # How stopwords are handled when the question is split into n-grams (GraphRAG
-    # Stage 1 + 2; Baseline embeds the whole question and ignores this):
+    # Stage 1 + 2 and the Baseline table linking):
     #   "none"   : keep every n-gram (original behaviour)
     #   "remove" : drop stopwords from the word list FIRST, then build n-grams
     #              (creates adjacency that is not in the question)
@@ -132,9 +135,11 @@ class PipelineConfig:
     # GraphRAG: 0 / 0 = no cap, only the thresholds select (preprocessing, fixed).
     top_k_tables_pct: float = 0.0
     top_k_columns_pct: float = 0.0
-    # Baseline has no column stage, so only its table fraction is tuned
-    # (separately from GraphRAG's, by the same SLA sweep).
-    baseline_top_k_tables_pct: float = 0.6
+    # Baseline selects tables exactly like GraphRAG Stage 1: n-grams of the question,
+    # max-pool cosine, tables scoring >= table_similarity_threshold. This is an
+    # optional cap on top of that threshold, 0 = no cap (same meaning as
+    # top_k_tables_pct). Both off (0 and threshold <= 0) = every table.
+    baseline_top_k_tables_pct: float = 0.0
 
     # Stage 1 of the ablation study (sweep.py, no LLM, ranked by SLA):
     # GraphRAG = top_k_frame x top_k_frame (tables x columns), Baseline = top_k_frame.

@@ -567,7 +567,7 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 | 1 | Normalisasi nama (`_`/camelCase → spasi, lowercase) | `normalize_identifier()` (selalu) |
 | 2 | Teks embed = nama natural anotasi Spider (`StuID` → `student id`); SQL/DDL/node id tetap nama asli | `embed_natural_names=True` |
 | 3 | Teks kolom = nama kolom saja, tanpa prefix tabel | `build_schema_index(include_table_in_text=False)` |
-| 4 | n-gram 1-3, buang n-gram yang diawali/diakhiri stopword | `max_ngram=3`, `query_stopword_mode="edge"` |
+| 4 | n-gram 1-2 (awalnya 1-3, diubah di poin 32), buang n-gram yang diawali/diakhiri stopword | `max_ngram=2`, `query_stopword_mode="edge"` |
 | 5 | Tanpa batas top-k%, hanya threshold yang menyaring | `top_k_tables_pct=top_k_columns_pct=0` |
 | 6 | Value linking teks (exact match), tanpa angka | `use_value_linking=True`, `value_link_numbers=False`, `value_*` |
 | 7 | Tabel tanpa PK disambung (`same_table`) di graph traversal | `connect_no_pk_tables=True` |
@@ -580,7 +580,7 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 - `sweep.py`: `best_config()` sekarang hanya mengembalikan `baseline_top_k_tables_pct`. Grid top-k% GraphRAG tetap dicetak untuk referensi, tapi tidak lagi ditulis balik ke `cfg` (termasuk `pipeline.py` tanpa `--skip-sweep`), karena akan melanggar preprocessing 5. Ablation tahap 1 (poin 28) untuk GraphRAG kini = tuning T/K di notebook trial.
 - `traversal_graph()` (`retrieval.py`) membangun salinan graph sekali per graph; graph `schema.py` dan DDL tidak berubah (struktur graph tidak disentuh).
 
-**Baseline ikut preprocessing teks schema (keputusan peneliti 2026-10-19):** Baseline = table-level retrieval (poin 18) yang meng-embed `"table <t> columns <c1> <c2> ..."`, jadi nama kolom ikut menentukan tabel yang terpilih. Supaya selisih GraphRAG vs Baseline murni dari cara retrieval (kolom + graph vs tabel), bukan dari kualitas teks schema, preprocessing 1-2 (normalisasi + nama natural) juga dipakai Baseline: `build_table_index(..., use_natural_names=cfg.embed_natural_names)`, nama natural disimpan di node graph tabel (`table_natural`, `columns[*].ColumnNatural`). DDL Baseline tetap nama asli. Preprocessing 3-8 khusus tahap GraphRAG (kolom, n-gram, value linking, traversal) dan tidak punya padanan di Baseline.
+**Baseline ikut preprocessing teks schema (keputusan peneliti 2026-10-19):** Baseline = table-level retrieval (poin 18) yang meng-embed `"table <t> columns <c1> <c2> ..."`, jadi nama kolom ikut menentukan tabel yang terpilih. Supaya selisih GraphRAG vs Baseline murni dari cara retrieval (kolom + graph vs tabel), bukan dari kualitas teks schema, preprocessing 1-2 (normalisasi + nama natural) juga dipakai Baseline: `build_table_index(..., use_natural_names=cfg.embed_natural_names)`, nama natural disimpan di node graph tabel (`table_natural`, `columns[*].ColumnNatural`). DDL Baseline tetap nama asli. Preprocessing 3-8 khusus tahap GraphRAG (kolom, n-gram, value linking, traversal) dan tidak punya padanan di Baseline. **Update 2026-10-24 (poin 32):** seleksi tabel Baseline kini memakai n-gram + threshold yang sama dengan Stage 1 GraphRAG.
 
 **Few-shot (keputusan peneliti 2026-10-19):** default `few_shot_selection = "skeleton"` (poin 29), sama untuk kedua pipeline. `few_shot_k` tetap dipilih lewat ablation tahap 2 (EX).
 
@@ -593,6 +593,23 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 **Perbaikan:** edge FK menyimpan `fks = [{from_table, from_col, to_col}, ...]` (arah + semua FK antar pasangan tabel); DDL menulis baris FK hanya di tabel `from_table`. `from_col`/`to_col` lama tetap ada (FK pertama). Diuji dengan skema sintetis: tabel penghubung (`Has_Pet`), dua FK ke tabel yang sama, FK ke tabel sendiri (`employee.manager_id`), dan `trace_table_paths()` tidak berubah. `eval_pipeline.ipynb` sel 5b mencetak FK langsung dari `tables.json` di samping DDL Baseline untuk cek di data asli.
 
 **Konsekuensi:** prompt Baseline dari run apa pun **sebelum** perbaikan ini memuat baris FK yang salah/kurang; EX Baseline lama tidak sebanding dengan run sesudahnya.
+
+## 32. Seleksi tabel Baseline disamakan dengan Stage 1 GraphRAG; `max_ngram` 3 → 2 (2026-10-24)
+
+**Keputusan peneliti:** sisi pertanyaan dan pemotongan Baseline disamakan dengan GraphRAG, dan n-gram dibatasi sampai **bigram** (trigram tidak diperlukan).
+
+**Yang berubah:**
+- `semantic_linking_table_level()` (`baseline.py`) tidak lagi meng-embed SATU pertanyaan utuh (`"query <pertanyaan>"`, top-k%). Sekarang: pertanyaan dipecah jadi n-gram (`cfg.max_ngram`, `cfg.query_stopword_mode`, fungsi yang sama dengan GraphRAG), skor tabel = max cosine lintas n-gram, tabel lolos kalau skor >= `cfg.table_similarity_threshold`; cadangan 1 tabel terbaik kalau tidak ada yang lolos. Tabel jalur FK (`trace_table_paths`) dan DDL semua-kolom tidak berubah.
+- Pemotongan = threshold tabel yang SAMA dengan GraphRAG (satu field `table_similarity_threshold`). `baseline_top_k_tables_pct` default **0.6 → 0.0** dan kini hanya batas atas opsional (`0` = tanpa batas, arti yang sama dengan `top_k_tables_pct`). Kedua batas mati (pct 0 dan threshold <= 0) = semua tabel.
+- `max_ngram` default **3 → 2**, berlaku global (satu field): Stage 1/2 GraphRAG, value linking (nilai sel > 2 kata tidak bisa lagi cocok), dan Baseline. `graphrag_sla_trial.ipynb` `MAX_NGRAM = 2`.
+- `sweep.best_config()` kini selalu `{}`: tidak ada lagi persentase top-k yang ditulis balik untuk pipeline manapun. Sel sweep (3b) dihapus dari `eval_pipeline.ipynb`; `sweep.py` tetap ada sebagai referensi. Threshold tabel dituning di notebook trial.
+
+**Yang tetap berbeda (sengaja):** unit yang dicocokkan. GraphRAG mencocokkan n-gram ke nama TABEL (Stage 1) lalu ke nama KOLOM (Stage 2); Baseline mencocokkan n-gram ke teks `"table <nama> columns <kolom...>"` dan mengirim seluruh kolom tabel terpilih. Definisi Baseline = table-level retrieval (poin 18) tetap berlaku; yang berubah hanya cara memilih tabelnya.
+
+**Konsekuensi:**
+- Angka SLA G1-G7 (dan G7 P 44.5 / R 91.8) dihitung dengan `max_ngram=3`; **harus dijalankan ulang** dengan `max_ngram=2` sebelum dilaporkan.
+- Skor n-gram pendek terhadap teks tabel panjang (nama + semua kolom) tidak sebanding dengan skor terhadap nama tabel saja, jadi threshold 0.60 belum tentu optimal untuk Baseline. Baseline belum punya notebook trial sendiri: ukur dulu SLA tabel Baseline di beberapa threshold sebelum memakai angka bersama.
+- Run Baseline lama (top-k% dengan satu embedding utuh) tidak sebanding dengan run sesudah perubahan ini.
 
 ## Belum diputuskan / open items
 

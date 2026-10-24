@@ -428,8 +428,9 @@ def main(
         logger.info("Top-k (stage 1): tables_pct=%.2f columns_pct=%.2f threshold=%.2f",
                     cfg.top_k_tables_pct, cfg.top_k_columns_pct, cfg.semantic_similarity_threshold)
     else:
-        logger.info("Top-k (stage 1): baseline_tables_pct=%.2f", cfg.baseline_top_k_tables_pct)
-    logger.info("Make sure these are the sweep.py winners (config.py or --tables-pct/...).")
+        logger.info("Table selection (stage 1): threshold=%.2f baseline_tables_pct=%.2f (0 = no cap)",
+                    cfg.table_similarity_threshold, cfg.baseline_top_k_tables_pct)
+    logger.info("Make sure the thresholds are the winners of graphrag_sla_trial.ipynb (config.py or --threshold).")
 
     logger.info("Loading schema …")
     schema_df = load_spider_schema(cfg.tables_json)

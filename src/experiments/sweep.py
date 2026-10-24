@@ -1,11 +1,15 @@
 """
-Ablation stage 1 — top-k fraction sweep, ranked by SLA (no LLM).
+Top-k fraction sweep, ranked by SLA (no LLM). REFERENCE ONLY since poin 30/32:
+both pipelines now select tables by threshold with no top-k cap, so nothing is
+written back to cfg (best_config() == {}). The thresholds are tuned in
+notebooks/graphrag_sla_trial.ipynb.
 
 Grid (both from config.py's top_k_frame, see IMPLEMENTATION_DECISIONS.md poin 28):
     GraphRAG : top_k_tables_pct x top_k_columns_pct   (cross product, 16 configs)
-    Baseline : baseline_top_k_tables_pct              (no column stage, 4 configs)
+    Baseline : baseline_top_k_tables_pct              (a cap on top of the table
+                                                       threshold, 4 configs)
 semantic_similarity_threshold stays at the config value unless --thresholds is
-given (GraphRAG only; the baseline has no threshold).
+given (GraphRAG only).
 
 Every config is scored with the reportable Schema Linking Accuracy
 (src/metrics/sla.py, NOT the name-matching proxy of retrieval.py): the exact
@@ -183,13 +187,13 @@ def best_config(results: list[SweepResult], rank_by: str) -> dict:
     """
     Winners as {PipelineConfig field: value}, ready for setattr(cfg, ...).
 
-    Only the Baseline table fraction: GraphRAG selects by threshold with no top-k
-    cap (fixed preprocessing, config.py "Schema Linking"), so its top-k grid rows
-    are printed for reference but never written back to cfg. Its thresholds are
-    tuned in notebooks/graphrag_sla_trial.ipynb.
+    Always empty: both pipelines select tables by threshold with no top-k cap
+    (fixed preprocessing, config.py "Schema Linking"; the Baseline follows
+    GraphRAG Stage 1, poin 32), so the top-k grid rows are printed for reference
+    but never written back to cfg. The table/column thresholds are tuned in
+    notebooks/graphrag_sla_trial.ipynb.
     """
-    b = pick_best(results, "baseline", rank_by)
-    return {"baseline_top_k_tables_pct": b.tables_pct}
+    return {}
 
 
 def _print_table(results: list[SweepResult], rank_by: str) -> None:
@@ -303,9 +307,9 @@ def run_sweep(
     print(f"\nBest config (SLA {rank_by}):")
     for attr, value in best.items():
         print(f"  {attr} = {value}")
-    print("-> Put this in config.py (or pass --baseline-tables-pct) before running ablation.py (stage 2).\n"
-          "   GraphRAG rows are for reference only: GraphRAG selects by threshold, no top-k cap\n"
-          "   (fixed preprocessing); tune its thresholds in notebooks/graphrag_sla_trial.ipynb.\n")
+    print("-> Nothing to write back: both pipelines select tables by threshold with no top-k cap\n"
+          "   (fixed preprocessing, poin 30/32), so these rows are for reference only.\n"
+          "   Tune the thresholds in notebooks/graphrag_sla_trial.ipynb.\n")
     return results, best
 
 

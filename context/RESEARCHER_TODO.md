@@ -53,15 +53,13 @@ Ablation bertahap (`IMPLEMENTATION_DECISIONS.md` poin 28) — urutannya wajib,
 tiap tahap memakai pemenang tahap sebelumnya. Setelah tiap tahap, **tulis
 pemenangnya ke `config.py`** (atau oper lewat flag `--tables-pct` dkk).
 
-- [ ] **Tahap 1 — `sweep.py`** (tanpa LLM, cepat): pilih `top_k_tables_pct`,
-  `top_k_columns_pct`, `baseline_top_k_tables_pct` by SLA (saat ini
-  placeholder `0.6`, TBD).
-  ```bash
-  python src/experiments/sweep.py --sample 0.2
-  ```
-  Baca juga `avg_cols_sent` vs `avg_cols_candidate` di `sweep_results.csv`:
-  kalau semua persentase kolom memberi hasil sama, threshold 0.35 yang
-  memotong — pertimbangkan `--thresholds 0.0 0.3 0.35 0.5`.
+- [ ] **Tahap 1 — threshold tabel & kolom** (tanpa LLM, SLA): sejak poin 30/32
+  tidak lagi top-k%. GraphRAG dan Baseline sama-sama memilih tabel by
+  `table_similarity_threshold` (default 0.60), kolom GraphRAG by
+  `semantic_similarity_threshold` (0.70). Dituning di
+  `notebooks/graphrag_sla_trial.ipynb` (jalankan ulang G1-G7 dengan
+  `max_ngram=2`). Baseline belum punya trial sendiri: ukur SLA tabel Baseline
+  di beberapa threshold. `sweep.py` hanya referensi (`best_config()` = `{}`).
 - [ ] **Sebelum tahap 2 — A/B seleksi few-shot** (GPU, `IMPLEMENTATION_DECISIONS.md`
   poin 29, branch `few-shot/skeleton`): `question` vs `skeleton` di k=3, full
   dev set, dengan top-k pemenang tahap 1. Hasil cek tanpa LLM sudah positif

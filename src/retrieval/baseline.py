@@ -9,9 +9,10 @@ Architecture difference:
   - GraphRAG  (column/node) : each node = one column. Semantic linking matches
                                query phrases to individual column embeddings.
   - Baseline  (table/node)  : each node = one table + all its columns. Semantic
-                               linking matches the whole query to table-level
-                               embeddings. Coarser granularity → higher recall,
-                               lower precision.
+                               linking splits the query into n-grams and picks
+                               tables by threshold, exactly like GraphRAG Stage 1,
+                               but against table-level embeddings. Coarser
+                               granularity → higher recall, lower precision.
 
 Everything after retrieval is identical for both arms, INCLUDING few-shot:
 the baseline gets the same cfg.few_shot_k examples as GraphRAG, so the
@@ -56,7 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.core.config import PipelineConfig
 from src.generation.few_shot import FewShotIndex, build_few_shot_block, build_few_shot_index
 from src.generation.generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
-from src.retrieval.retrieval import k_from_pct
+from src.retrieval.retrieval import _extract_phrases, k_from_pct
 from src.core.schema import load_spider_schema, normalize_identifier
 
 logging.basicConfig(
@@ -222,15 +223,21 @@ def semantic_linking_table_level(
     index: TableSchemaIndex,
     user_query: str,
     embed_model: SentenceTransformer,
-    top_k: int = 3,
+    cfg: PipelineConfig,
 ) -> list[str]:
     """
-    Match the user query against table embeddings and return the top-k most
-    similar table node IDs.
+    Select table node IDs for `user_query`, the same way GraphRAG Stage 1 does
+    (retrieval.retrieve_candidate_tables): the question is split into n-grams
+    (cfg.max_ngram, cfg.query_stopword_mode), each table is scored by the best
+    (max) cosine any n-gram gives it, then
+      1. tables below cfg.table_similarity_threshold are dropped;
+      2. if cfg.baseline_top_k_tables_pct > 0, at most
+         k_from_pct(pct, #tables in DB) are kept (a cap, never a target);
+      3. if nothing passes, the single best table is kept.
 
-    Unlike the column-level approach (which decomposes the query into n-grams
-    and matches each phrase separately), this does a SINGLE query-level
-    embedding match — reflecting the notebook's table-level baseline design.
+    The only difference to GraphRAG is WHAT is matched: here the table text is
+    "table <name> columns <c1> <c2> ..." (a table-level unit), there it is the
+    table name, and Baseline has no column stage afterwards.
 
     Returns:
         List of table node IDs (e.g. ["concert_singer.singer", ...])
@@ -238,13 +245,21 @@ def semantic_linking_table_level(
     if not index.table_node_ids:
         return []
 
-    query_emb = embed_model.encode(
-        [f"query {user_query}"], convert_to_tensor=True
-    )
-    scores = util.cos_sim(query_emb, index.table_embeddings)[0]
-    k = min(top_k, len(index.table_node_ids))
-    top_indices = scores.topk(k).indices.tolist()
-    return [index.table_node_ids[i] for i in top_indices]
+    phrases = _extract_phrases(user_query, cfg.max_ngram, cfg.query_stopword_mode, cfg.query_stopwords)
+    if not phrases:
+        return list(index.table_node_ids)
+
+    phrase_emb = embed_model.encode(phrases, convert_to_tensor=True)
+    scores = util.cos_sim(phrase_emb, index.table_embeddings)   # (n_phrases, n_tables)
+    max_scores, _ = scores.max(dim=0)                            # best n-gram per table
+    ranked = torch.argsort(max_scores, descending=True).tolist()
+
+    kept = [i for i in ranked if max_scores[i].item() >= cfg.table_similarity_threshold]
+    if cfg.baseline_top_k_tables_pct > 0:
+        kept = kept[: k_from_pct(cfg.baseline_top_k_tables_pct, len(index.table_node_ids))]
+    if not kept:
+        kept = ranked[:1]   # never return an empty schema
+    return [index.table_node_ids[i] for i in kept]
 
 
 # ---------------------------------------------------------------------------
@@ -418,8 +433,7 @@ def evaluate_table_linking(
 
 def _all_table_nodes(graph: nx.Graph, db_id: str) -> list[str]:
     """All table node ids for `db_id` — used whenever retrieval is bypassed
-    or disabled (full-schema bypass, baseline_top_k_tables_pct=0, or no tables
-    detected)."""
+    or disabled (full-schema bypass, both limits off, or no tables detected)."""
     return [
         n for n, d in graph.nodes(data=True)
         if d.get("database") == db_id and d.get("type") == "table"
@@ -437,15 +451,17 @@ def retrieve_baseline_tables(
     """
     The whole Baseline retrieval step for one question, shared by
     run_single_baseline(), ablation.py, sweep.py and the notebook:
-    top-k tables (k = k_from_pct(cfg.baseline_top_k_tables_pct, tables in DB))
-    -> FK path tracing. baseline_top_k_tables_pct=0 or full-schema bypass ->
-    every table, same semantics as GraphRAG's top_k_tables_pct=0.
+    tables by n-gram similarity >= cfg.table_similarity_threshold (optionally
+    capped by baseline_top_k_tables_pct) -> FK path tracing. Full-schema bypass,
+    or both limits off (pct = 0 and threshold <= 0) -> every table, same
+    semantics as GraphRAG Stage 1.
     """
-    if cfg.use_full_schema_bypass or cfg.baseline_top_k_tables_pct <= 0:
+    if cfg.use_full_schema_bypass or (
+        cfg.baseline_top_k_tables_pct <= 0 and cfg.table_similarity_threshold <= 0
+    ):
         return _all_table_nodes(graph, db_id)
 
-    k = k_from_pct(cfg.baseline_top_k_tables_pct, len(table_index.table_node_ids))
-    detected = semantic_linking_table_level(table_index, question, embed_model, top_k=k)
+    detected = semantic_linking_table_level(table_index, question, embed_model, cfg)
     if not detected:
         return _all_table_nodes(graph, db_id)
     return trace_table_paths(graph, detected)
