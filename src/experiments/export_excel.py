@@ -16,6 +16,7 @@ ditampilkan dengan format %.
 Usage (dari root repo, lokal maupun Kaggle):
     python src/experiments/export_excel.py
     python src/experiments/export_excel.py --out outputs/tables/hasil_skripsi.xlsx
+    python src/experiments/export_excel.py --skip-missing --out hasil_trial.xlsx   # ekspor parsial
     python src/experiments/export_excel.py --raw-logs-dir data/raw_logs/Qwen2.5-Coder-3B-Instruct \
         --tables-dir outputs/models/Qwen2.5-Coder-3B-Instruct/tables
 """
@@ -85,6 +86,7 @@ class Page:
         self.r = 1
         self.widths: dict[int, float] = {}
         self.spans: list[tuple[int, int, int, str]] = []   # (row, first col, last col, text)
+        self.missing = False   # sumber data sheet ini tidak ada sama sekali (bukan "dilewati dengan alasan")
         c = self.ws.cell(self.r, 1, heading)
         c.font = _font(bold=True, size=14, color=NAVY)
         self.r += 1
@@ -344,6 +346,7 @@ def _dim_record(dims: dict | None, n: int):
 def _status_page(page: Page, rec) -> bool:
     """Tulis alasan kalau dimensi tidak 'ok'. True kalau sheet bisa dilanjutkan."""
     if rec is None:
+        page.missing = True
         page.text("Dimensi ini belum dijalankan (dimensions_results.json tidak memuatnya).", fill=AMBER)
         return False
     if rec.get("status") != "ok":
@@ -561,6 +564,7 @@ def sheet_ablation(wb, df):
              "EX/ESM dihitung in-process per query. k bersama untuk Baseline dan GraphRAG = k dengan rata-rata EX kedua pipeline tertinggi "
              "(seri -> k lebih kecil). Baris hijau di tabel ringkas = k pemenang.")
     if df is None:
+        p.missing = True
         p.text("outputs/tables/ablation_results.csv belum ada. Jalankan ablation.py --mode baseline dan --mode graphrag.", fill=AMBER)
         return p
     if "few_shot_selection" not in df.columns:
@@ -594,6 +598,7 @@ def sheet_models(wb, df):
     p = Page(wb, "Perbandingan Model", "Ablation Tahap 3: Perbandingan Model LLM",
              "Satu baris per model dan pipeline. EX/ESM in-process; T = T_in + α × T_out.")
     if df is None:
+        p.missing = True
         p.text("outputs/tables/model_comparison.csv belum ada. Jalankan pipeline.py --baseline --models ...", fill=AMBER)
         return p
     p.caption("Ringkasan per model")
@@ -641,6 +646,7 @@ def sheet_trial(wb, df):
              "Setiap baris = satu konfigurasi preprocessing (G1-G7) pada satu pasangan threshold. P = precision, R = recall (SLA resmi). "
              "'gold tak kosong' = tanpa 42 query bergold kosong yang selalu bernilai 0 di SLA resmi (diagnostik).")
     if df is None:
+        p.missing = True
         p.text("outputs/tables/sla_trial_recap.csv belum ada. Jalankan graphrag_sla_trial.ipynb sampai rekap bagian 9.", fill=AMBER)
         return p
     rp = p.kv("Target precision", 0.50, PCT, "Baris hijau = kolom P dan R (gold tak kosong) memenuhi KEDUA target.", input_cell=True)
@@ -728,7 +734,9 @@ GLOSSARY = [
 ]
 
 
-def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path) -> Path:
+def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing: bool = False) -> Path:
+    """skip_missing=True: buang sheet yang sumbernya tidak ada (untuk ekspor parsial, mis. hanya trial SLA
+    atau hanya ablation), alih-alih menampilkan sheet berisi catatan "belum ada"."""
     wb = Workbook()
     summary = Page(wb, "Ringkasan", "Ringkasan Hasil: GraphRAG vs Baseline Text-to-SQL (Spider dev)",
                    f"Dibuat otomatis oleh src/experiments/export_excel.py pada {datetime.now():%Y-%m-%d %H:%M}. "
@@ -751,10 +759,12 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path) -> Path:
         stats = {c: _condition_stats(logs[c]) for c in logs}
 
     # --- sheet berurutan (Ringkasan sudah dibuat paling depan)
-    sheet_main(summary, stats, _alpha_default())
-    summary.caption("Temuan per dimensi analisis")
-    summary.table_text(["Dimensi", "Status", "Kesimpulan"], _findings(dims))
-    summary.gap()
+    if stats or not skip_missing:
+        sheet_main(summary, stats, _alpha_default())
+    if dims or not skip_missing:
+        summary.caption("Temuan per dimensi analisis")
+        summary.table_text(["Dimensi", "Status", "Kesimpulan"], _findings(dims))
+        summary.gap()
     summary.caption("Sumber data yang terbaca")
     sources = [
         ("raw_logs Baseline", logs["baseline"] is not None, str(raw_logs_dir / "baseline_log.json")),
@@ -779,6 +789,10 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path) -> Path:
         pages.append(sheet_configs(wb, cfg_frames))
     for pg in pages:
         pg.finish()
+    if skip_missing:
+        for pg in pages:
+            if pg.missing:
+                wb.remove(pg.ws)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
@@ -790,8 +804,10 @@ def main() -> int:
     ap.add_argument("--raw-logs-dir", default="data/raw_logs")
     ap.add_argument("--tables-dir", default="outputs/tables")
     ap.add_argument("--out", default="outputs/tables/hasil_skripsi.xlsx")
+    ap.add_argument("--skip-missing", action="store_true",
+                    help="Buang sheet yang sumber datanya belum ada (ekspor parsial: hanya trial SLA, hanya ablation, dst.).")
     args = ap.parse_args()
-    out = build_workbook(Path(args.raw_logs_dir), Path(args.tables_dir), Path(args.out))
+    out = build_workbook(Path(args.raw_logs_dir), Path(args.tables_dir), Path(args.out), args.skip_missing)
     print(f"Excel tersimpan: {out}")
     return 0
 
