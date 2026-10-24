@@ -160,7 +160,7 @@ def run_single(
     """
     # --- Build schema index if not supplied (fallback, not the hot path) ---
     if schema_index is None:
-        schema_index = build_schema_index(graph, db_id, embed_model)
+        schema_index = build_schema_index(graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
 
     # --- Schema retrieval (Stage 1 tables -> Stage 2 columns -> traversal) ---
     column_nodes, _ = retrieve_graphrag_schema(graph, db_id, question, schema_index, embed_model, cfg)
@@ -485,7 +485,7 @@ def main(cfg: PipelineConfig) -> None:
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_data))
     logger.info("Pre-building schema indices for %d databases …", len(unique_db_ids))
     schema_cache: dict[str, SchemaIndex] = {
-        db_id: build_schema_index(graph, db_id, embed_model)
+        db_id: build_schema_index(graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
         for db_id in tqdm(unique_db_ids, desc="Indexing schemas")
     }
 
@@ -730,14 +730,14 @@ def run_comparison(
     logger.info("Building column graph (GraphRAG) …")
     col_graph = build_schema_graph(schema_df)
     col_cache: dict[str, "SchemaIndex"] = {
-        db_id: build_schema_index(col_graph, db_id, embed_model)
+        db_id: build_schema_index(col_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
         for db_id in tqdm(unique_db_ids, desc="Indexing columns")
     }
 
     logger.info("Building table graph (Baseline) …")
     tbl_graph = build_table_graph(schema_df)
     tbl_cache = {
-        db_id: build_table_index(tbl_graph, db_id, embed_model)
+        db_id: build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
         for db_id in tqdm(unique_db_ids, desc="Indexing tables")
     }
 

@@ -180,15 +180,16 @@ def pick_best(results: list[SweepResult], mode: str, rank_by: str) -> SweepResul
 
 
 def best_config(results: list[SweepResult], rank_by: str) -> dict:
-    """Winners as {PipelineConfig field: value}, ready for setattr(cfg, ...)."""
-    g = pick_best(results, "graphrag", rank_by)
+    """
+    Winners as {PipelineConfig field: value}, ready for setattr(cfg, ...).
+
+    Only the Baseline table fraction: GraphRAG selects by threshold with no top-k
+    cap (fixed preprocessing, config.py "Schema Linking"), so its top-k grid rows
+    are printed for reference but never written back to cfg. Its thresholds are
+    tuned in notebooks/graphrag_sla_trial.ipynb.
+    """
     b = pick_best(results, "baseline", rank_by)
-    return {
-        "top_k_tables_pct": g.tables_pct,
-        "top_k_columns_pct": g.columns_pct,
-        "semantic_similarity_threshold": g.sim_threshold,
-        "baseline_top_k_tables_pct": b.tables_pct,
-    }
+    return {"baseline_top_k_tables_pct": b.tables_pct}
 
 
 def _print_table(results: list[SweepResult], rank_by: str) -> None:
@@ -271,9 +272,9 @@ def run_sweep(
     embed_model = SentenceTransformer(cfg.embedding_model)
 
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item, _ in samples))
-    col_cache = {db_id: build_schema_index(col_graph, db_id, embed_model)
+    col_cache = {db_id: build_schema_index(col_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
                  for db_id in tqdm(unique_db_ids, desc="Indexing columns")}
-    tbl_cache = {db_id: build_table_index(tbl_graph, db_id, embed_model)
+    tbl_cache = {db_id: build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
                  for db_id in tqdm(unique_db_ids, desc="Indexing tables")}
     n_cols_db = {db_id: len(table_nodes_to_schema(tbl_graph, _all_table_nodes(tbl_graph, db_id)))
                  for db_id in unique_db_ids}
@@ -302,8 +303,9 @@ def run_sweep(
     print(f"\nBest config (SLA {rank_by}):")
     for attr, value in best.items():
         print(f"  {attr} = {value}")
-    print("-> Put these in config.py (or pass --tables-pct/--columns-pct/--baseline-tables-pct/"
-          "--threshold) before running ablation.py (stage 2).\n")
+    print("-> Put this in config.py (or pass --baseline-tables-pct) before running ablation.py (stage 2).\n"
+          "   GraphRAG rows are for reference only: GraphRAG selects by threshold, no top-k cap\n"
+          "   (fixed preprocessing); tune its thresholds in notebooks/graphrag_sla_trial.ipynb.\n")
     return results, best
 
 

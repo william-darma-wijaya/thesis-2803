@@ -28,6 +28,7 @@ from sentence_transformers import SentenceTransformer, util
 
 from src.core.config import PipelineConfig
 from src.core.schema import normalize_identifier
+from src.retrieval.value_linking import extract_question_numbers, get_value_index, link_values
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +55,24 @@ def build_schema_index(
     graph: nx.Graph,
     db_name: str,
     embed_model: SentenceTransformer,
+    include_table_in_text: bool = False,
+    use_natural_names: bool = False,
 ) -> SchemaIndex:
     """
     Precompute table-level and column-level embeddings for `db_name`.
     Call once per database before running queries against it.
+
+    Column embeddings use the humanized COLUMN name only ("song release year"),
+    not "table column": the table name leaked into every column of a table
+    (n-gram "singer" lifted all singer.* columns to ~0.8), which made Stage 2
+    behave like table selection again. The table is already known from Stage 1
+    (columns are scored only inside candidate tables) and from the graph node
+    id, so nothing is lost. `include_table_in_text=True` restores the old
+    "table column" text, for A/B comparison.
+
+    `use_natural_names=True` (PipelineConfig.embed_natural_names) embeds Spider's
+    annotated names ("student id") instead of the original ones ("StuID"); the
+    index still returns original names and node ids.
     """
     col_nodes = [
         (n, d)
@@ -72,18 +87,22 @@ def build_schema_index(
     col_node_ids = [n for n, _ in col_nodes]
     columns = [d["column"] for _, d in col_nodes]
     col_table_map = [d["table"] for _, d in col_nodes]
-    # Encode as "table column" (humanized) — gives the embedder full relational
-    # context. "employees name" is unambiguous; "name" alone loses the table.
+    if use_natural_names:
+        text_col = [d.get("column_natural") or d["column"] for _, d in col_nodes]
+        text_tbl = {d["table"]: d.get("table_natural") or d["table"] for _, d in col_nodes}
+    else:
+        text_col, text_tbl = columns, {t: t for t in col_table_map}
     col_texts = [
-        f"{normalize_identifier(t)} {normalize_identifier(c)}"
-        for t, c in zip(col_table_map, columns)
+        f"{normalize_identifier(text_tbl[t])} {normalize_identifier(c)}" if include_table_in_text
+        else normalize_identifier(c)
+        for t, c in zip(col_table_map, text_col)
     ]
     col_embeddings = embed_model.encode(col_texts, convert_to_tensor=True)
 
     # --- Table index (unique tables, deduplicated) ---
     tables = list(dict.fromkeys(col_table_map))  # preserves order, deduplicates
     table_embeddings = embed_model.encode(
-        [normalize_identifier(t) for t in tables], convert_to_tensor=True
+        [normalize_identifier(text_tbl[t]) for t in tables], convert_to_tensor=True
     )
 
     return SchemaIndex(
@@ -112,17 +131,44 @@ def precompute_column_embeddings(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _extract_phrases(query: str, max_ngram: int) -> list[str]:
-    """Return all unique word n-grams (up to max_ngram) from a cleaned query."""
+def _extract_phrases(
+    query: str,
+    max_ngram: int,
+    stopword_mode: str = "none",
+    stopwords: frozenset[str] | set[str] | list[str] = (),
+) -> list[str]:
+    """
+    Return all unique word n-grams (up to max_ngram) from a cleaned query.
+
+    stopword_mode (see PipelineConfig.query_stopword_mode):
+      "none"   : every n-gram.
+      "remove" : stopwords are dropped from the word list before n-grams are built.
+      "edge"   : n-grams are built from the original order; those that start or end
+                 with a stopword are dropped (inner stopwords are kept).
+    If filtering would leave nothing (e.g. a question made only of stopwords) the
+    unfiltered n-grams are returned, so the caller never gets an empty list for a
+    non-empty question.
+    """
     clean = re.sub(r"[^\w\s]", "", query.lower())
     words = clean.split()
-    return list(
-        {
-            " ".join(words[i : i + length])
+    stop = set(stopwords)
+
+    def ngrams(ws: list[str]) -> list[str]:
+        return list(dict.fromkeys(
+            " ".join(ws[i : i + length])
             for length in range(1, max_ngram + 1)
-            for i in range(len(words) - length + 1)
-        }
-    )
+            for i in range(len(ws) - length + 1)
+        ))
+
+    all_phrases = ngrams(words)
+    if stopword_mode == "remove":
+        phrases = ngrams([w for w in words if w not in stop])
+    elif stopword_mode == "edge":
+        phrases = [p for p in all_phrases
+                   if p.split(" ", 1)[0] not in stop and p.rsplit(" ", 1)[-1] not in stop]
+    else:
+        return all_phrases
+    return phrases or all_phrases
 
 
 def k_from_pct(pct: float, n: int) -> int:
@@ -153,15 +199,24 @@ def retrieve_candidate_tables(
     cfg: PipelineConfig,
 ) -> list[str]:
     """
-    Return the top-k most relevant table names for `query`, with
-    k = k_from_pct(cfg.top_k_tables_pct, number of tables in the database).
+    Return the candidate table names for `query`.
 
-    If `cfg.top_k_tables_pct` is 0, all tables are returned (two-stage disabled).
+    Each table is scored by the best (max) cosine similarity any query n-gram
+    gives it, then:
+      1. tables scoring below cfg.table_similarity_threshold are dropped
+         (0.0 = no threshold);
+      2. at most k = k_from_pct(cfg.top_k_tables_pct, tables in the database)
+         are kept (a cap, never a target; top_k_tables_pct == 0 = no cap);
+      3. if nothing passes the threshold, the single best table is kept so the
+         schema is never empty.
+
+    Both limits off (pct == 0 and threshold <= 0) -> all tables (two-stage disabled).
     """
-    if cfg.top_k_tables_pct <= 0 or index.table_embeddings is None:
+    no_cap = cfg.top_k_tables_pct <= 0
+    if (no_cap and cfg.table_similarity_threshold <= 0) or index.table_embeddings is None:
         return index.tables
 
-    phrases = _extract_phrases(query, cfg.max_ngram)
+    phrases = _extract_phrases(query, cfg.max_ngram, cfg.query_stopword_mode, cfg.query_stopwords)
     if not phrases:
         return index.tables
 
@@ -170,10 +225,15 @@ def retrieve_candidate_tables(
 
     # Max-pool across phrases: best score any phrase gave each table
     max_scores, _ = scores.max(dim=0)  # (n_tables,)
+    ranked = torch.argsort(max_scores, descending=True).tolist()
 
-    k = k_from_pct(cfg.top_k_tables_pct, len(index.tables))
-    selected_indices = _top_k_indices(max_scores, k)
-    selected_tables = [index.tables[i] for i in selected_indices]
+    kept = [i for i in ranked if max_scores[i].item() >= cfg.table_similarity_threshold]
+    if not no_cap:
+        kept = kept[: k_from_pct(cfg.top_k_tables_pct, len(index.tables))]
+    if not kept:
+        kept = ranked[:1]  # fallback: never return an empty schema
+
+    selected_tables = [index.tables[i] for i in kept]
 
     logger.debug("Stage 1 — candidate tables for '%s': %s", query[:50], selected_tables)
     return selected_tables
@@ -225,7 +285,7 @@ def retrieve_candidate_columns(
     filtered_emb = index.col_embeddings[col_mask]            # (n_filtered, d)
     filtered_node_ids = [n for n, m in zip(index.col_node_ids, col_mask.tolist()) if m]
 
-    phrases = _extract_phrases(query, cfg.max_ngram)
+    phrases = _extract_phrases(query, cfg.max_ngram, cfg.query_stopword_mode, cfg.query_stopwords)
     if not phrases:
         return []
 
@@ -348,11 +408,56 @@ def trace_schema_paths(
     return column_nodes, paths, relations
 
 
+# One augmented copy per schema graph (built once, reused by every question).
+_TRAVERSAL_GRAPHS: dict[int, tuple[nx.Graph, nx.Graph]] = {}
+
+
+def traversal_graph(graph: nx.Graph, cfg: PipelineConfig) -> nx.Graph:
+    """
+    The graph trace_schema_paths() walks on. With cfg.connect_no_pk_tables, a copy
+    in which the columns of every table WITHOUT a primary key are connected to
+    each other ("same_table" edges): junction tables like Has_Pet(StuID, PetID)
+    otherwise have no intra-table edge and split the graph. Tables with a PK are
+    untouched (their columns already meet at the PK).
+    """
+    if not cfg.connect_no_pk_tables:
+        return graph
+    hit = _TRAVERSAL_GRAPHS.get(id(graph))
+    if hit is not None and hit[0] is graph:
+        return hit[1]
+    aug = graph.copy()
+    by_table: dict[tuple[str, str], list[str]] = {}
+    has_pk: set[tuple[str, str]] = set()
+    for n, d in graph.nodes(data=True):
+        if d.get("type") != "column":
+            continue
+        key = (d["database"], d["table"])
+        by_table.setdefault(key, []).append(n)
+        if d.get("is_pk"):
+            has_pk.add(key)
+    for key, cols in by_table.items():
+        if key in has_pk:
+            continue
+        for i in range(len(cols)):
+            for j in range(i + 1, len(cols)):
+                if not aug.has_edge(cols[i], cols[j]):
+                    aug.add_edge(cols[i], cols[j], relation="same_table")
+    _TRAVERSAL_GRAPHS[id(graph)] = (graph, aug)
+    return aug
+
+
 def _all_column_nodes(graph: nx.Graph, db_name: str) -> list[str]:
     return [
         n for n, d in graph.nodes(data=True)
         if d.get("database") == db_name and d.get("type") == "column"
     ]
+
+
+def value_linked_columns(graph: nx.Graph, db_name: str, question: str, cfg: PipelineConfig) -> list[str]:
+    """Column node ids whose cell values exactly match a question n-gram or number (value_linking.py)."""
+    phrases = _extract_phrases(question, cfg.max_ngram, cfg.query_stopword_mode, cfg.query_stopwords)
+    numbers = extract_question_numbers(question, cfg) if cfg.value_link_numbers else []
+    return link_values(phrases, get_value_index(graph, db_name, cfg), cfg, numbers)
 
 
 def retrieve_graphrag_schema(
@@ -370,7 +475,8 @@ def retrieve_graphrag_schema(
 
     Returns:
         column_nodes     : node IDs whose DDL goes into the prompt (detected
-                           columns + every node on the traversal paths), in a
+                           columns + every node on the traversal paths, or only
+                           the FK-edge endpoints with traversal_mode="fk_only"), in a
                            deterministic order so the prompt is reproducible
         candidate_tables : Stage-1 tables (for the sweep's selectivity diagnostic)
 
@@ -381,13 +487,25 @@ def retrieve_graphrag_schema(
 
     candidate_tables = retrieve_candidate_tables(question, index, embed_model, cfg)
     detected = retrieve_candidate_columns(question, index, candidate_tables, embed_model, cfg)
+    if cfg.use_value_linking:
+        # Value-matched columns join the anchors even if their table missed Stage 1.
+        linked = value_linked_columns(graph, db_name, question, cfg)
+        detected = list(dict.fromkeys(detected + linked))
+        candidate_tables = list(dict.fromkeys(
+            candidate_tables + [graph.nodes[n]["table"] for n in linked]))
     if not detected:
         return _all_column_nodes(graph, db_name), candidate_tables
 
-    c_nodes, paths, _ = trace_schema_paths(graph, db_name, detected)
+    c_nodes, paths, relations = trace_schema_paths(traversal_graph(graph, cfg), db_name, detected)
+    if cfg.traversal_mode == "fk_only":
+        # Only the JOIN columns of the paths: a PK reached through belongs_to_pk
+        # edges stays out unless it is itself an FK endpoint (or an anchor).
+        path_nodes = [n for r in relations if r["relation"] == "foreign_key" for n in (r["from"], r["to"])]
+    else:
+        path_nodes = [n for path in paths for n in path]
     # dict.fromkeys, not set(): set order follows string hashing, which changes
     # between Python processes and would reorder the CREATE TABLE blocks.
-    column_nodes = list(dict.fromkeys(c_nodes + [n for path in paths for n in path]))
+    column_nodes = list(dict.fromkeys(c_nodes + path_nodes))
     return column_nodes, candidate_tables
 
 
