@@ -42,7 +42,8 @@ thesis-2803/
 │   │   ├── pipeline.py     — orchestration utama, CLI entry point, Spider evaluation; `--baseline` juga memicu QVT + 6 dimensi lewat `run_dimension_analysis()`
 │   │   ├── sweep.py        — ablation TAHAP 1: top-k persentase (GraphRAG tabel×kolom, Baseline tabel) dari `top_k_frame`, tanpa LLM, diranking SLA resmi (`sla.py`)
 │   │   ├── ablation.py     — ablation TAHAP 2: few-shot k dari `few_shot_frame` × {baseline, graphrag}, EX/ESM in-process, pilih k by EX
-│   │   ├── export_excel.py — rangkum hasil run (raw_logs, dimensions_results.json, ablation/model/trial CSV) jadi satu workbook Excel `outputs/tables/hasil_skripsi.xlsx` untuk dokumentasi; kolom selisih berupa rumus, sheet yang sumbernya belum ada diberi catatan
+│   │   ├── result_tables.py — tabel hasil sebagai DataFrame berformat (perbandingan utama, per difficulty, SLA, diagnostik SQL, per query, D1-D6, ablation/model/trial, output Spider resmi); dipakai `eval_pipeline.ipynb` (`show()`) DAN `export_excel.py`, jadi angka keduanya identik. Hanya angka faktual: field interpretasi di dimensions_results.json tidak dibaca
+│   │   ├── export_excel.py — rangkum hasil run (raw_logs, confound_diagnostics.json, spider_official_eval.csv, dimensions_results.json, ablation/model/trial CSV) jadi satu workbook Excel `outputs/tables/hasil_skripsi.xlsx`; tiap tabel = Excel Table (filter), format %/pp/token, header dibekukan, sheet yang sumbernya belum ada diberi catatan
 │   │   ├── build_qvt_variations.py — bangun data/qvt_variations/*.json dari paraphrase alami dev.json + raw_logs (lihat IMPLEMENTATION_DECISIONS.md poin 21)
 │   │   └── run_all_dimensions.py — entry point evaluasi: baca raw_logs, jalankan 6 dimensi analisis
 │   ├── utils/               — helper evaluasi: schema_utils.py (load/validasi db_schema), sql_execution.py (eksekusi SQLite aman)

@@ -421,18 +421,18 @@ def _format_confound_diag(diag: dict) -> str:
         "  Outer JOIN usage  (LEFT/RIGHT/FULL — normalized to JOIN for parsing, poin 11)",
         f"    gold queries with outer JOIN       : {diag['outer_join_gold']:>4}  ({diag['outer_join_gold']/n*100:.1f}%)",
         f"    GraphRAG predictions               : {diag['outer_join_pred_graphrag']:>4}  "
-        f"(ESM=1 & EX=0, norm may be masking a real diff: {diag['outer_join_norm_masked_graphrag']})",
+        f"(ESM=1 & EX=0: {diag['outer_join_norm_masked_graphrag']})",
         f"    Baseline predictions               : {diag['outer_join_pred_baseline']:>4}  "
         f"(ESM=1 & EX=0: {diag['outer_join_norm_masked_baseline']})",
         "",
         "  EX order-sensitivity  (official EX=0 but order-insensitive row multiset matches gold)",
         f"    GraphRAG : {diag['ex0_orderinsensitive_match_graphrag']:>4}   "
         f"(gold has ORDER BY: {diag['ex0_orderinsensitive_match_graphrag_gold_orderby']}, "
-        f"likely false-negative: {g_fn})",
+        f"gold without ORDER BY: {g_fn})",
         f"    Baseline : {diag['ex0_orderinsensitive_match_baseline']:>4}   "
         f"(gold has ORDER BY: {diag['ex0_orderinsensitive_match_baseline_gold_orderby']}, "
-        f"likely false-negative: {b_fn})",
-        f"    asymmetry (GraphRAG - Baseline) in likely false-negatives : {g_fn - b_fn:+d}",
+        f"gold without ORDER BY: {b_fn})",
+        f"    difference (GraphRAG - Baseline), gold without ORDER BY : {g_fn - b_fn:+d}",
         f"    gold SQL unexecutable (excluded)   : {diag['gold_unexecutable']}",
         "=" * 70,
         "",
@@ -577,6 +577,7 @@ def run_dimension_analysis(
     ex_per_k: dict | None = None,
     always_dim5: bool = False,
     qvt_dir: Path = Path("data/qvt_variations"),
+    verbose: bool = True,
 ) -> dict:
     """
     Run the thesis's 6 analysis dimensions over raw_logs_dir and write
@@ -597,6 +598,8 @@ def run_dimension_analysis(
     ex_per_k : {k: EX 0-100} for Dimension 6 (not stored machine-readably by
                ablation.py, see open item D); None -> Dimension 6 is skipped
                with an explanation.
+    verbose  : False -> do not print the text report (eval_pipeline.ipynb shows
+               the numbers as tables instead); files are written either way.
     """
     from src.experiments.build_qvt_variations import build_qvt_files
     from src.experiments.run_all_dimensions import run_all, save_dimension_outputs
@@ -613,7 +616,8 @@ def run_dimension_analysis(
         raw_logs_dir=raw_logs_dir, qvt_dir=qvt_dir, only=only,
         ex_per_k=ex_per_k, always_dim5=always_dim5,
     )
-    print(report)
+    if verbose:
+        print(report)
     save_dimension_outputs(results, report, out_dir)
     return results
 
@@ -934,6 +938,7 @@ def run_comparison(
     print(report)
     report_path = out_dir / "tables" / "comparison_report.txt"
     report_path.write_text(report, encoding="utf-8")
+    (out_dir / "tables" / "confound_diagnostics.json").write_text(json.dumps(confound_diag, indent=2), encoding="utf-8")
     logger.info("Comparison report → %s", report_path)
     logger.info(
         "Confound diag — outer JOIN gold=%d graphrag=%d baseline=%d | "
