@@ -13,6 +13,8 @@ sqlglot>=23.0.0
 # Data handling
 pandas>=2.0.0
 numpy>=1.24.0
+# Export hasil ke Excel (src/experiments/export_excel.py); sudah ada di Kaggle
+openpyxl>=3.1.0
 
 # De-semanticization (src/skeleton/masking.py), lokal saja — hasilnya di-commit ke
 # data/skeletons/, jadi Kaggle tidak butuh spaCy. Model: python -m spacy download en_core_web_sm
