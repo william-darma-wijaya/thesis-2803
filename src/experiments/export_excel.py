@@ -207,6 +207,7 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
     ablation = _read_csv(tables_dir / "ablation_results.csv")
     models = _read_csv(tables_dir / "model_comparison.csv")
     trial = _read_csv(tables_dir / "sla_trial_recap.csv")
+    trial_vs = _read_csv(tables_dir / "sla_trial_vs_baseline.csv")
     cfg_frames = [d for f in sorted(glob.glob(str(tables_dir / "sla_trial_T*_K*.csv")))
                   if (d := _read_csv(Path(f), index_col=0)) is not None]
     have_logs = bool(logs["baseline"]) and bool(logs["graphrag"])
@@ -250,6 +251,10 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
     add("Overall", "Overall comparison", [rt.overall_comparison(b, g, alpha)] if have_logs else [], raw_missing,
         f"Computed from raw_logs. T = T_in + {alpha:g} × T_out.")
     add("By Difficulty", "Metrics by difficulty", [rt.by_difficulty(b, g, alpha)] if have_logs else [], raw_missing)
+    add("Token Reduction", "Column & token reduction vs Baseline",
+        (rt.token_reduction(b, g, alpha) + [rt.token_reduction_by_difficulty(b, g)]) if have_logs else [], raw_missing,
+        "Paired per query (same questions, same few-shot examples). Reduction = 1 − ΣGraphRAG / ΣBaseline; "
+        "positive = GraphRAG uses less. See IMPLEMENTATION_DECISIONS.md poin 33.")
     add("Retrieval", "Schema linking accuracy (SLA)",
         [rt.retrieval_metrics(b, g), rt.retrieval_by_difficulty(b, g)] if have_logs else [], raw_missing)
     diag = ([rt.prediction_checks(b, g), rt.outcome_matrix(b, g), rt.paired_ex(b, g), rt.sql_feature_usage(b, g),
@@ -272,7 +277,7 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
 
     add("Ablation", "Ablation stage 2: few-shot k", rt.ablation_tables(ablation), f"{tables_dir}/ablation_results.csv")
     add("Models", "Ablation stage 3: LLM comparison", rt.model_tables(models), f"{tables_dir}/model_comparison.csv")
-    add("SLA Trial", "GraphRAG schema-linking trial (SLA)", rt.sla_trial_tables(trial, cfg_frames),
+    add("SLA Trial", "GraphRAG schema-linking trial (SLA)", rt.sla_trial_tables(trial, cfg_frames, trial_vs),
         f"{tables_dir}/sla_trial_recap.csv")
 
     if skip_missing:

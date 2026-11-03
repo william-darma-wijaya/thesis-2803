@@ -60,7 +60,23 @@ pemenangnya ke `config.py`** (atau oper lewat flag `--tables-pct` dkk).
   `notebooks/graphrag_sla_trial.ipynb` (jalankan ulang G1-G7 dengan
   `max_ngram=2`). Baseline belum punya trial sendiri: ukur SLA tabel Baseline
   di beberapa threshold. `sweep.py` hanya referensi (`best_config()` = `{}`).
-- [ ] **Sebelum tahap 2 — A/B seleksi few-shot** (GPU, `IMPLEMENTATION_DECISIONS.md`
+  **Update 2026-11-03 (poin 33):** notebook trial tidak lagi memilih threshold
+  otomatis. Baca rekap bagian 9 + tabel GraphRAG vs Baseline di T yang sama
+  (bagian 9b: reduksi kolom, token schema, token prompt, SLA), lalu **isi
+  `BEST_T` / `BEST_K` sendiri** dan tulis ke `config.py`. Baseline memakai T yang
+  sama (tidak perlu trial Baseline terpisah).
+- [x] **Open item E** — DIPUTUSKAN 2026-11-03 (poin 34): ablation di dev set
+  (contoh few-shot tetap dari train), sampel 20% stratified per difficulty
+  (`SAMPLE_RATIO = 0.20` di notebook trial, `--sample 0.2` di `ablation.py` /
+  `ablation_fewshot.ipynb`). Keterbatasan "dipilih dan dilaporkan di dev" WAJIB
+  ditulis di metodologi (teks poin 34). Hasil trial/ablation lama (sampel acak)
+  harus dijalankan ulang.
+- [ ] **Cari nilai α** dari pricing Qwen (atau model terdekat) → isi
+  `token_output_weight` di `config.py` (satu-satunya tempat), plus sumber/tanggal
+  untuk disclaimer TEP.
+- [x] ~~**Sebelum tahap 2 — A/B seleksi few-shot**~~ — TIDAK dijalankan (poin 33):
+  `skeleton` dipakai langsung. Catatan lama dibiarkan untuk riwayat.
+  (GPU, `IMPLEMENTATION_DECISIONS.md`
   poin 29, branch `few-shot/skeleton`): `question` vs `skeleton` di k=3, full
   dev set, dengan top-k pemenang tahap 1. Hasil cek tanpa LLM sudah positif
   (`outputs/tables/skeleton_retrieval_check.json`); yang ini memutuskan dengan EX.
@@ -78,11 +94,12 @@ pemenangnya ke `config.py`** (atau oper lewat flag `--tables-pct` dkk).
   rekomendasi "shared" setelah dua mode selesai). Juga menghasilkan
   `outputs/tables/ablation_ex_per_k_graphrag.json` untuk Dimensi 6.
   ```bash
-  python src/experiments/ablation.py --mode baseline --sample 1.0
-  python src/experiments/ablation.py --mode graphrag --sample 1.0
+  python src/experiments/ablation.py --mode baseline --sample 0.2
+  python src/experiments/ablation.py --mode graphrag --sample 0.2
   ```
-- [ ] **Tahap 3 — perbandingan model** (GPU): semua model di
-  `llm_model_frame` dengan config tahap 1+2, lalu tentukan `llm_model` final.
+- [ ] **Tahap 3 — perbandingan model** (GPU, dijalankan TERAKHIR): Qwen2.5-Coder
+  3B / 7B / 14B (`llm_model_frame`, 1.5B dibuang — poin 33) dengan best config
+  tahap 1+2, kedua pipeline.
   ```bash
   python src/experiments/pipeline.py --baseline --skip-sweep --models all --sample 1.0
   ```

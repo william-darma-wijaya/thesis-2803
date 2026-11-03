@@ -314,6 +314,72 @@ def retrieval_by_difficulty(baseline_logs: list, graphrag_logs: list) -> pd.Data
                          title="Column-level SLA by difficulty")
 
 
+def token_reduction(baseline_logs: list, graphrag_logs: list, alpha: float) -> list:
+    """
+    Column reduction vs token reduction vs EX, GraphRAG terhadap Baseline di query yang sama
+    (src/metrics/token_reduction.py, IMPLEMENTATION_DECISIONS.md poin 33). Reduction = 1 − ΣG/ΣB,
+    positif = GraphRAG lebih hemat. Baris token schema/non-schema butuh raw_logs dengan field
+    `schema_tokens` (run sesudah 2026-11-03); log lama hanya mengisi baris kolom dan T_in.
+    """
+    from src.metrics import token_reduction as tr
+
+    pairs = tr.pair_logs(baseline_logs, graphrag_logs)
+    if not pairs:
+        return []
+    summ = tr.reduction_summary(pairs, alpha)
+    rows = [{"Quantity": v["label"], "Baseline (mean)": v["baseline_mean"], "GraphRAG (mean)": v["graphrag_mean"],
+             "Reduction (1 − ΣG/ΣB)": v["reduction"], "Median per-query reduction": v["median_reduction"],
+             "Queries": v["n"]} for v in summ.values()]
+    main = with_formats(pd.DataFrame(rows), {"Baseline (mean)": "num1", "GraphRAG (mean)": "num1",
+                                             "Reduction (1 − ΣG/ΣB)": "rel", "Median per-query reduction": "rel",
+                                             "Queries": "int"},
+                        title="Column & token reduction: GraphRAG vs Baseline (paired, same queries)")
+
+    bs, gs = [b for b, _ in pairs], [g for _, g in pairs]
+    ex_b, ex_g = sum(e["ex_result"] for e in bs) / len(bs), sum(e["ex_result"] for e in gs) / len(gs)
+    facts = [("Queries paired", len(pairs), "int"), ("EX Baseline", ex_b, "pct"), ("EX GraphRAG", ex_g, "pct"),
+             ("Δ EX (GraphRAG − Baseline)", (ex_g - ex_b) * 100, "pp")]
+    if "schema_tokens" in summ:
+        sb = sum(e["schema_tokens"] for e in bs) / sum(e["token_input"] for e in bs)
+        facts.append(("Schema share of Baseline T_in (Σschema / ΣT_in)", sb, "pct"))
+    dec = tr.column_decomposition(pairs)
+    if dec:
+        facts += [("Column reduction: table-selection effect", dec["table_selection"], "rel"),
+                  ("Column reduction: column-pruning effect", dec["column_pruning"], "rel")]
+    for label, logs in (("Baseline", bs), ("GraphRAG", gs)):
+        rate = tr.full_schema_rate(logs)
+        if rate is not None:
+            facts.append((f"Prompts containing the whole database ({label})", rate, "pct"))
+    detail = pd.DataFrame([{"Metric": m, "Value": v, "_kind": k} for m, v, k in facts])
+    detail = with_formats(detail, row_kind={"cols": ["Value"]}, title="Reduction context: EX, schema share, decomposition")
+    return [main, detail]
+
+
+def token_reduction_by_difficulty(baseline_logs: list, graphrag_logs: list) -> pd.DataFrame:
+    """Column reduction, schema-token reduction, T_in reduction, dan Δ EX per tingkat kesulitan."""
+    from src.metrics.token_reduction import pair_logs, total_reduction
+
+    pairs = pair_logs(baseline_logs, graphrag_logs)
+    rows = []
+    for d in DIFFICULTIES + ["all"]:
+        sel = [(b, g) for b, g in pairs if d == "all" or g["difficulty"] == d]
+        if not sel:
+            continue
+        red = lambda get: total_reduction([get(g) for _, g in sel], [get(b) for b, _ in sel])
+        has_schema = all("schema_tokens" in b and "schema_tokens" in g for b, g in sel)
+        ex_b = sum(b["ex_result"] for b, _ in sel) / len(sel)
+        ex_g = sum(g["ex_result"] for _, g in sel) / len(sel)
+        rows.append({"Difficulty": DIFF_LABEL[d], "Queries": len(sel),
+                     "Column reduction": red(lambda e: len(e["predicted_schema"])),
+                     "Schema-token reduction": red(lambda e: e["schema_tokens"]) if has_schema else None,
+                     "T_in reduction": red(lambda e: e["token_input"]),
+                     "EX Baseline": ex_b, "EX GraphRAG": ex_g, "Δ EX": (ex_g - ex_b) * 100})
+    return with_formats(pd.DataFrame(rows), {"Queries": "int", "Column reduction": "rel",
+                                             "Schema-token reduction": "rel", "T_in reduction": "rel",
+                                             "EX Baseline": "pct", "EX GraphRAG": "pct", "Δ EX": "pp"},
+                        title="Column & token reduction by difficulty")
+
+
 def outcome_matrix(baseline_logs: list, graphrag_logs: list) -> pd.DataFrame:
     """Jumlah query per kombinasi EX × ESM, per pipeline."""
     rows = []
@@ -771,10 +837,29 @@ _TRIAL_SPEC = [("trial", "Trial", None, None), ("table_threshold", "Table thresh
                ("col_P", "Column P", "pct", None), ("col_R", "Column R", "pct", None), ("col_F1", "Column F1", "pct", None),
                ("col_P_ne", "Column P (non-empty gold)", "pct", None), ("col_R_ne", "Column R (non-empty gold)", "pct", None),
                ("cols_sent", "Columns in prompt", "num1", None), ("col_reduction", "Column reduction vs full DB", "pct", None),
+               ("cols_tables_full", "Columns of prompt tables (full)", "num1", None),
+               ("schema_tokens", "Schema tokens (DDL)", "num1", None),
+               ("prompt_tokens_k0", "Prompt tokens (zero-shot)", "num1", None),
                ("n", "Queries", "int", None)]
 
+_TRIAL_VS_SPEC = [("table_threshold", "Table threshold (T)", "num2", None), ("column_threshold", "Column threshold (K)", "num2", None),
+                  ("tbl_R", "GraphRAG table R", "pct", None), ("col_P_ne", "GraphRAG column P (non-empty gold)", "pct", None),
+                  ("col_R_ne", "GraphRAG column R (non-empty gold)", "pct", None),
+                  ("col_R_ne_B", "Baseline column R (non-empty gold)", "pct", None),
+                  ("cols_G", "Columns GraphRAG", "num1", None), ("cols_B", "Columns Baseline", "num1", None),
+                  ("cols_red", "Column reduction", "rel", None),
+                  ("schema_tok_G", "Schema tokens GraphRAG", "num1", None), ("schema_tok_B", "Schema tokens Baseline", "num1", None),
+                  ("schema_tok_red", "Schema-token reduction", "rel", None),
+                  ("prompt_tok_G", "Prompt tokens GraphRAG (k=0)", "num1", None),
+                  ("prompt_tok_B", "Prompt tokens Baseline (k=0)", "num1", None),
+                  ("prompt_tok_red", "Prompt-token reduction (k=0)", "rel", None),
+                  ("table_effect", "Column reduction: table-selection effect", "rel", None),
+                  ("prune_effect", "Column reduction: column-pruning effect", "rel", None),
+                  ("n", "Queries", "int", None)]
 
-def sla_trial_tables(recap: Optional[pd.DataFrame], configs: Optional[list]) -> list:
+
+def sla_trial_tables(recap: Optional[pd.DataFrame], configs: Optional[list],
+                     vs_baseline: Optional[pd.DataFrame] = None) -> list:
     out = []
     if recap is not None and not recap.empty:
         out.append(_select(recap, _TRIAL_SPEC, "SLA trial · recap (G1-G7)"))
@@ -784,4 +869,6 @@ def sla_trial_tables(recap: Optional[pd.DataFrame], configs: Optional[list]) -> 
         df = df.reset_index().sort_values(["table_threshold", "column_threshold", "pipeline"])
         out.append(_select(df, [("pipeline", "Pipeline", None, None)] + _TRIAL_SPEC[1:3] + _TRIAL_SPEC[8:],
                            "SLA trial · per threshold pair"))
+    if vs_baseline is not None and not vs_baseline.empty:
+        out.append(_select(vs_baseline, _TRIAL_VS_SPEC, "SLA trial · GraphRAG (T, K) vs Baseline at the same T"))
     return out
