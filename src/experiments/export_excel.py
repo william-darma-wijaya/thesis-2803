@@ -251,7 +251,9 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
         sh.finish(freeze_col)
         sheets.append(sh)
 
-    # Urutan sheet: metrik -> dimensi -> rincian pendukung.
+    # Urutan sheet: ringkasan 6 metrik -> rincian metrik -> dimensi -> rincian pendukung.
+    add("Summary", "Six metrics: summary", [rt.metrics_summary_table(metrics)] if metrics else [],
+        f"{tables_dir}/metrics_results.json", "1-Stage = baseline in code; 2-Stage = graphrag in code.")
     metric_groups = rt.metric_tables(metrics) if metrics else []
     for name, title, tables in metric_groups:
         add(name, title, tables, f"{tables_dir}/metrics_results.json", "1-Stage = baseline in code; 2-Stage = graphrag in code.")

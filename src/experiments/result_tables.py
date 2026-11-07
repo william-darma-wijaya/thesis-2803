@@ -490,6 +490,44 @@ def _qvt_table(qvt: dict) -> pd.DataFrame:
     return with_formats(pd.DataFrame(rows), {"QVT": "pct", "Queries included": "int", "Queries total": "int"}, title="QVT")
 
 
+def metrics_summary_table(results: dict) -> pd.DataFrame:
+    """Satu tabel berisi keenam metrik. CM tetap satu baris per klausa, tidak dirata-ratakan (guide 1.4)."""
+    m = results["metrics"]
+    rows = []
+
+    def add(label, vb, vg, kind, note=""):
+        delta = None
+        if not (is_missing(vb) or is_missing(vg)):
+            delta = (vg - vb) * (100 if kind == "pct" else 1)
+        rows.append({"Metric": label, "1-Stage": vb, "2-Stage": vg, "Difference (2-Stage − 1-Stage)": delta,
+                     "Note": note, "_kind": kind})
+
+    for key, label in (("table", "SLA table F1"), ("column", "SLA column F1")):
+        b, g = m["sla"]["baseline"][key] or {}, m["sla"]["graphrag"][key] or {}
+        add(label, b.get("f1"), g.get("f1"), "pct")
+    b, g = m["sla"]["baseline"]["column"] or {}, m["sla"]["graphrag"]["column"] or {}
+    add("SLA column precision", b.get("precision"), g.get("precision"), "pct")
+    add("SLA column recall", b.get("recall"), g.get("recall"), "pct")
+    add("ESM", m["esm"]["baseline"]["overall"], m["esm"]["graphrag"]["overall"], "pct")
+    add("EX", m["ex"]["baseline"]["overall"], m["ex"]["graphrag"]["overall"], "pct")
+    for clause in CLAUSES:
+        vb, vg = m["cm"]["baseline"].get(clause), m["cm"]["graphrag"].get(clause)
+        if vb is not None or vg is not None:
+            add(f"CM {CLAUSE_LABEL[clause]}", vb, vg, "pct")
+    token = m["token_tep"]["token"]
+    add("Mean input tokens (T_in)", token["baseline"].get("t_in"), token["graphrag"].get("t_in"), "num1")
+    add("Mean output tokens (T_out)", token["baseline"].get("t_out"), token["graphrag"].get("t_out"), "num1")
+    add("Mean token consumption (T)", token["baseline"].get("t_mean"), token["graphrag"].get("t_mean"), "num1")
+    tep = m["token_tep"]["tep"]
+    add("TEP (2-Stage vs 1-Stage)", None, tep.get("tep"), "num4", tep.get("reason", ""))
+    qvt_b, qvt_g = m["qvt"]["baseline"], m["qvt"]["graphrag"]
+    add("QVT", qvt_b.get("qvt"), qvt_g.get("qvt"), "pct", qvt_g.get("reason", ""))
+    return with_formats(pd.DataFrame(rows), {},
+                        {"cols": ["1-Stage", "2-Stage", "Difference (2-Stage − 1-Stage)"],
+                         "delta": ["Difference (2-Stage − 1-Stage)"]},
+                        "Six metrics: 1-Stage vs 2-Stage")
+
+
 def metric_tables(results: dict) -> list:
     """[(nama sheet, judul, [tabel])] untuk keenam metrik, berurutan, dipakai notebook DAN Excel."""
     m = results["metrics"]
@@ -697,7 +735,8 @@ def dim2_tables(dims: Optional[dict]) -> list:
     for d in ["overall"] + DIFFICULTIES:
         get = (lambda c: e[c]["overall"]) if d == "overall" else (lambda c, d=d: e[c]["by_difficulty"].get(d))
         b, g = get("baseline"), get("graphrag")
-        if not b or not g:
+        # Tingkat kesulitan tanpa query (mis. pada sampel kecil) bernilai None.
+        if not b or not g or b["esm"] is None or g["esm"] is None:
             continue
         rows.append({"Difficulty": "All" if d == "overall" else DIFF_LABEL[d],
                      "ESM Baseline": b["esm"] / 100, "ESM GraphRAG": g["esm"] / 100, "Δ ESM": g["esm"] - b["esm"],

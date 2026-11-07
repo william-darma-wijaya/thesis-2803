@@ -64,6 +64,20 @@ def test_six_metrics_values():
     assert m["qvt"]["graphrag"] == {"status": "ok", "qvt": 0.5, "queries_included": 1, "queries_total": 2}
 
 
+def test_summary_table_has_all_six_metrics_in_one_table():
+    with tempfile.TemporaryDirectory() as d:
+        table = rt.metrics_summary_table(build_metrics_results(BASELINE, GRAPHRAG, 3.0, qvt_dir=_qvt_dir(Path(d))))
+    rows = table.set_index("Metric")
+    for metric in ("SLA column F1", "ESM", "EX", "CM SELECT", "CM WHERE", "Mean token consumption (T)", "TEP (2-Stage vs 1-Stage)", "QVT"):
+        assert metric in rows.index, metric
+    assert "CM HAVING" not in rows.index  # klausa tanpa nilai tidak ditampilkan
+    assert abs(rows.loc["EX", "Difference (2-Stage − 1-Stage)"] - 50.0) < 1e-9
+    assert rows.loc["Mean token consumption (T)", "Difference (2-Stage − 1-Stage)"] == -50
+    assert abs(rows.loc["TEP (2-Stage vs 1-Stage)", "2-Stage"] - (-2.6)) < 1e-9
+    trial = rt.metrics_summary_table(build_metrics_results(BASELINE, GRAPHRAG, 3.0)).set_index("Metric")
+    assert "run penuh" in trial.loc["QVT", "Note"]
+
+
 def test_qvt_and_tep_not_available():
     trial = build_metrics_results(BASELINE, GRAPHRAG, 3.0)
     assert trial["metrics"]["qvt"]["baseline"]["status"] == "not_available"
@@ -95,7 +109,7 @@ def test_excel_has_metric_sheets_in_order():
         out = build_workbook(run / "raw_logs", run / "tables", run / "tables" / "hasil.xlsx")
         wb = load_workbook(out)
         names = wb.sheetnames
-        assert names[:7] == ["Info", "M1 SLA", "M2 ESM", "M3 EX", "M4 CM", "M5 Token TEP", "M6 QVT"]
+        assert names[:8] == ["Info", "Summary", "M1 SLA", "M2 ESM", "M3 EX", "M4 CM", "M5 Token TEP", "M6 QVT"]
         assert names.index("M6 QVT") < names.index("Dimensions") < names.index("Overall")
         assert any("TEP" in str(c.value) for row in wb["M5 Token TEP"].iter_rows() for c in row)
         wb.close()
@@ -116,7 +130,7 @@ def test_combine_three_models():
         json_path, xlsx_path = cm.write_outputs(runs, warnings, Path(d) / "out", Path(d) / "none")
         assert set(json.loads(json_path.read_text(encoding="utf-8"))["models"]) == set(runs)
         wb = load_workbook(xlsx_path)
-        assert wb.sheetnames[:3] == ["Info", "Summary", "M1 SLA"]
+        assert wb.sheetnames[:4] == ["Info", "Summary", "All Metrics", "M1 SLA"]
         wb.close()
 
 

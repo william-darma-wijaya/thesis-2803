@@ -143,6 +143,11 @@ def write_outputs(runs: dict, warnings: list, out_dir: Path, shared_tables_dir: 
     summary.table(summary_table(runs))
     summary.finish()
 
+    all_metrics = Sheet(wb, "All Metrics", "Six metrics per model, one row per metric")
+    for table in _concat_by_title([(s, [rt.metrics_summary_table(r["metrics"])]) for s, r in runs.items()]):
+        all_metrics.table(table)
+    all_metrics.finish()
+
     per_metric = [(s, rt.metric_tables(r["metrics"])) for s, r in runs.items()]
     for idx, (sheet_name, title, _) in enumerate(per_metric[0][1]):
         sheet = Sheet(wb, sheet_name, title)

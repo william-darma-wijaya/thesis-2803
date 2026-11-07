@@ -577,11 +577,13 @@ def run_metrics_analysis(
     cfg: PipelineConfig,
     sample_ratio: float,
     qvt_dir: Path = Path("data/qvt_variations"),
+    save: bool = True,
 ) -> dict:
     """
-    Six metrics of one model from raw_logs_dir -> out_dir/metrics_results.json.
-    On a full run this also builds the QVT data, so call run_dimension_analysis()
-    afterwards with build_qvt=False. Shared by run_comparison() and eval_pipeline.ipynb.
+    Six metrics of one model from raw_logs_dir -> out_dir/metrics_results.json
+    (save=False: only return them; eval_pipeline.ipynb saves at the very end).
+    On a full run this also builds the QVT data, so run the dimensions afterwards
+    with build_qvt=False. Shared by run_comparison() and eval_pipeline.ipynb.
     """
     from src.experiments.build_qvt_variations import build_qvt_files
     from src.experiments.metrics_summary import build_metrics_results, run_metadata, save_metrics_results
@@ -600,8 +602,36 @@ def run_metrics_analysis(
         qvt_dir=qvt_dir if full_dev else None, qvt_conditions=qvt_conditions,
         meta=run_metadata(cfg, sample_ratio),
     )
-    logger.info("Six metrics saved -> %s", save_metrics_results(results, out_dir))
+    if save:
+        logger.info("Six metrics saved -> %s", save_metrics_results(results, out_dir))
     return results
+
+
+def compute_dimension_analysis(
+    raw_logs_dir: Path,
+    dev_json: Path,
+    full_dev: bool,
+    ex_per_k: dict | None = None,
+    always_dim5: bool = False,
+    qvt_dir: Path = Path("data/qvt_variations"),
+    build_qvt: bool = True,
+) -> tuple[dict, str]:
+    """The 6 dimensions as (results, text report), without writing any result file."""
+    from src.experiments.build_qvt_variations import build_qvt_files
+    from src.experiments.run_all_dimensions import run_all
+
+    only = [1, 2, 3, 4, 5, 6] if full_dev else [1, 2, 3, 5, 6]
+    if full_dev and build_qvt:
+        with open(dev_json, "r", encoding="utf-8") as f:
+            dev_data = json.load(f)
+        build_qvt_files(dev_data, raw_logs_dir, qvt_dir)
+    elif not full_dev:
+        logger.info("Subsampled run -> QVT/Dimension 4 skipped (needs the full dev set).")
+
+    return run_all(
+        raw_logs_dir=raw_logs_dir, qvt_dir=qvt_dir, only=only,
+        ex_per_k=ex_per_k, always_dim5=always_dim5,
+    )
 
 
 def run_dimension_analysis(
@@ -638,20 +668,11 @@ def run_dimension_analysis(
                the numbers as tables instead); files are written either way.
     build_qvt: False -> run_metrics_analysis() already built the QVT data for this run.
     """
-    from src.experiments.build_qvt_variations import build_qvt_files
-    from src.experiments.run_all_dimensions import run_all, save_dimension_outputs
+    from src.experiments.run_all_dimensions import save_dimension_outputs
 
-    only = [1, 2, 3, 4, 5, 6] if full_dev else [1, 2, 3, 5, 6]
-    if full_dev and build_qvt:
-        with open(dev_json, "r", encoding="utf-8") as f:
-            dev_data = json.load(f)
-        build_qvt_files(dev_data, raw_logs_dir, qvt_dir)
-    elif not full_dev:
-        logger.info("Subsampled run -> QVT/Dimension 4 skipped (needs the full dev set).")
-
-    results, report = run_all(
-        raw_logs_dir=raw_logs_dir, qvt_dir=qvt_dir, only=only,
-        ex_per_k=ex_per_k, always_dim5=always_dim5,
+    results, report = compute_dimension_analysis(
+        raw_logs_dir, dev_json, full_dev, ex_per_k=ex_per_k, always_dim5=always_dim5,
+        qvt_dir=qvt_dir, build_qvt=build_qvt,
     )
     if verbose:
         print(report)
