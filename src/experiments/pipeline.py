@@ -75,6 +75,8 @@ from src.core.schema import build_schema_graph, load_spider_schema
 from src.metrics import esm_ex_cm
 from src.utils.sql_normalize import normalize_sql_file_for_parsing
 from src.metrics.sla import extract_ground_truth_schema
+from src.utils.prompt_stats import columns_per_table, prompt_stats
+from src.utils.sampling import stratified_sample
 from src.utils.schema_utils import load_db_schema
 from src.utils.sql_execution import compare_execution_results, execute_sql
 
@@ -747,6 +749,7 @@ def run_comparison(
         BaselineResult,
         build_table_graph,
         build_table_index,
+        build_table_schema_context,
         run_single_baseline,
         _save_log        as bl_save_log,
         _save_csv        as bl_save_csv,
@@ -771,12 +774,9 @@ def run_comparison(
 
     # Deterministic subsample (same for both modes)
     if sample_ratio < 1.0:
-        n = max(1, int(len(dev_data) * sample_ratio))
-        rng = np.random.default_rng(cfg.seed)
-        indices = rng.choice(len(dev_data), size=n, replace=False)
-        dev_data = [dev_data[i] for i in sorted(indices)]
+        dev_data = stratified_sample(dev_data, sample_ratio, cfg.seed)   # per difficulty (poin 34)
         logger.info(
-            "Comparison sample: %d / total questions (%.0f%%)",
+            "Comparison sample: %d / total questions (%.0f%% per difficulty)",
             len(dev_data), sample_ratio * 100,
         )
 
@@ -795,6 +795,9 @@ def run_comparison(
         db_id: build_schema_index(col_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
         for db_id in tqdm(unique_db_ids, desc="Indexing columns")
     }
+
+    # Per-table column counts for the column/token reduction fields (poin 33).
+    table_cols = columns_per_table(col_graph)
 
     logger.info("Building table graph (Baseline) …")
     tbl_graph = build_table_graph(schema_df)
@@ -905,12 +908,16 @@ def run_comparison(
                 difficulty = g_eval.difficulty
 
                 query_id = f"dev_{i + 1:04d}"
+                g_schema_list = _column_nodes_to_predicted_schema(col_graph, g_column_nodes)
+                b_schema_list = _table_nodes_to_predicted_schema(tbl_graph, b_table_nodes)
+                b_context = build_table_schema_context(tbl_graph, b_table_nodes) if b_table_nodes else ""
                 graphrag_raw_logs.append({
                     "query_id": query_id, "db_id": db_id, "difficulty": difficulty,
                     "gold_sql": gold_sql, "predicted_sql": g_pred,
                     "gold_schema": gold_schema,
-                    "predicted_schema": _column_nodes_to_predicted_schema(col_graph, g_column_nodes),
+                    "predicted_schema": g_schema_list,
                     "token_input": g_n_in, "token_output": g_n_out,
+                    **prompt_stats(g_schema_list, db_id, table_cols, g_schema, tokenizer),
                     "esm_result": g_eval.esm, "ex_result": g_eval.ex,
                     "cm_per_clause": g_eval.cm_per_clause,
                 })
@@ -918,8 +925,9 @@ def run_comparison(
                     "query_id": query_id, "db_id": db_id, "difficulty": difficulty,
                     "gold_sql": gold_sql, "predicted_sql": b_pred,
                     "gold_schema": gold_schema,
-                    "predicted_schema": _table_nodes_to_predicted_schema(tbl_graph, b_table_nodes),
+                    "predicted_schema": b_schema_list,
                     "token_input": b_n_in, "token_output": b_n_out,
+                    **prompt_stats(b_schema_list, db_id, table_cols, b_context, tokenizer),
                     "esm_result": b_eval.esm, "ex_result": b_eval.ex,
                     "cm_per_clause": b_eval.cm_per_clause,
                 })

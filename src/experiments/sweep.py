@@ -62,6 +62,7 @@ from src.retrieval.retrieval import (
     column_nodes_to_schema,
     retrieve_graphrag_schema,
 )
+from src.utils.sampling import stratified_sample
 from src.utils.schema_utils import load_db_schema
 
 logging.basicConfig(
@@ -255,11 +256,8 @@ def run_sweep(
 
     with open(cfg.dev_json, "r", encoding="utf-8") as f:
         dev_data = json.load(f)
-    n = max(1, int(len(dev_data) * sample_ratio))
-    rng = np.random.default_rng(cfg.seed)
-    indices = rng.choice(len(dev_data), size=n, replace=False)
-    dev_subset = [dev_data[i] for i in sorted(indices)]
-    logger.info("Sweep subset: %d / %d questions", n, len(dev_data))
+    dev_subset = stratified_sample(dev_data, sample_ratio, cfg.seed)   # per difficulty (poin 34)
+    logger.info("Sweep subset: %d / %d questions", len(dev_subset), len(dev_data))
 
     # Gold schema once per question (official Spider parser, see sla.py).
     db_schema = load_db_schema(str(cfg.tables_json))

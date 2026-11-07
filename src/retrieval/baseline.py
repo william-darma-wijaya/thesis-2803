@@ -656,10 +656,8 @@ def run_baseline(
         dev_data = json.load(f)
 
     if sample_ratio < 1.0:
-        n = max(1, int(len(dev_data) * sample_ratio))
-        rng = np.random.default_rng(cfg.seed)
-        indices = rng.choice(len(dev_data), size=n, replace=False)
-        dev_data = [dev_data[i] for i in sorted(indices)]
+        from src.utils.sampling import stratified_sample
+        dev_data = stratified_sample(dev_data, sample_ratio, cfg.seed)   # per difficulty (poin 34)
         logger.info("Evaluating %d / total samples (%.0f%%)", len(dev_data), sample_ratio * 100)
 
     # 3. Embedding model

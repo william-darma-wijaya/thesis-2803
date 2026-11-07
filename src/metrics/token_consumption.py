@@ -14,18 +14,17 @@ AutoTokenizer.from_pretrained akan redundan dan tidak pernah dipanggil siapa pun
 di pipeline nyata. compute_token_consumption() karena itu murni aritmetika atas
 int yang sudah ada, bukan re-encode teks mentah.
 
-PENTING: μ=3 dari proposal (subbab 3.8.2.5), jangan diubah tanpa instruksi
-eksplisit peneliti (lihat guide 1.5 poin (e)).
+PENTING: μ TIDAK punya default di sini. Satu-satunya sumber nilai adalah
+PipelineConfig.token_output_weight di src/core/config.py — caller wajib
+mengoper `cfg.token_output_weight` (nilai final menunggu justifikasi pricing
+dari peneliti, lihat IMPLEMENTATION_DECISIONS.md poin 1).
 """
 
 import statistics
 from typing import List
 
-MU = 3.0  # HARUS sama dengan PipelineConfig.token_output_weight di src/core/config.py
-          # — jangan diubah di sini saja tanpa ikut mengubah config.py, dan sebaliknya.
 
-
-def compute_token_consumption(token_input: int, token_output: int, mu: float = MU) -> int:
+def compute_token_consumption(token_input: int, token_output: int, mu: float) -> int:
     """
     T = T_in + mu * T_out
 

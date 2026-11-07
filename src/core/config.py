@@ -170,8 +170,10 @@ class PipelineConfig:
 
     # --- Token consumption ---
     # α in T = T_in + α × T_out (called μ in the thesis proposal, subbab 3.8.2.5).
-    # Fixed at 3.0 per proposal — do not change without an explicit decision from
-    # the researcher (see context/EVALUATION_ANALYSIS_GUIDE.md Bagian 1.5).
+    # Single global source: every T computation (ablation.py, pipeline.py,
+    # dim1_efficiency.py, export_excel.py) reads this field. 3.0 is the proposal
+    # value; the researcher will replace it with a pricing-based value (Qwen
+    # input:output price ratio) — change it only here.
     token_output_weight: float = 3.0
 
     # --- Reproducibility ---

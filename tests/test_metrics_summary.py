@@ -131,6 +131,7 @@ def test_combine_three_models():
         assert set(json.loads(json_path.read_text(encoding="utf-8"))["models"]) == set(runs)
         wb = load_workbook(xlsx_path)
         assert wb.sheetnames[:4] == ["Info", "Summary", "All Metrics", "M1 SLA"]
+        assert "Token Reduction" in wb.sheetnames
         wb.close()
 
 

@@ -611,7 +611,45 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 - Skor n-gram pendek terhadap teks tabel panjang (nama + semua kolom) tidak sebanding dengan skor terhadap nama tabel saja, jadi threshold 0.60 belum tentu optimal untuk Baseline. Baseline belum punya notebook trial sendiri: ukur dulu SLA tabel Baseline di beberapa threshold sebelum memakai angka bersama.
 - Run Baseline lama (top-k% dengan satu embedding utuh) tidak sebanding dengan run sesudah perubahan ini.
 
-## 33. Alur tiga model: 1-Stage dan 2-Stage, metrik lalu dimensi, lalu simpan (2026-11-05)
+## 33. Hasil bimbingan 2026-11-02: alur eksperimen, threshold manual, reduksi kolom/token apple-to-apple (2026-11-03)
+
+**Arahan dosen pembimbing (ringkas):** ablation dipecah dua — threshold (tujuan: efisiensi token, dibaca bersama SLA) dan few-shot k (tujuan: EX); best config per eksperimen dipilih menurut tujuannya masing-masing; perbandingan Baseline vs GraphRAG = best setting vs best setting, dengan threshold tabel yang SAMA untuk Baseline; token consumption = total input prompt; analisis penghematan = column reduction vs token reduction vs EX; α TEP perlu justifikasi pricing Qwen (atau model terdekat) + disclaimer; sampling 20% boleh dengan justifikasi dan memperhatikan sampling bias.
+
+**Keputusan peneliti:**
+1. **Urutan:** ablation threshold (tanpa LLM) → ablation few-shot k (EX) → perbandingan utama Baseline vs GraphRAG di 6 dimensi → **terakhir** perbandingan model Qwen2.5-Coder **3B / 7B / 14B** (1.5B dibuang dari `llm_model_frame`), hanya dengan best config, kedua pipeline.
+2. **Threshold dipilih manual oleh peneliti.** Kode/notebook hanya menjalankan eksperimen dan menyusun tabel. Pemilihan otomatis di `graphrag_sla_trial.ipynb` bagian 9b (recall tertinggi dengan precision ≥ `TARGET_P`) dihapus; diganti tabel GraphRAG `(T, K)` vs Baseline di T yang sama + sel `BEST_T` / `BEST_K` yang diisi peneliti (`best_thresholds.json` mencatat `rule = "dipilih manual oleh peneliti"`). Baris hijau `TARGET_P/TARGET_R` di rekap tetap ada sebagai penanda visual saja.
+3. **Seleksi few-shot: `skeleton` langsung**, tanpa A/B `question` vs `skeleton` (poin 29 langkah 3 tidak dijalankan). Justifikasi = literatur (Guo et al., 2023) + cek retrieval tanpa LLM (poin 29 langkah 1). `compare_ab.py` tetap ada, tidak dipakai.
+4. **α:** satu sumber global, `PipelineConfig.token_output_weight` (sementara tetap 3.0). Konstanta duplikat `MU = 3.0` di `src/metrics/token_consumption.py` dihapus; `compute_token_consumption()` kini wajib menerima `mu` dari caller (semua caller sudah mengoper `cfg.token_output_weight`). Nilai final dicari peneliti dari pricing Qwen.
+5. **Sampling 20% = 20% per tingkat kesulitan (stratified).** Diimplementasi di poin 34 (ablation tetap di dev).
+
+**Definisi apple-to-apple reduksi kolom/token (kode custom skripsi, bukan SPIDER):**
+- **Berpasangan per query.** Kedua pipeline menjawab pertanyaan yang sama dengan template prompt yang sama (`build_prompt()`), few-shot index + `few_shot_k` + `few_shot_selection` yang sama — contoh few-shot dipilih dari pertanyaan, tidak bergantung retrieval, jadi isinya identik. Satu-satunya bagian prompt yang berbeda = blok DDL. Dipasangkan lewat `query_id`.
+- **Threshold tabel sama.** Baseline hanya punya T (`table_similarity_threshold`, field yang sama dengan Stage 1 GraphRAG); K hanya ada di GraphRAG. Di ablation threshold, setiap baris GraphRAG `(T, K)` dibandingkan dengan SATU baris Baseline di T yang sama — mengganti K hanya menggeser sisi GraphRAG. Catatan: dengan T sama pun himpunan tabel bisa berbeda, karena Baseline mencocokkan n-gram ke teks `table + columns` dan GraphRAG ke nama tabel, lalu value linking / traversal GraphRAG bisa menambah tabel (poin 32). Ini bagian dari metode, dan dipisahkan lewat dekomposisi di bawah.
+- **Kolom** = kolom yang benar-benar ditulis di DDL prompt = `predicted_schema` (`table.column`, lowercase, tanpa `*`). GraphRAG: kolom hasil retrieval + traversal + value linking; Baseline: semua kolom tabel terpilih (termasuk tabel jalur FK).
+- **Token** dihitung dengan tokenizer LLM generasi pada string mentah (cara yang sama dengan `T_in` di `generate_sql_with_token_count()`), tiga level: `schema_tokens` (DDL saja), `token_input` = T_in (seluruh prompt — angka utama, sesuai arahan "total input prompt"), dan `T_in − schema_tokens` (bagian bersama; harus ≈ sama di kedua pipeline — selisih kecil mungkin dari tokenisasi di batas string). `token_output` TIDAK masuk reduksi (dihasilkan LLM, bukan konteks retrieval); hanya masuk T untuk TEP. Qwen2.5-Coder 3B/7B/14B memakai tokenizer yang sama, jadi hitungan token tidak bergantung ukuran model.
+- **Reduksi = 1 − ΣGraphRAG / ΣBaseline** atas query yang sama (rasio total = rasio rata-rata karena n sama). Median reduksi per query dilaporkan di sampingnya — rata-rata rasio per query tidak dipakai sebagai angka utama karena didominasi query ber-prompt Baseline kecil (menjawab kekhawatiran "rata-rata bisa bias").
+- **Kenapa reduksi token < reduksi kolom (identitas):** karena bagian non-schema sama, `reduksi T_in = reduksi schema_tokens × (Σschema_B / ΣT_in_B)`. Pangsa schema di prompt Baseline mengecil saat k naik (contoh few-shot menambah bagian bersama), jadi reduksi T_in mengecil dengan k walaupun reduksi kolom tetap. Reduksi schema_tokens juga tidak persis sama dengan reduksi kolom: baris `CREATE TABLE`, tipe kolom, dan baris `FOREIGN KEY` ikut dihitung.
+- **Dekomposisi reduksi kolom:** `n_columns_tables_full` = kolom tabel-tabel di prompt kalau dikirim utuh. `(1 − total) = (1 − efek_pilihan_tabel) × (1 − efek_pemangkasan_kolom)`, dengan efek pilihan tabel = `1 − Σfull_G / Σcols_B` (bisa negatif: GraphRAG menyentuh tabel lebih banyak/lebar) dan efek pemangkasan = `1 − Σcols_G / Σfull_G`.
+- **Prompt berisi seluruh DB** (fallback saat retrieval kosong, atau DB kecil) dihitung apa adanya, tidak dibuang; frekuensinya dilaporkan per pipeline (`n_columns == n_columns_db`).
+- **Ablation threshold (tanpa LLM):** k belum dipilih, jadi token prompt diukur zero-shot (`prompt_tokens_k0`) bersama `schema_tokens`; di run akhir T_in diukur dengan k terpilih.
+
+**Lokasi implementasi:** `src/utils/prompt_stats.py` (`columns_per_table()`, `prompt_stats()` → field raw_logs baru `schema_tokens`, `n_columns_db`, `n_columns_tables_full`), `src/metrics/token_reduction.py` (pairing, reduksi total & median, dekomposisi, full-schema rate), `result_tables.token_reduction()` / `token_reduction_by_difficulty()` (notebook `eval_pipeline.ipynb` bagian hasil + sheet Excel "Token Reduction"), `pipeline.py` `run_comparison()` dan sel loop `eval_pipeline.ipynb` (menulis field baru), `ablation.py` (field yang sama di `*_prompts_k*.jsonl` + `predicted_schema`, kolom CSV `avg_columns`, `avg_schema_tokens`, `table_threshold`, `column_threshold`), `graphrag_sla_trial.ipynb` (tokenizer CPU, kolom `cols_tables_full` / `schema_tokens` / `prompt_tokens_k0` di rekap, bagian 9b baru → `outputs/tables/sla_trial_vs_baseline.csv`, ikut ke sheet Excel "SLA Trial"). raw_logs lama tanpa field baru tetap terbaca (baris schema/dekomposisi dilewati). Tes: `python tests/test_token_reduction.py` (skema sintetis, tanpa model).
+
+## 34. Ablation di dev set, sampel 20% stratified per difficulty (2026-11-03)
+
+**Keputusan peneliti (menutup open item E):** kedua ablation (threshold dan few-shot k) dijalankan pada **pertanyaan dev set**; contoh few-shot tetap diambil dari **train set** (`train_spider.json`), seperti sejak awal. Opsi train set (proposal 3.8.3.6) tidak dipakai.
+
+**Kenapa ini bukan kebocoran data:** contoh few-shot berasal dari train, dan train/dev tidak berbagi satu pun `db_id` (poin 22), jadi tidak ada pertanyaan uji, SQL gold, atau database uji yang masuk ke prompt.
+
+**Keterbatasan yang WAJIB disebut di metodologi:** threshold T/K dan few-shot k dipilih dengan melihat hasil pada dev set, lalu perbandingan akhir Baseline vs GraphRAG juga dilaporkan pada dev set. Spider tidak menyediakan split validasi publik (test set tersembunyi), jadi konfigurasi terpilih bisa sedikit optimistis untuk dev. Mitigasi yang bisa disebut: (1) ablation memakai 20% sampel, sedangkan perbandingan akhir memakai 100% dev; (2) tujuan analisis adalah perbandingan relatif dua pipeline dengan konfigurasi yang sama (T sama, k sama), bukan klaim EX absolut; (3) grid yang diuji kecil (5 T × 5 K, 4 nilai k), sehingga ruang untuk overfit ke dev terbatas.
+
+**Sampling (kode custom skripsi):** `src/utils/sampling.py`. "20%" = 20% dari **tiap** tingkat kesulitan: per tingkat `round(0.2 × n)`, minimal 1, diambil acak tanpa pengembalian dengan RNG `(seed, urutan tingkat)`. Tingkat kesulitan = `Evaluator.eval_hardness()` resmi SPIDER pada field `sql` di `dev.json` (gold SQL yang sudah di-parse pembuat Spider), label yang sama dengan `difficulty` di raw_logs. Dev Spider (easy 248 / medium 446 / hard 174 / extra 166) → sampel 20% ≈ 50 / 89 / 35 / 33 = 207 query. `distribution_table()` menampilkan proporsi dev penuh vs sampel (di notebook trial bagian 3b) sebagai bahan justifikasi sampling bias. Dengan stratifikasi, proporsi difficulty sampel sama dengan populasi (selisih hanya pembulatan), jadi bias yang tersisa hanya di dalam tiap tingkat (mis. distribusi database), dan itu disebut sebagai keterbatasan.
+
+**Satu sampler untuk semua tempat**, jadi ratio + seed yang sama = query yang sama: `graphrag_sla_trial.ipynb` (default `SAMPLE_RATIO` 0.15 → **0.20**), `sweep.py`, `ablation.py`, `pipeline.py` `run_comparison()`, `baseline.py` `run_baseline()`, `eval_pipeline.ipynb`. `ablation_fewshot.ipynb` kini menjalankan `--sample 0.2` (sebelumnya 1.0). Ratio 1.0 = seluruh dev set, tidak berubah. **Sampel lama (acak, tidak stratified) tidak sama** dengan sampel baru: angka trial/ablation yang dijalankan sebelum 2026-11-03 tidak sebanding langsung.
+
+**Tes:** `python tests/test_sampling.py` (skema mainan, parser + `eval_hardness` resmi SPIDER; kalau data nltk `punkt` belum ada di lokal, tes memakai tokenizer regex pengganti).
+
+## 35. Alur tiga model: 1-Stage dan 2-Stage, metrik lalu dimensi, lalu simpan (2026-11-05)
 
 **Keputusan peneliti:** eksperimen memakai tiga model Qwen2.5-Coder (3B, 7B, 14B), dijalankan oleh tiga orang yang hanya mengganti model di `eval_pipeline.ipynb`. Output harus berurutan: 6 metrik, lalu dimensi, lalu semua disimpan ke JSON dan Excel, per model dan gabungan.
 
@@ -620,7 +658,7 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 **Enam metrik** mengikuti subbab `EVALUATION_ANALYSIS_GUIDE.md` Bagian 1: SLA, ESM, EX, CM, Token Consumption + TEP (subbab 1.5), QVT.
 
 **Yang berubah:**
-- `llm_model_frame` menjadi 3B, 7B, 14B (1.5B dihapus). `cfg.resolve_llm_model("14B")` mengubah nama pendek menjadi nama lengkap.
+- `cfg.resolve_llm_model("14B")` mengubah nama pendek menjadi nama lengkap.
 - `src/experiments/metrics_summary.py` (baru) menulis `metrics_results.json` dari raw_logs. Tidak ada formula baru. TEP dihitung dengan `compute_tep()` yang sama dengan Dimensi 1. QVT hanya dibaca kalau datanya dibangun dari raw_logs run itu, supaya file lama tidak terbaca.
 - `run_metrics_analysis()` di `pipeline.py` membangun data QVT dan menulis metrik; `run_dimension_analysis(build_qvt=False)` memakai data QVT yang sama. `run_comparison()` kini juga menulis `hasil_skripsi.xlsx`.
 - `eval_pipeline.ipynb`: semua model memakai folder `outputs/models/<model>/` (trial: `outputs/trial/models/<model>/`), **termasuk 7B yang sebelumnya menulis ke `outputs/` dan `data/raw_logs/`**. Sel kode dipendekkan dan diberi komentar per baris; logikanya dipindah ke `src/experiments/notebook_steps.py`, dan loop utama barunya terbukti menghasilkan raw_logs yang sama dengan sel lama (data uji kecil, LLM di-stub).
@@ -630,6 +668,8 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 - `src/experiments/combine_models.py` (baru) menulis `hasil_gabungan.{json,xlsx}` dan memberi peringatan untuk model yang belum ada, run percobaan, dan commit/konfigurasi yang berbeda. Model yang sama muncul dua kali ditolak.
 
 **Yang tetap:** format prompt, greedy decoding, formula metrik, skema raw_logs, dan `pipeline.py --baseline` tanpa `--models` (masih menulis ke `outputs/` dan `data/raw_logs/`, jadi tidak ikut digabung).
+
+**Gabungan dengan poin 33-34:** `notebook_steps.py` memakai `stratified_sample()` dan menulis field `prompt_stats()` yang sama dengan `run_comparison()`; tabel reduksi kolom/token tampil di Bagian 13.7, sheet `Token Reduction` per model, dan `hasil_gabungan.xlsx`. Perbandingan tiga model dijalankan terakhir, dengan best config dari ablation (poin 33).
 
 **Keterbatasan:**
 - Dimensi 6 memakai EX per k dari `ablation.py`, yang dijalankan dengan satu model. Angkanya sama di ketiga model, dan sheet D6 diberi catatan tentang hal ini.
@@ -687,3 +727,14 @@ Efek nyata: dijalankan lokal apa adanya sekarang, `run_all_dimensions.py` melapo
 Untuk sekarang `run_all_dimensions.py` menerima angkanya manual (`--ex-per-k` / `--ex-per-k-file`) dan men-skip Dimensi 6 dengan penjelasan kalau tidak diberikan (poin 24c).
 
 **Belum diputuskan:** (1) tambahkan kolom `ex`/`esm` ke `ablation_results.csv` dengan cara meng-capture + parse stdout `evaluation.py` di `_run_ablation_evals()`; atau (2) pindahkan evaluasi ablation ke `esm_ex_cm.evaluate_single_query()` in-process (seperti yang sudah dilakukan `run_comparison()` di `pipeline.py`) supaya EX per k langsung tersedia sebagai angka, sekaligus menutup gap "`ablation.py` belum memproduksi raw_logs" yang sudah tercatat di CLAUDE.md; atau (3) biarkan manual — peneliti copy angka dari output Spider eval sekali saja setelah run ablation. Opsi 2 paling menyelesaikan akar masalah tapi menyentuh `ablation.py` yang jalan di Kaggle, jadi butuh konfirmasi peneliti dulu.
+
+### E. Ablation (threshold + few-shot k) di dev atau di train?
+
+✅ **Diselesaikan (2026-11-03) — dev set, lihat poin 34.** Teks asli di bawah dipertahankan sebagai catatan historis.
+
+**Ditemukan (2026-11-03),** saat bimbingan (poin 33). Proposal (3.8.3.6) menulis ablation few-shot di **20% train set, stratified per difficulty**; kode sekarang memakai sampel acak (tidak stratified) dari **dev set**, set yang sama dengan yang dilaporkan.
+
+- **Dev:** sederhana, tapi pemilihan T/K/k dan pelaporan memakai data yang sama (tuning on test) — keterbatasan yang sudah disebut di poin 28.
+- **Train:** tidak tuning di data uji, tapi pool few-shot = train, jadi pertanyaan train bisa menemukan dirinya sendiri / saudara satu DB-nya sebagai contoh (kebocoran). Mitigasi: untuk ablation, keluarkan semua contoh dengan `db_id` yang sama dari pool few-shot (leave-one-database-out). Karena train dan dev tidak berbagi DB (poin 22), ini meniru kondisi evaluasi dev persis.
+
+**Belum diputuskan.** Stratified 20% per difficulty sudah disetujui peneliti (poin 33.5) dan akan diimplementasi bersamaan dengan keputusan ini.

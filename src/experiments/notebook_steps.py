@@ -120,6 +120,10 @@ from src.retrieval.retrieval import (
 )
 # Fungsi membaca daftar kolom tiap database
 from src.utils.schema_utils import load_db_schema
+# Fungsi menghitung ukuran schema di prompt, untuk reduksi kolom dan token
+from src.utils.prompt_stats import columns_per_table, prompt_stats
+# Fungsi mengambil sampel per tingkat kesulitan
+from src.utils.sampling import stratified_sample
 # Fungsi menyamakan bentuk JOIN untuk evaluator resmi
 from src.utils.sql_normalize import normalize_sql_file_for_parsing
 
@@ -272,22 +276,12 @@ def load_dev_questions(cfg, sample_ratio: float) -> list:
     with open(cfg.dev_json, encoding="utf-8") as f:
         # Baca semua pertanyaan dan gold SQL
         dev_data = json.load(f)
-    # Run penuh memakai seluruh data
-    if sample_ratio >= 1.0:
-        # Tampilkan jumlah pertanyaan
-        print(f"Dev set: {len(dev_data)} pertanyaan, semuanya dipakai")
-        # Kembalikan semua data
-        return dev_data
-    # Hitung jumlah sampel, minimal 1
-    n = max(1, int(len(dev_data) * sample_ratio))
-    # Buat pengacak dengan seed tetap supaya sampelnya selalu sama
-    rng = np.random.default_rng(cfg.seed)
-    # Pilih posisi data secara acak tanpa pengulangan
-    indices = rng.choice(len(dev_data), size=n, replace=False)
-    # Tampilkan jumlah sampel
-    print(f"Dev set: {n} dari {len(dev_data)} pertanyaan dipakai")
-    # Ambil data terpilih dengan urutan aslinya
-    return [dev_data[i] for i in sorted(indices)]
+    # Ambil sampel per tingkat kesulitan; sample_ratio 1.0 berarti seluruh dev set
+    questions = stratified_sample(dev_data, sample_ratio, cfg.seed)
+    # Tampilkan jumlah pertanyaan yang dipakai
+    print(f"Dev set: {len(questions)} dari {len(dev_data)} pertanyaan dipakai")
+    # Kembalikan pertanyaannya
+    return questions
 
 
 # Menulis gold SQL sesuai sampel, untuk evaluator resmi
@@ -508,7 +502,7 @@ def _run_2stage(tools: Tools, item: dict, i: int, results: RunResults) -> dict:
     # Coba jalankan
     try:
         # Terima SQL, proxy, schema, kolom terpilih, dan jumlah token
-        pred, recall, precision, _schema, nodes, n_in, n_out = run_single(
+        pred, recall, precision, schema_context, nodes, n_in, n_out = run_single(
             # Input pertanyaan, gold SQL, dan database
             item["question"], item["query"], item["db_id"],
             # Graph, model, dan konfigurasi
@@ -521,9 +515,9 @@ def _run_2stage(tools: Tools, item: dict, i: int, results: RunResults) -> dict:
         # Catat varian, posisi, database, dan pesan error
         results.gen_errors.append(("graphrag", i, item["db_id"], repr(e)))
         # Pakai SQL pengganti supaya run tidak berhenti
-        pred, recall, precision, nodes, n_in, n_out = "SELECT 1", 0.0, 0.0, [], 0, 0
+        pred, recall, precision, schema_context, nodes, n_in, n_out = "SELECT 1", 0.0, 0.0, "", [], 0, 0
     # Kembalikan hasilnya sebagai dictionary
-    return {"pred": pred, "recall": recall, "precision": precision, "nodes": nodes, "n_in": n_in, "n_out": n_out}
+    return {"pred": pred, "recall": recall, "precision": precision, "schema_context": schema_context, "nodes": nodes, "n_in": n_in, "n_out": n_out}
 
 
 # Menjalankan 1-Stage untuk satu pertanyaan
@@ -550,7 +544,7 @@ def _run_1stage(tools: Tools, item: dict, i: int, results: RunResults) -> dict:
 
 
 # Menyusun satu catatan raw_logs
-def _log_entry(query_id: str, item: dict, gold_schema: list, predicted_schema: list, side: dict, evaluation) -> dict:
+def _log_entry(query_id: str, item: dict, gold_schema: list, predicted_schema: list, stats: dict, side: dict, evaluation) -> dict:
     # Isinya mengikuti skema di EVALUATION_ANALYSIS_GUIDE.md Bagian 2
     return {
         # Identitas pertanyaan
@@ -561,6 +555,8 @@ def _log_entry(query_id: str, item: dict, gold_schema: list, predicted_schema: l
         "gold_schema": gold_schema,
         # Kolom yang dikirim ke LLM
         "predicted_schema": predicted_schema,
+        # Token schema dan jumlah kolom, untuk reduksi kolom dan token
+        **stats,
         # Jumlah token input dan output
         "token_input": side["n_in"], "token_output": side["n_out"],
         # Hasil ESM dan EX
@@ -571,7 +567,7 @@ def _log_entry(query_id: str, item: dict, gold_schema: list, predicted_schema: l
 
 
 # Mengevaluasi kedua prediksi dan menyimpan catatannya
-def _evaluate_and_log(tools: Tools, item: dict, i: int, two: dict, one: dict, results: RunResults) -> None:
+def _evaluate_and_log(tools: Tools, item: dict, i: int, two: dict, one: dict, table_cols, results: RunResults) -> None:
     # Coba evaluasi; kalau gagal, prediksi tetap tersimpan
     try:
         # Ambil database dan gold SQL
@@ -590,10 +586,16 @@ def _evaluate_and_log(tools: Tools, item: dict, i: int, two: dict, one: dict, re
         schema_2 = _column_nodes_to_predicted_schema(tools.col_graph, two["nodes"])
         # Ubah tabel terpilih 1-Stage menjadi "tabel.kolom"
         schema_1 = _table_nodes_to_predicted_schema(tools.tbl_graph, one["nodes"])
+        # Buat DDL 1-Stage untuk menghitung token schema-nya
+        context_1 = build_table_schema_context(tools.tbl_graph, one["nodes"]) if one["nodes"] else ""
+        # Hitung token schema dan jumlah kolom 2-Stage
+        stats_2 = prompt_stats(schema_2, db_id, table_cols, two["schema_context"], tools.tokenizer)
+        # Hitung token schema dan jumlah kolom 1-Stage
+        stats_1 = prompt_stats(schema_1, db_id, table_cols, context_1, tools.tokenizer)
         # Simpan catatan 2-Stage
-        results.graphrag_logs.append(_log_entry(query_id, item, gold_schema, schema_2, two, eval_2))
+        results.graphrag_logs.append(_log_entry(query_id, item, gold_schema, schema_2, stats_2, two, eval_2))
         # Simpan catatan 1-Stage
-        results.baseline_logs.append(_log_entry(query_id, item, gold_schema, schema_1, one, eval_1))
+        results.baseline_logs.append(_log_entry(query_id, item, gold_schema, schema_1, stats_1, one, eval_1))
     # Catat error evaluasi
     except Exception as e:
         # Simpan posisi, database, dan pesan error
@@ -604,6 +606,8 @@ def _evaluate_and_log(tools: Tools, item: dict, i: int, two: dict, one: dict, re
 def run_all_questions(tools: Tools, questions: list) -> RunResults:
     # Siapkan wadah hasil
     results = RunResults(confound_diag=_new_confound_diag())
+    # Hitung jumlah kolom tiap tabel sekali saja
+    table_cols = columns_per_table(tools.col_graph)
     # Proses tiap pertanyaan dengan progress bar
     for i, item in enumerate(tqdm(questions, desc="1-Stage + 2-Stage")):
         # Jalankan 2-Stage
@@ -623,7 +627,7 @@ def run_all_questions(tools: Tools, questions: list) -> RunResults:
         # Simpan teks SQL 1-Stage
         results.baseline_preds.append(one["pred"].strip())
         # Evaluasi dan simpan catatan lengkap
-        _evaluate_and_log(tools, item, i, two, one, results)
+        _evaluate_and_log(tools, item, i, two, one, table_cols, results)
         # Tampilkan progres pada pertanyaan pertama, tiap 20 pertanyaan, dan pertanyaan terakhir
         if i == 0 or (i + 1) % 20 == 0 or (i + 1) == len(questions):
             # Nomor pertanyaan dan database
@@ -727,6 +731,12 @@ def show_metric(metrics_results: dict, metric_name: str) -> None:
 def show_diagnostics(results: RunResults, alpha: float) -> None:
     # Tampilkan EX, ESM, dan token per tingkat kesulitan
     show(rt.by_difficulty(results.baseline_logs, results.graphrag_logs, alpha))
+    # Proses tabel reduksi kolom dan token
+    for table in rt.token_reduction(results.baseline_logs, results.graphrag_logs, alpha):
+        # Tampilkan tabelnya
+        show(table)
+    # Tampilkan reduksi kolom dan token per tingkat kesulitan
+    show(rt.token_reduction_by_difficulty(results.baseline_logs, results.graphrag_logs))
     # Tampilkan pengecekan prediksi: fallback, kosong, dan identik dengan gold
     show(rt.prediction_checks(results.baseline_logs, results.graphrag_logs))
     # Tampilkan jumlah query per kombinasi EX dan ESM

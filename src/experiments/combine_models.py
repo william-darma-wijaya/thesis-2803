@@ -63,7 +63,11 @@ def load_runs(input_dir: Path) -> dict:
                              "Sisakan satu sebelum menggabungkan.")
         dims_path = path.parent / "dimensions_results.json"
         dims = json.loads(dims_path.read_text(encoding="utf-8")) if dims_path.exists() else None
-        found[slug] = {"path": path, "metrics": metrics, "dimensions": dims}
+        logs_dir = path.parent.parent / "raw_logs"   # ikut di zip hasil_<MODEL>.zip
+        logs = None
+        if (logs_dir / "baseline_log.json").exists() and (logs_dir / "graphrag_log.json").exists():
+            logs = tuple(json.loads((logs_dir / f"{c}_log.json").read_text(encoding="utf-8")) for c in CONDITIONS)
+        found[slug] = {"path": path, "metrics": metrics, "dimensions": dims, "logs": logs}
     return dict(sorted(found.items(), key=lambda kv: (_model_size(kv[0]), kv[0])))
 
 
@@ -78,6 +82,8 @@ def find_warnings(runs: dict, expected: Optional[list] = None) -> list:
             warnings.append(f"{slug}: run percobaan (SAMPLE_RATIO = {meta.get('sample_ratio')})")
         if run["dimensions"] is None:
             warnings.append(f"{slug}: dimensions_results.json tidak ada")
+        if run["logs"] is None:
+            warnings.append(f"{slug}: raw_logs tidak ada, reduksi kolom dan token dilewati")
     for key in COMPARABLE_KEYS:
         values = {slug: run["metrics"]["meta"].get(key) for slug, run in runs.items()}
         if len({json.dumps(v, sort_keys=True) for v in values.values()}) > 1:
@@ -163,6 +169,14 @@ def write_outputs(runs: dict, warnings: list, out_dir: Path, shared_tables_dir: 
             for table in tables:
                 sheet.table(table)
             sheet.finish()
+
+    reduction = [(s, rt.token_reduction(*r["logs"], r["metrics"]["meta"]["alpha"]) + [rt.token_reduction_by_difficulty(*r["logs"])])
+                 for s, r in runs.items() if r["logs"]]
+    if reduction:
+        sheet = Sheet(wb, "Token Reduction", "Column and token reduction: 2-Stage vs 1-Stage")
+        for table in _concat_by_title(reduction):
+            sheet.table(table)
+        sheet.finish()
 
     ablation = rt.ablation_tables(_read_csv(Path(shared_tables_dir) / "ablation_results.csv"))
     if ablation:

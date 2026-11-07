@@ -53,13 +53,17 @@ from src.retrieval.baseline import (
     build_table_schema_context,
     evaluate_table_linking,
     retrieve_baseline_tables,
+    table_nodes_to_schema,
 )
 from src.retrieval.retrieval import (
     build_schema_context,
     build_schema_index,
+    column_nodes_to_schema,
     evaluate_schema_linking,
     retrieve_graphrag_schema,
 )
+from src.utils.prompt_stats import columns_per_table, prompt_stats
+from src.utils.sampling import stratified_sample
 from src.utils.sql_normalize import normalize_sql_file_for_parsing
 
 logging.basicConfig(
@@ -73,7 +77,9 @@ RESULTS_CSV = Path("outputs/tables/ablation_results.csv")
 CSV_FIELDS = [
     "mode", "k", "avg_ex", "avg_esm", "avg_recall", "avg_precision",
     "avg_prompt_tokens", "avg_output_tokens", "avg_token_consumption",
-    "n_samples", "tables_pct", "columns_pct", "llm_model", "few_shot_selection",
+    "avg_columns", "avg_schema_tokens",
+    "n_samples", "table_threshold", "column_threshold",
+    "tables_pct", "columns_pct", "llm_model", "few_shot_selection",
     "predictions_file", "prompts_file",
 ]
 
@@ -102,6 +108,8 @@ class AblationResult:
     avg_prompt_tokens:     float   # T_in  — input (prompt) tokens
     avg_output_tokens:     float   # T_out — output (generated SQL) tokens
     avg_token_consumption: float   # T = T_in + α × T_out  (the TEP metric)
+    avg_columns:           float   # columns in the prompt DDL (poin 33)
+    avg_schema_tokens:     float   # tokens of the DDL block alone
     n_samples:             int
     predictions_file:      Path
     prompts_file:          Path
@@ -146,6 +154,7 @@ def _run_k(
     output_dir: Path,
     evaluate,
     mode: str = "graphrag",
+    table_cols=None,
 ) -> AblationResult:
     """
     Run full pipeline for one k value, score every prediction, save predictions.
@@ -154,6 +163,8 @@ def _run_k(
         cache    : SchemaIndex dict for mode="graphrag",
                    TableSchemaIndex dict for mode="baseline".
         evaluate : callable from _make_evaluator().
+        table_cols : columns_per_table() of the column graph, for the
+                     column/token reduction fields (poin 33).
         mode     : "graphrag" (column-level retrieval) or
                    "baseline" (table-level retrieval).
     """
@@ -164,6 +175,7 @@ def _run_k(
     prompt_path = output_dir / f"ablation_{tag}_prompts_k{k}.jsonl"
     recalls, precisions = [], []
     prompt_tokens_list, output_tokens_list, consumption_list = [], [], []
+    stats_list = []
     evals = []
 
     alpha = base_cfg.token_output_weight  # T = T_in + α × T_out
@@ -175,6 +187,7 @@ def _run_k(
             question = item["question"]
             gold_sql = item["query"]
             prompt, n_in, n_out = "", 0, 0
+            schema_context, pred_schema = "", []
 
             try:
                 # Same retrieval + few-shot helpers as run_single()/run_single_baseline().
@@ -184,12 +197,14 @@ def _run_k(
                     )
                     r, p = evaluate_schema_linking(gold_sql, column_nodes, graph, db_id)
                     schema_context = build_schema_context(graph, column_nodes)
+                    pred_schema = column_nodes_to_schema(graph, column_nodes)
                 else:  # baseline
                     table_nodes = retrieve_baseline_tables(
                         graph, db_id, question, cache[db_id], embed_model, cfg,
                     )
                     r, p = evaluate_table_linking(gold_sql, table_nodes, graph, db_id)
                     schema_context = build_table_schema_context(graph, table_nodes)
+                    pred_schema = table_nodes_to_schema(graph, table_nodes)
 
                 few_shot_block = build_few_shot_block(question, few_shot_index, embed_model, cfg)
 
@@ -210,6 +225,8 @@ def _run_k(
             # Scored like pipeline.py's raw_logs: the "SELECT 1" fallback counts as a miss.
             ev = evaluate(pred_sql, gold_sql, db_id)
             n_t = int(n_in + alpha * n_out)            # T = T_in + α × T_out
+            stats = {"n_columns": len(pred_schema),
+                     **prompt_stats(pred_schema, db_id, table_cols or {}, schema_context, tokenizer)}
 
             # Append all metrics together so the lists never desync.
             evals.append(ev)
@@ -218,12 +235,14 @@ def _run_k(
             prompt_tokens_list.append(n_in)
             output_tokens_list.append(n_out)
             consumption_list.append(n_t)
+            stats_list.append(stats)
 
             prompt_file.write(
                 json.dumps({
                     "i": idx + 1, "db_id": db_id, "question": question,
                     "tokens_in": n_in, "tokens_out": n_out,
-                    "token_consumption": n_t,
+                    "token_consumption": n_t, **stats,
+                    "predicted_schema": pred_schema,
                     "esm": ev.esm, "ex": ev.ex, "difficulty": ev.difficulty,
                     "prompt": prompt, "pred_sql": pred_sql,
                 }, ensure_ascii=False) + "\n"
@@ -248,6 +267,8 @@ def _run_k(
         avg_prompt_tokens=_safe_mean(prompt_tokens_list),
         avg_output_tokens=_safe_mean(output_tokens_list),
         avg_token_consumption=_safe_mean(consumption_list),
+        avg_columns=_safe_mean([s["n_columns"] for s in stats_list]),
+        avg_schema_tokens=_safe_mean([s["schema_tokens"] for s in stats_list]),
         n_samples=len(dev_subset),
         predictions_file=pred_path,
         prompts_file=prompt_path,
@@ -383,7 +404,11 @@ def _save_results(results: list[AblationResult], cfg: PipelineConfig, mode: str)
             "avg_prompt_tokens":     round(r.avg_prompt_tokens, 1),
             "avg_output_tokens":     round(r.avg_output_tokens, 1),
             "avg_token_consumption": round(r.avg_token_consumption, 1),
+            "avg_columns":           round(r.avg_columns, 1),
+            "avg_schema_tokens":     round(r.avg_schema_tokens, 1),
             "n_samples":             r.n_samples,
+            "table_threshold":       cfg.table_similarity_threshold,
+            "column_threshold":      cfg.semantic_similarity_threshold if mode == "graphrag" else "",
             "tables_pct":            cfg.top_k_tables_pct if mode == "graphrag" else cfg.baseline_top_k_tables_pct,
             "columns_pct":           cfg.top_k_columns_pct if mode == "graphrag" else "",
             "llm_model":             cfg.llm_model,
@@ -439,11 +464,10 @@ def main(
     with open(cfg.dev_json, "r", encoding="utf-8") as f:
         dev_data = json.load(f)
 
-    n = max(1, int(len(dev_data) * sample_ratio))
-    rng = np.random.default_rng(cfg.seed)
-    indices = rng.choice(len(dev_data), size=n, replace=False)
-    dev_subset = [dev_data[i] for i in sorted(indices)]
-    logger.info("Ablation subset: %d / %d questions (%.0f%%)", n, len(dev_data), sample_ratio * 100)
+    # Stratified per difficulty; same subset as graphrag_sla_trial.ipynb / sweep.py at equal ratio (poin 34).
+    dev_subset = stratified_sample(dev_data, sample_ratio, cfg.seed)
+    logger.info("Ablation subset: %d / %d questions (%.0f%% per difficulty)",
+                len(dev_subset), len(dev_data), sample_ratio * 100)
 
     logger.info("Loading embedding model: %s", cfg.embedding_model)
     embed_model = SentenceTransformer(cfg.embedding_model)
@@ -467,6 +491,7 @@ def main(
             db_id: build_table_index(graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
             for db_id in tqdm(unique_db_ids, desc="Indexing tables")
         }
+    table_cols = columns_per_table(graph if mode == "graphrag" else build_schema_graph(schema_df))
 
     # Few-shot index (needed for any k > 0)
     few_shot_index: FewShotIndex | None = None
@@ -485,7 +510,7 @@ def main(
         result = _run_k(
             k, dev_subset, graph, cache, few_shot_index,
             embed_model, llm, tokenizer, cfg, output_dir, evaluate,
-            mode=mode,
+            mode=mode, table_cols=table_cols,
         )
         results.append(result)
         logger.info("mode=%s k=%d done → EX=%.2f%% ESM=%.2f%% T=%.1f",
