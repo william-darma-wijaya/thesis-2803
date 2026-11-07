@@ -569,6 +569,41 @@ def main(cfg: PipelineConfig) -> None:
 # Dimension analysis (metrics -> 6 dimensions), fed by data/raw_logs/*.json
 # ---------------------------------------------------------------------------
 
+def run_metrics_analysis(
+    raw_logs_dir: Path,
+    out_dir: Path,
+    dev_json: Path,
+    full_dev: bool,
+    cfg: PipelineConfig,
+    sample_ratio: float,
+    qvt_dir: Path = Path("data/qvt_variations"),
+) -> dict:
+    """
+    Six metrics of one model from raw_logs_dir -> out_dir/metrics_results.json.
+    On a full run this also builds the QVT data, so call run_dimension_analysis()
+    afterwards with build_qvt=False. Shared by run_comparison() and eval_pipeline.ipynb.
+    """
+    from src.experiments.build_qvt_variations import build_qvt_files
+    from src.experiments.metrics_summary import build_metrics_results, run_metadata, save_metrics_results
+
+    qvt_conditions = None
+    if full_dev:
+        with open(dev_json, "r", encoding="utf-8") as f:
+            dev_data = json.load(f)
+        qvt_conditions = set(build_qvt_files(dev_data, raw_logs_dir, qvt_dir))
+    with open(raw_logs_dir / "baseline_log.json", encoding="utf-8") as f:
+        baseline_logs = json.load(f)
+    with open(raw_logs_dir / "graphrag_log.json", encoding="utf-8") as f:
+        graphrag_logs = json.load(f)
+    results = build_metrics_results(
+        baseline_logs, graphrag_logs, cfg.token_output_weight,
+        qvt_dir=qvt_dir if full_dev else None, qvt_conditions=qvt_conditions,
+        meta=run_metadata(cfg, sample_ratio),
+    )
+    logger.info("Six metrics saved -> %s", save_metrics_results(results, out_dir))
+    return results
+
+
 def run_dimension_analysis(
     raw_logs_dir: Path,
     out_dir: Path,
@@ -578,6 +613,7 @@ def run_dimension_analysis(
     always_dim5: bool = False,
     qvt_dir: Path = Path("data/qvt_variations"),
     verbose: bool = True,
+    build_qvt: bool = True,
 ) -> dict:
     """
     Run the thesis's 6 analysis dimensions over raw_logs_dir and write
@@ -600,16 +636,17 @@ def run_dimension_analysis(
                with an explanation.
     verbose  : False -> do not print the text report (eval_pipeline.ipynb shows
                the numbers as tables instead); files are written either way.
+    build_qvt: False -> run_metrics_analysis() already built the QVT data for this run.
     """
     from src.experiments.build_qvt_variations import build_qvt_files
     from src.experiments.run_all_dimensions import run_all, save_dimension_outputs
 
     only = [1, 2, 3, 4, 5, 6] if full_dev else [1, 2, 3, 5, 6]
-    if full_dev:
+    if full_dev and build_qvt:
         with open(dev_json, "r", encoding="utf-8") as f:
             dev_data = json.load(f)
         build_qvt_files(dev_data, raw_logs_dir, qvt_dir)
-    else:
+    elif not full_dev:
         logger.info("Subsampled run -> QVT/Dimension 4 skipped (needs the full dev set).")
 
     results, report = run_all(
@@ -961,6 +998,18 @@ def run_comparison(
     print("=" * 60)
     bl_spider_eval(b_pred_path, cfg)
 
+    # ── Six metrics, before the dimensions that analyse them ───────────────
+    # Non-fatal like the dimensions below: the generation results are already saved.
+    metrics_ok = False
+    try:
+        run_metrics_analysis(
+            raw_logs_dir=raw_logs_dir, out_dir=out_dir / "tables", dev_json=cfg.dev_json,
+            full_dev=sample_ratio >= 1.0, cfg=cfg, sample_ratio=sample_ratio, qvt_dir=qvt_dir,
+        )
+        metrics_ok = True
+    except Exception:
+        logger.exception("Six-metric summary failed (non-fatal, raw_logs are saved).")
+
     # ── 6-dimension analysis over the raw_logs just written ────────────────
     # Own try/except: hours of generation are already saved above, a failure
     # here must not look like a failed run (re-run run_all_dimensions.py alone).
@@ -977,12 +1026,20 @@ def run_comparison(
                 ex_per_k=ex_per_k,
                 always_dim5=always_dim5,
                 qvt_dir=qvt_dir,
+                build_qvt=not metrics_ok,
             )
         except Exception:
             logger.exception(
                 "Dimension analysis failed (non-fatal, raw_logs are saved) -- "
                 "re-run: python src/experiments/run_all_dimensions.py"
             )
+
+    # ── Everything of this run in one workbook ─────────────────────────────
+    try:
+        from src.experiments.export_excel import build_workbook
+        logger.info("Excel saved -> %s", build_workbook(raw_logs_dir, out_dir / "tables", out_dir / "tables" / "hasil_skripsi.xlsx", skip_missing=True))
+    except Exception:
+        logger.exception("Excel export failed (non-fatal) -- re-run: python src/experiments/export_excel.py")
 
     return {
         "graphrag": summarize_raw_logs(graphrag_raw_logs, cfg.token_output_weight),
@@ -1103,7 +1160,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--models", nargs="+", default=None, metavar="MODEL",
         help="With --baseline: ablation stage 3, one comparison per model "
-             "('all' = config.py llm_model_frame). Outputs go to outputs/models/<model>/.",
+             "('all' = config.py llm_model_frame, or a short name such as 14B). Outputs go to outputs/models/<model>/.",
     )
     add_config_override_args(parser)
     args, unknown = parser.parse_known_args()
@@ -1139,7 +1196,7 @@ if __name__ == "__main__":
         except ValueError as exc:
             parser.error(str(exc))
         if args.models:
-            models = config.llm_model_frame if args.models == ["all"] else args.models
+            models = config.llm_model_frame if args.models == ["all"] else [config.resolve_llm_model(m) for m in args.models]
             run_model_comparison(
                 config, models, sample_ratio=args.sample,
                 run_dimensions=not args.no_dimensions,

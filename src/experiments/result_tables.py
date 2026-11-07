@@ -400,6 +400,109 @@ def prediction_checks(baseline_logs: list, graphrag_logs: list) -> pd.DataFrame:
     return with_formats(df, {c: "int" for c in df.columns if c != "Pipeline"}, title="Prediction checks")
 
 
+# ---------------------------------------------------------------------------
+# metrics_results.json -> tabel per metrik (1-Stage = "baseline", 2-Stage = "graphrag" di kode)
+# ---------------------------------------------------------------------------
+
+_STAGES = (("baseline", "1-Stage"), ("graphrag", "2-Stage"))
+
+
+def _diff_rows(values: dict, kind_key: str = "by_difficulty") -> list:
+    """Baris per difficulty + All untuk metrik berbentuk {overall, by_difficulty} per kondisi."""
+    rows = []
+    for d in DIFFICULTIES + ["all"]:
+        vb, vg = (values[c]["overall"] if d == "all" else values[c][kind_key].get(d) for c, _ in _STAGES)
+        if vb is None and vg is None:
+            continue
+        rows.append({"Difficulty": DIFF_LABEL[d], "1-Stage": vb, "2-Stage": vg,
+                     "Δ (2-Stage − 1-Stage)": None if vb is None or vg is None else (vg - vb) * 100})
+    return rows
+
+
+def _accuracy_table(values: dict, title: str) -> pd.DataFrame:
+    return with_formats(pd.DataFrame(_diff_rows(values)),
+                        {"1-Stage": "pct", "2-Stage": "pct", "Δ (2-Stage − 1-Stage)": "pp"}, title=title)
+
+
+def _sla_tables(sla: dict) -> list:
+    rows, diff_rows = [], []
+    for key, level, population in (("table", "Table", "All queries"), ("column", "Column", "All queries"),
+                                   ("column_non_empty_gold", "Column", "Non-empty gold schema")):
+        for c, label in _STAGES:
+            r = sla[c][key]
+            if r:
+                rows.append({"Variant": label, "Level": level, "Population": population,
+                             "Precision": r["precision"], "Recall": r["recall"], "F1": r["f1"]})
+    for d in DIFFICULTIES:
+        row = {"Difficulty": DIFF_LABEL[d]}
+        for c, label in _STAGES:
+            r = sla[c]["column_by_difficulty"].get(d) or {}
+            for m in ("precision", "recall", "f1"):
+                row[f"{m.capitalize()} {label}"] = r.get(m)
+        if any(not is_missing(v) for k, v in row.items() if k != "Difficulty"):
+            diff_rows.append(row)
+    pct = {"Precision": "pct", "Recall": "pct", "F1": "pct"}
+    diff_formats = {k: "pct" for row in diff_rows for k in row if k != "Difficulty"}
+    return [with_formats(pd.DataFrame(rows), pct, title="SLA: precision, recall, F1"),
+            with_formats(pd.DataFrame(diff_rows), diff_formats, title="SLA column level by difficulty")]
+
+
+def _cm_table(cm: dict) -> pd.DataFrame:
+    rows = []
+    for clause in CLAUSES:
+        vb, vg = cm["baseline"].get(clause), cm["graphrag"].get(clause)
+        rows.append({"Clause": CLAUSE_LABEL[clause], "1-Stage": vb, "2-Stage": vg,
+                     "Δ (2-Stage − 1-Stage)": None if vb is None or vg is None else (vg - vb) * 100})
+    return with_formats(pd.DataFrame(rows), {"1-Stage": "pct", "2-Stage": "pct", "Δ (2-Stage − 1-Stage)": "pp"},
+                        title="CM per clause")
+
+
+def _token_tep_tables(block: dict) -> list:
+    rows = []
+    for key, label in (("t_in", "Mean input tokens (T_in)"), ("t_out", "Mean output tokens (T_out)"),
+                       ("t_mean", "Mean token consumption (T)"), ("t_median", "Median token consumption (T)")):
+        vb, vg = block["token"]["baseline"].get(key), block["token"]["graphrag"].get(key)
+        rows.append({"Measure": label, "1-Stage": vb, "2-Stage": vg,
+                     "Δ (2-Stage − 1-Stage)": None if is_missing(vb) or is_missing(vg) else vg - vb,
+                     "Relative change": (vg - vb) / vb if not is_missing(vb) and not is_missing(vg) and vb else None})
+    diff_rows = []
+    for d in DIFFICULTIES:
+        vb = block["token"]["baseline"]["t_mean_by_difficulty"].get(d)
+        vg = block["token"]["graphrag"]["t_mean_by_difficulty"].get(d)
+        if vb is not None or vg is not None:
+            diff_rows.append({"Difficulty": DIFF_LABEL[d], "T 1-Stage": vb, "T 2-Stage": vg,
+                              "Δ T": None if vb is None or vg is None else vg - vb})
+    tep = block["tep"]
+    tep_row = {"Status": tep["status"], "ΔEX (pp)": tep["delta_ex"] * 100 if "delta_ex" in tep else None,
+               "ΔT": tep.get("delta_t"), "TEP": tep.get("tep"), "Reason": tep.get("reason", "")}
+    return [with_formats(pd.DataFrame(rows), {"1-Stage": "num1", "2-Stage": "num1", "Δ (2-Stage − 1-Stage)": "dnum1",
+                                              "Relative change": "rel"}, title="Token consumption"),
+            with_formats(pd.DataFrame(diff_rows), {"T 1-Stage": "num1", "T 2-Stage": "num1", "Δ T": "dnum1"},
+                         title="Mean token consumption by difficulty"),
+            with_formats(pd.DataFrame([tep_row]), {"ΔEX (pp)": "pp", "ΔT": "dnum1", "TEP": "num4"},
+                         title="TEP (2-Stage vs 1-Stage)")]
+
+
+def _qvt_table(qvt: dict) -> pd.DataFrame:
+    rows = [{"Variant": label, "Status": qvt[c]["status"], "QVT": qvt[c].get("qvt"),
+             "Queries included": qvt[c].get("queries_included"), "Queries total": qvt[c].get("queries_total"),
+             "Reason": qvt[c].get("reason", "")} for c, label in _STAGES]
+    return with_formats(pd.DataFrame(rows), {"QVT": "pct", "Queries included": "int", "Queries total": "int"}, title="QVT")
+
+
+def metric_tables(results: dict) -> list:
+    """[(nama sheet, judul, [tabel])] untuk keenam metrik, berurutan, dipakai notebook DAN Excel."""
+    m = results["metrics"]
+    return [
+        ("M1 SLA", "Metric 1: Schema Linking Accuracy (SLA)", _sla_tables(m["sla"])),
+        ("M2 ESM", "Metric 2: Exact Set Match (ESM)", [_accuracy_table(m["esm"], "ESM by difficulty")]),
+        ("M3 EX", "Metric 3: Execution Accuracy (EX)", [_accuracy_table(m["ex"], "EX by difficulty")]),
+        ("M4 CM", "Metric 4: Component Match (CM)", [_cm_table(m["cm"])]),
+        ("M5 Token TEP", "Metric 5: Token Consumption and TEP", _token_tep_tables(m["token_tep"])),
+        ("M6 QVT", "Metric 6: Query Variance Testing (QVT)", [_qvt_table(m["qvt"])]),
+    ]
+
+
 def cm_from_logs(baseline_logs: list, graphrag_logs: list) -> pd.DataFrame:
     """Component Match per klausa dari raw_logs (definisi aggregate_cm: rata-rata nilai non-None)."""
     def agg(logs, c):

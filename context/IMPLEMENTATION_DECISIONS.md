@@ -611,6 +611,29 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 - Skor n-gram pendek terhadap teks tabel panjang (nama + semua kolom) tidak sebanding dengan skor terhadap nama tabel saja, jadi threshold 0.60 belum tentu optimal untuk Baseline. Baseline belum punya notebook trial sendiri: ukur dulu SLA tabel Baseline di beberapa threshold sebelum memakai angka bersama.
 - Run Baseline lama (top-k% dengan satu embedding utuh) tidak sebanding dengan run sesudah perubahan ini.
 
+## 33. Alur tiga model: 1-Stage dan 2-Stage, metrik lalu dimensi, lalu simpan (2026-11-05)
+
+**Keputusan peneliti:** eksperimen memakai tiga model Qwen2.5-Coder (3B, 7B, 14B), dijalankan oleh tiga orang yang hanya mengganti model di `eval_pipeline.ipynb`. Output harus berurutan: 6 metrik, lalu dimensi, lalu semua disimpan ke JSON dan Excel, per model dan gabungan.
+
+**Penamaan:** menurut peneliti, `baseline` di kode adalah GraphRAG **1-Stage** dan `graphrag` adalah GraphRAG **2-Stage**. Nama file dan kunci data sengaja tetap (`baseline_log.json`, `graphrag_log.json`, kunci dimensi), karena dipakai di banyak modul. Tabel metrik baru memakai label 1-Stage dan 2-Stage. DAIL-SQL akan menjadi baseline baru dan belum diimplementasikan; saat itu definisi di poin 18 dan nama `baseline` di kode perlu ditinjau ulang.
+
+**Enam metrik** mengikuti subbab `EVALUATION_ANALYSIS_GUIDE.md` Bagian 1: SLA, ESM, EX, CM, Token Consumption + TEP (subbab 1.5), QVT.
+
+**Yang berubah:**
+- `llm_model_frame` menjadi 3B, 7B, 14B (1.5B dihapus). `cfg.resolve_llm_model("14B")` mengubah nama pendek menjadi nama lengkap.
+- `src/experiments/metrics_summary.py` (baru) menulis `metrics_results.json` dari raw_logs. Tidak ada formula baru. TEP dihitung dengan `compute_tep()` yang sama dengan Dimensi 1. QVT hanya dibaca kalau datanya dibangun dari raw_logs run itu, supaya file lama tidak terbaca.
+- `run_metrics_analysis()` di `pipeline.py` membangun data QVT dan menulis metrik; `run_dimension_analysis(build_qvt=False)` memakai data QVT yang sama. `run_comparison()` kini juga menulis `hasil_skripsi.xlsx`.
+- `eval_pipeline.ipynb`: semua model memakai folder `outputs/models/<model>/` (trial: `outputs/trial/models/<model>/`), **termasuk 7B yang sebelumnya menulis ke `outputs/` dan `data/raw_logs/`**. Bagian 13 berisi satu subbagian per metrik. Sel kode diberi komentar per baris.
+- `export_excel.py`: sheet `M1`-`M6`, urutan sheet metrik -> dimensi -> rincian pendukung.
+- `src/experiments/combine_models.py` (baru) menulis `hasil_gabungan.{json,xlsx}` dan memberi peringatan untuk model yang belum ada, run percobaan, dan commit/konfigurasi yang berbeda. Model yang sama muncul dua kali ditolak.
+
+**Yang tetap:** format prompt, greedy decoding, formula metrik, skema raw_logs, dan `pipeline.py --baseline` tanpa `--models` (masih menulis ke `outputs/` dan `data/raw_logs/`, jadi tidak ikut digabung).
+
+**Keterbatasan:**
+- Dimensi 6 memakai EX per k dari `ablation.py`, yang dijalankan dengan satu model. Angkanya sama di ketiga model, dan sheet D6 diberi catatan tentang hal ini.
+- Risiko hasil `ablation.py` tertimpa belum diperbaiki: run dengan sebagian `--k-values` menghapus baris k lain, dan nama file tidak memuat sample atau model.
+- Alur ini baru diuji dengan raw_logs sintetis dan library ML yang di-mock, belum dengan GPU. Memori 14B di T4 belum diukur.
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER

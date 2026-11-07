@@ -41,7 +41,6 @@ class PipelineConfig:
     # with the best top-k / few-shot config from stages 1-2.
     # `python src/experiments/pipeline.py --baseline --models all`
     llm_model_frame: list[str] = field(default_factory=lambda: [
-        "Qwen/Qwen2.5-Coder-1.5B-Instruct",
         "Qwen/Qwen2.5-Coder-3B-Instruct",
         "Qwen/Qwen2.5-Coder-7B-Instruct",
         "Qwen/Qwen2.5-Coder-14B-Instruct",
@@ -180,6 +179,15 @@ class PipelineConfig:
 
     def __post_init__(self) -> None:
         self.validate()
+
+    def resolve_llm_model(self, name: str) -> str:
+        """Short name -> full model id: "14B" -> "Qwen/Qwen2.5-Coder-14B-Instruct". A full id is returned as is."""
+        if "/" in name:
+            return name
+        matches = [m for m in self.llm_model_frame if f"-{name.upper()}-" in m]
+        if len(matches) != 1:
+            raise ValueError(f"Unknown model {name!r}; choose from llm_model_frame: {self.llm_model_frame}")
+        return matches[0]
 
     def validate(self) -> None:
         """Catch old absolute top-k values (e.g. 3) left in the pct fields."""
