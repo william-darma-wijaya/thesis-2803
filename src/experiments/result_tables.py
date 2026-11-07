@@ -33,7 +33,8 @@ CLAUSES = ["select", "from", "where", "group_by", "order_by", "having", "keyword
 CLAUSE_LABEL = {"select": "SELECT", "from": "FROM", "where": "WHERE", "group_by": "GROUP BY",
                 "order_by": "ORDER BY", "having": "HAVING", "keywords": "Keywords",
                 "union": "UNION", "union_all": "UNION ALL", "intersect": "INTERSECT", "except": "EXCEPT"}
-CONDITIONS = (("baseline", "Baseline"), ("graphrag", "GraphRAG"))
+# Label tampilan pipeline: Baseline = 1-stage, GraphRAG = 2-stage. Kode, raw_logs, dan CSV tetap memakai baseline/graphrag.
+CONDITIONS = (("baseline", "1-stage"), ("graphrag", "2-stage"))
 
 # kind -> (format Python untuk notebook, number_format Excel)
 KINDS = {
@@ -52,6 +53,10 @@ KINDS = {
     "text":  (None, None),
 }
 _DELTA_OF = {"pct": "pp", "int": "dint", "num1": "dnum1", "num3": "dnum3", "num4": "dnum4"}
+
+
+def pipeline_label(mode) -> str:
+    return dict(CONDITIONS).get(str(mode).lower(), mode)
 
 
 def with_formats(df: pd.DataFrame, formats: Optional[dict] = None, row_kind: Optional[dict] = None,
@@ -237,12 +242,12 @@ def overall_comparison(baseline_logs: list, graphrag_logs: list, alpha: float,
         if not (is_missing(vb) or is_missing(vg)):
             delta = (vg - vb) * (100 if kind == "pct" else 1)
             rel = (vg - vb) / vb if show_rel and vb else None
-        rows.append({"Metric": label, "Baseline": vb, "GraphRAG": vg, "Δ (GraphRAG − Baseline)": delta,
+        rows.append({"Metric": label, "1-stage": vb, "2-stage": vg, "Δ (2-stage − 1-stage)": delta,
                      "Relative change": rel, "_kind": kind})
     df = pd.DataFrame(rows)
     return with_formats(df, {"Relative change": "rel"},
-                         {"cols": ["Baseline", "GraphRAG", "Δ (GraphRAG − Baseline)"], "delta": ["Δ (GraphRAG − Baseline)"]},
-                         "Overall comparison: Baseline vs GraphRAG")
+                         {"cols": ["1-stage", "2-stage", "Δ (2-stage − 1-stage)"], "delta": ["Δ (2-stage − 1-stage)"]},
+                         "Overall comparison: 1-stage vs 2-stage")
 
 
 def by_difficulty(baseline_logs: list, graphrag_logs: list, alpha: float) -> pd.DataFrame:
@@ -257,16 +262,16 @@ def by_difficulty(baseline_logs: list, graphrag_logs: list, alpha: float) -> pd.
         r = {"Difficulty": DIFF_LABEL[d], "Queries": len(g) or len(b)}
         for metric, key in (("EX", "ex_result"), ("ESM", "esm_result")):
             vb, vg = mean([e[key] for e in b]), mean([e[key] for e in g])
-            r[f"{metric} Baseline"], r[f"{metric} GraphRAG"] = vb, vg
+            r[f"{metric} 1-stage"], r[f"{metric} 2-stage"] = vb, vg
             r[f"Δ {metric}"] = None if vb is None or vg is None else (vg - vb) * 100
         tb, tg = mean([_t(e, alpha) for e in b]), mean([_t(e, alpha) for e in g])
-        r["T Baseline"], r["T GraphRAG"] = tb, tg
+        r["T 1-stage"], r["T 2-stage"] = tb, tg
         r["Δ T"] = None if tb is None or tg is None else tg - tb
         rows.append(r)
     df = pd.DataFrame(rows)
-    return with_formats(df, {"Queries": "int", "EX Baseline": "pct", "EX GraphRAG": "pct", "Δ EX": "pp",
-                              "ESM Baseline": "pct", "ESM GraphRAG": "pct", "Δ ESM": "pp",
-                              "T Baseline": "num1", "T GraphRAG": "num1", "Δ T": "dnum1"},
+    return with_formats(df, {"Queries": "int", "EX 1-stage": "pct", "EX 2-stage": "pct", "Δ EX": "pp",
+                              "ESM 1-stage": "pct", "ESM 2-stage": "pct", "Δ ESM": "pp",
+                              "T 1-stage": "num1", "T 2-stage": "num1", "Δ T": "dnum1"},
                          title="Metrics by difficulty")
 
 
@@ -327,26 +332,26 @@ def token_reduction(baseline_logs: list, graphrag_logs: list, alpha: float) -> l
     if not pairs:
         return []
     summ = tr.reduction_summary(pairs, alpha)
-    rows = [{"Quantity": v["label"], "Baseline (mean)": v["baseline_mean"], "GraphRAG (mean)": v["graphrag_mean"],
-             "Reduction (1 − ΣG/ΣB)": v["reduction"], "Median per-query reduction": v["median_reduction"],
+    rows = [{"Quantity": v["label"], "1-stage (mean)": v["baseline_mean"], "2-stage (mean)": v["graphrag_mean"],
+             "Reduction (1 − Σ2-stage/Σ1-stage)": v["reduction"], "Median per-query reduction": v["median_reduction"],
              "Queries": v["n"]} for v in summ.values()]
-    main = with_formats(pd.DataFrame(rows), {"Baseline (mean)": "num1", "GraphRAG (mean)": "num1",
-                                             "Reduction (1 − ΣG/ΣB)": "rel", "Median per-query reduction": "rel",
+    main = with_formats(pd.DataFrame(rows), {"1-stage (mean)": "num1", "2-stage (mean)": "num1",
+                                             "Reduction (1 − Σ2-stage/Σ1-stage)": "rel", "Median per-query reduction": "rel",
                                              "Queries": "int"},
-                        title="Column & token reduction: GraphRAG vs Baseline (paired, same queries)")
+                        title="Column & token reduction: 2-stage vs 1-stage (paired, same queries)")
 
     bs, gs = [b for b, _ in pairs], [g for _, g in pairs]
     ex_b, ex_g = sum(e["ex_result"] for e in bs) / len(bs), sum(e["ex_result"] for e in gs) / len(gs)
-    facts = [("Queries paired", len(pairs), "int"), ("EX Baseline", ex_b, "pct"), ("EX GraphRAG", ex_g, "pct"),
-             ("Δ EX (GraphRAG − Baseline)", (ex_g - ex_b) * 100, "pp")]
+    facts = [("Queries paired", len(pairs), "int"), ("EX 1-stage", ex_b, "pct"), ("EX 2-stage", ex_g, "pct"),
+             ("Δ EX (2-stage − 1-stage)", (ex_g - ex_b) * 100, "pp")]
     if "schema_tokens" in summ:
         sb = sum(e["schema_tokens"] for e in bs) / sum(e["token_input"] for e in bs)
-        facts.append(("Schema share of Baseline T_in (Σschema / ΣT_in)", sb, "pct"))
+        facts.append(("Schema share of 1-stage T_in (Σschema / ΣT_in)", sb, "pct"))
     dec = tr.column_decomposition(pairs)
     if dec:
         facts += [("Column reduction: table-selection effect", dec["table_selection"], "rel"),
                   ("Column reduction: column-pruning effect", dec["column_pruning"], "rel")]
-    for label, logs in (("Baseline", bs), ("GraphRAG", gs)):
+    for label, logs in (("1-stage", bs), ("2-stage", gs)):
         rate = tr.full_schema_rate(logs)
         if rate is not None:
             facts.append((f"Prompts containing the whole database ({label})", rate, "pct"))
@@ -373,10 +378,10 @@ def token_reduction_by_difficulty(baseline_logs: list, graphrag_logs: list) -> p
                      "Column reduction": red(lambda e: len(e["predicted_schema"])),
                      "Schema-token reduction": red(lambda e: e["schema_tokens"]) if has_schema else None,
                      "T_in reduction": red(lambda e: e["token_input"]),
-                     "EX Baseline": ex_b, "EX GraphRAG": ex_g, "Δ EX": (ex_g - ex_b) * 100})
+                     "EX 1-stage": ex_b, "EX 2-stage": ex_g, "Δ EX": (ex_g - ex_b) * 100})
     return with_formats(pd.DataFrame(rows), {"Queries": "int", "Column reduction": "rel",
                                              "Schema-token reduction": "rel", "T_in reduction": "rel",
-                                             "EX Baseline": "pct", "EX GraphRAG": "pct", "Δ EX": "pp"},
+                                             "EX 1-stage": "pct", "EX 2-stage": "pct", "Δ EX": "pp"},
                         title="Column & token reduction by difficulty")
 
 
@@ -400,14 +405,14 @@ def paired_ex(baseline_logs: list, graphrag_logs: list) -> pd.DataFrame:
     b = {e["query_id"]: e["ex_result"] for e in baseline_logs}
     g = {e["query_id"]: e["ex_result"] for e in graphrag_logs}
     ids = [q for q in g if q in b]
-    cells = [("Both correct", 1, 1), ("GraphRAG only", 0, 1), ("Baseline only", 1, 0), ("Both wrong", 0, 0)]
+    cells = [("Both correct", 1, 1), ("2-stage only", 0, 1), ("1-stage only", 1, 0), ("Both wrong", 0, 0)]
     rows = []
     for label, vb, vg in cells:
         c = sum(1 for q in ids if b[q] == vb and g[q] == vg)
-        rows.append({"Outcome (EX)": label, "Baseline EX": vb, "GraphRAG EX": vg, "Queries": c,
+        rows.append({"Outcome (EX)": label, "1-stage EX": vb, "2-stage EX": vg, "Queries": c,
                      "Share": c / len(ids) if ids else None})
     df = pd.DataFrame(rows)
-    return with_formats(df, {"Baseline EX": "int", "GraphRAG EX": "int", "Queries": "int", "Share": "pct"},
+    return with_formats(df, {"1-stage EX": "int", "2-stage EX": "int", "Queries": "int", "Share": "pct"},
                          title="Paired EX per query")
 
 
@@ -441,10 +446,10 @@ def sql_feature_usage(baseline_logs: list, graphrag_logs: list) -> pd.DataFrame:
     for label, pat in _SQL_FEATURES:
         share = lambda logs, key: (sum(_has_feature(e[key], pat) for e in logs) / len(logs)) if logs else None
         rows.append({"SQL feature": label, "Gold": share(gold, "gold_sql"),
-                     "Baseline prediction": share(baseline_logs, "predicted_sql"),
-                     "GraphRAG prediction": share(graphrag_logs, "predicted_sql")})
+                     "1-stage prediction": share(baseline_logs, "predicted_sql"),
+                     "2-stage prediction": share(graphrag_logs, "predicted_sql")})
     df = pd.DataFrame(rows)
-    return with_formats(df, {"Gold": "pct", "Baseline prediction": "pct", "GraphRAG prediction": "pct"},
+    return with_formats(df, {"Gold": "pct", "1-stage prediction": "pct", "2-stage prediction": "pct"},
                          title="SQL feature usage (share of queries)")
 
 
@@ -474,10 +479,10 @@ def cm_from_logs(baseline_logs: list, graphrag_logs: list) -> pd.DataFrame:
     rows = []
     for c in CLAUSES:
         vb, vg = agg(baseline_logs, c), agg(graphrag_logs, c)
-        rows.append({"Clause": CLAUSE_LABEL[c], "CM Baseline": vb, "CM GraphRAG": vg,
+        rows.append({"Clause": CLAUSE_LABEL[c], "CM 1-stage": vb, "CM 2-stage": vg,
                      "Δ CM": None if vb is None or vg is None else (vg - vb) * 100})
     df = pd.DataFrame(rows)
-    return with_formats(df, {"CM Baseline": "pct", "CM GraphRAG": "pct", "Δ CM": "pp"},
+    return with_formats(df, {"CM 1-stage": "pct", "CM 2-stage": "pct", "Δ CM": "pp"},
                          title="Component match (CM) per clause")
 
 
@@ -491,16 +496,16 @@ def per_query(baseline_logs: list, graphrag_logs: list, alpha: float) -> pd.Data
         bb = b.get(g["query_id"])
         r = {"Query ID": g["query_id"], "DB": g["db_id"], "Difficulty": DIFF_LABEL.get(g["difficulty"], g["difficulty"]),
              "Gold SQL": g["gold_sql"],
-             "Baseline SQL": bb["predicted_sql"] if bb else None, "GraphRAG SQL": g["predicted_sql"]}
-        for label, e in (("Baseline", bb), ("GraphRAG", g)):
+             "1-stage SQL": bb["predicted_sql"] if bb else None, "2-stage SQL": g["predicted_sql"]}
+        for label, e in (("1-stage", bb), ("2-stage", g)):
             r[f"EX {label}"] = e["ex_result"] if e else None
             r[f"ESM {label}"] = e["esm_result"] if e else None
-        for label, e in (("Baseline", bb), ("GraphRAG", g)):
+        for label, e in (("1-stage", bb), ("2-stage", g)):
             r[f"T_in {label}"] = e["token_input"] if e else None
             r[f"T_out {label}"] = e["token_output"] if e else None
             r[f"T {label}"] = _t(e, alpha) if e else None
         r["Gold columns"] = len(g["gold_schema"])
-        for label, e in (("Baseline", bb), ("GraphRAG", g)):
+        for label, e in (("1-stage", bb), ("2-stage", g)):
             if e is None:
                 r[f"Columns sent {label}"] = r[f"Column recall {label}"] = r[f"Column precision {label}"] = None
                 continue
@@ -522,23 +527,23 @@ def per_query(baseline_logs: list, graphrag_logs: list, alpha: float) -> pd.Data
 
 def confound_table(diag: dict) -> pd.DataFrame:
     """Counter confound diagnostics (read-only, poin 20) per pipeline."""
-    rows = [{"Diagnostic": "Samples", "Gold": diag["n_samples"], "Baseline": None, "GraphRAG": None},
+    rows = [{"Diagnostic": "Samples", "Gold": diag["n_samples"], "1-stage": None, "2-stage": None},
             {"Diagnostic": "Queries with outer JOIN", "Gold": diag["outer_join_gold"],
-             "Baseline": diag["outer_join_pred_baseline"], "GraphRAG": diag["outer_join_pred_graphrag"]},
+             "1-stage": diag["outer_join_pred_baseline"], "2-stage": diag["outer_join_pred_graphrag"]},
             {"Diagnostic": "Outer-JOIN predictions with ESM=1 and EX=0", "Gold": None,
-             "Baseline": diag["outer_join_norm_masked_baseline"], "GraphRAG": diag["outer_join_norm_masked_graphrag"]},
+             "1-stage": diag["outer_join_norm_masked_baseline"], "2-stage": diag["outer_join_norm_masked_graphrag"]},
             {"Diagnostic": "Official EX=0, order-insensitive row match", "Gold": None,
-             "Baseline": diag["ex0_orderinsensitive_match_baseline"], "GraphRAG": diag["ex0_orderinsensitive_match_graphrag"]},
+             "1-stage": diag["ex0_orderinsensitive_match_baseline"], "2-stage": diag["ex0_orderinsensitive_match_graphrag"]},
             {"Diagnostic": "  of which gold has ORDER BY", "Gold": None,
-             "Baseline": diag["ex0_orderinsensitive_match_baseline_gold_orderby"],
-             "GraphRAG": diag["ex0_orderinsensitive_match_graphrag_gold_orderby"]},
+             "1-stage": diag["ex0_orderinsensitive_match_baseline_gold_orderby"],
+             "2-stage": diag["ex0_orderinsensitive_match_graphrag_gold_orderby"]},
             {"Diagnostic": "  of which gold has no ORDER BY", "Gold": None,
-             "Baseline": diag["ex0_orderinsensitive_match_baseline"] - diag["ex0_orderinsensitive_match_baseline_gold_orderby"],
-             "GraphRAG": diag["ex0_orderinsensitive_match_graphrag"] - diag["ex0_orderinsensitive_match_graphrag_gold_orderby"]},
+             "1-stage": diag["ex0_orderinsensitive_match_baseline"] - diag["ex0_orderinsensitive_match_baseline_gold_orderby"],
+             "2-stage": diag["ex0_orderinsensitive_match_graphrag"] - diag["ex0_orderinsensitive_match_graphrag_gold_orderby"]},
             {"Diagnostic": "Gold SQL not executable (excluded)", "Gold": diag["gold_unexecutable"],
-             "Baseline": None, "GraphRAG": None}]
+             "1-stage": None, "2-stage": None}]
     df = pd.DataFrame(rows)
-    return with_formats(df, {"Gold": "int", "Baseline": "int", "GraphRAG": "int"}, title="Confound diagnostics (counts)")
+    return with_formats(df, {"Gold": "int", "1-stage": "int", "2-stage": "int"}, title="Confound diagnostics (counts)")
 
 
 # ---------------------------------------------------------------------------
@@ -635,14 +640,14 @@ def dim1_tables(dims: Optional[dict]) -> list:
         exb = ex["baseline"]["overall"] if d == "overall" else ex["baseline"]["by_difficulty"].get(d)
         exg = ex["graphrag"]["overall"] if d == "overall" else ex["graphrag"]["by_difficulty"].get(d)
         rows.append({"Difficulty": "All" if d == "overall" else DIFF_LABEL[d],
-                     "Mean T Baseline": b["mean"], "Mean T GraphRAG": g["mean"], "Δ mean T": g["mean"] - b["mean"],
+                     "Mean T 1-stage": b["mean"], "Mean T 2-stage": g["mean"], "Δ mean T": g["mean"] - b["mean"],
                      "Relative change T": (g["mean"] - b["mean"]) / b["mean"] if b["mean"] else None,
-                     "Median T Baseline": b["median"], "Median T GraphRAG": g["median"],
-                     "EX Baseline": None if exb is None else exb / 100, "EX GraphRAG": None if exg is None else exg / 100,
+                     "Median T 1-stage": b["median"], "Median T 2-stage": g["median"],
+                     "EX 1-stage": None if exb is None else exb / 100, "EX 2-stage": None if exg is None else exg / 100,
                      "Δ EX": None if exb is None or exg is None else exg - exb})
     tokens = with_formats(pd.DataFrame(rows), {
-        "Mean T Baseline": "num1", "Mean T GraphRAG": "num1", "Δ mean T": "dnum1", "Relative change T": "rel",
-        "Median T Baseline": "num1", "Median T GraphRAG": "num1", "EX Baseline": "pct", "EX GraphRAG": "pct", "Δ EX": "pp"},
+        "Mean T 1-stage": "num1", "Mean T 2-stage": "num1", "Δ mean T": "dnum1", "Relative change T": "rel",
+        "Median T 1-stage": "num1", "Median T 2-stage": "num1", "EX 1-stage": "pct", "EX 2-stage": "pct", "Δ EX": "pp"},
         title="D1 · Token consumption and EX by difficulty")
     t = r["tep"]
     tep = with_formats(pd.DataFrame([{"ΔEX (pp)": t["delta_ex"], "ΔT (tokens)": t["delta_t"], "TEP": t["tep"]}]),
@@ -663,10 +668,10 @@ def dim2_tables(dims: Optional[dict]) -> list:
         if not b or not g:
             continue
         rows.append({"Difficulty": "All" if d == "overall" else DIFF_LABEL[d],
-                     "ESM Baseline": b["esm"] / 100, "ESM GraphRAG": g["esm"] / 100, "Δ ESM": g["esm"] - b["esm"],
-                     "EX Baseline": b["ex"] / 100, "EX GraphRAG": g["ex"] / 100, "Δ EX": g["ex"] - b["ex"]})
-    return [with_formats(pd.DataFrame(rows), {"ESM Baseline": "pct", "ESM GraphRAG": "pct", "Δ ESM": "pp",
-                                               "EX Baseline": "pct", "EX GraphRAG": "pct", "Δ EX": "pp"},
+                     "ESM 1-stage": b["esm"] / 100, "ESM 2-stage": g["esm"] / 100, "Δ ESM": g["esm"] - b["esm"],
+                     "EX 1-stage": b["ex"] / 100, "EX 2-stage": g["ex"] / 100, "Δ EX": g["ex"] - b["ex"]})
+    return [with_formats(pd.DataFrame(rows), {"ESM 1-stage": "pct", "ESM 2-stage": "pct", "Δ ESM": "pp",
+                                               "EX 1-stage": "pct", "EX 2-stage": "pct", "Δ EX": "pp"},
                           title="D2 · ESM and EX by difficulty")]
 
 
@@ -676,11 +681,11 @@ def dim3_tables(dims: Optional[dict]) -> list:
         return []
     cm = r["cm_per_clause"]
     rows = [{"Clause": CLAUSE_LABEL.get(c, c),
-             "CM Baseline": None if cm["baseline"].get(c) is None else cm["baseline"][c] / 100,
-             "CM GraphRAG": None if cm["graphrag"].get(c) is None else cm["graphrag"][c] / 100,
+             "CM 1-stage": None if cm["baseline"].get(c) is None else cm["baseline"][c] / 100,
+             "CM 2-stage": None if cm["graphrag"].get(c) is None else cm["graphrag"][c] / 100,
              "Δ CM": cm.get("delta", {}).get(c)}
             for c in CLAUSES if c in cm["baseline"]]
-    return [with_formats(pd.DataFrame(rows), {"CM Baseline": "pct", "CM GraphRAG": "pct", "Δ CM": "pp"},
+    return [with_formats(pd.DataFrame(rows), {"CM 1-stage": "pct", "CM 2-stage": "pct", "Δ CM": "pp"},
                           title="D3 · Component match per clause")]
 
 
@@ -697,8 +702,8 @@ def dim4_tables(dims: Optional[dict]) -> list:
     qvt = with_formats(pd.DataFrame(rows), {"QVT": "num4", "Query groups": "int", "Included (≥1 variant correct)": "int",
                                              "Excluded (all variants wrong)": "int", "Groups with QVT < 1": "int"},
                         title="D4 · Query Variance Testing (QVT)")
-    delta = with_formats(pd.DataFrame([{"ΔQVT (GraphRAG − Baseline)": r.get("delta_qvt")}]),
-                          {"ΔQVT (GraphRAG − Baseline)": "dnum4"}, title="D4 · ΔQVT")
+    delta = with_formats(pd.DataFrame([{"ΔQVT (2-stage − 1-stage)": r.get("delta_qvt")}]),
+                          {"ΔQVT (2-stage − 1-stage)": "dnum4"}, title="D4 · ΔQVT")
     out = [qvt, delta]
     if r.get("esm_cross"):
         rows = []
@@ -787,10 +792,10 @@ def ablation_tables(df: Optional[pd.DataFrame]) -> list:
         for k, rw in piv.iterrows():
             vb, vg = rw.get("baseline"), rw.get("graphrag")
             vals = [v for v in (vb, vg) if not is_missing(v)]
-            rows.append({"k": int(k), "EX Baseline": None if is_missing(vb) else vb / 100,
-                         "EX GraphRAG": None if is_missing(vg) else vg / 100,
+            rows.append({"k": int(k), "Few-shot selection": sel, "EX 1-stage": None if is_missing(vb) else vb / 100,
+                         "EX 2-stage": None if is_missing(vg) else vg / 100,
                          "Mean EX (both pipelines)": sum(vals) / len(vals) / 100 if len(vals) == 2 else None})
-        out.append(with_formats(pd.DataFrame(rows), {"k": "int", "EX Baseline": "pct", "EX GraphRAG": "pct",
+        out.append(with_formats(pd.DataFrame(rows), {"k": "int", "EX 1-stage": "pct", "EX 2-stage": "pct",
                                                       "Mean EX (both pipelines)": "pct"},
                                  title=f"Ablation stage 2 · EX per k (few-shot selection: {sel})"))
     spec = [("mode", "Pipeline", None, None), ("few_shot_selection", "Few-shot selection", None, None), ("k", "k", "int", None),
@@ -799,7 +804,8 @@ def ablation_tables(df: Optional[pd.DataFrame]) -> list:
             ("avg_recall", "Proxy recall", "pct", 0.01), ("avg_precision", "Proxy precision", "pct", 0.01),
             ("n_samples", "Queries", "int", None), ("tables_pct", "Tables pct", "num2", None),
             ("columns_pct", "Columns pct", "num2", None), ("llm_model", "LLM", None, None)]
-    out.append(_select(df.sort_values(["few_shot_selection", "mode", "k"]), spec, "Ablation stage 2 · detail per pipeline and k"))
+    detail = df.sort_values(["few_shot_selection", "mode", "k"]).assign(mode=lambda d: d["mode"].map(pipeline_label))
+    out.append(_select(detail, spec, "Ablation stage 2 · detail per pipeline and k"))
     return out
 
 
@@ -813,62 +819,107 @@ def model_tables(df: Optional[pd.DataFrame]) -> list:
         exb, exg = g("baseline", "ex"), g("graphrag", "ex")
         tb, tg = g("baseline", "avg_token_consumption"), g("graphrag", "avg_token_consumption")
         rows.append({"Model": str(m).split("/")[-1],
-                     "EX Baseline": None if is_missing(exb) else exb / 100, "EX GraphRAG": None if is_missing(exg) else exg / 100,
+                     "EX 1-stage": None if is_missing(exb) else exb / 100, "EX 2-stage": None if is_missing(exg) else exg / 100,
                      "Δ EX": None if is_missing(exb) or is_missing(exg) else exg - exb,
-                     "T Baseline": tb, "T GraphRAG": tg,
+                     "T 1-stage": tb, "T 2-stage": tg,
                      "Relative change T": (tg - tb) / tb if not (is_missing(tb) or is_missing(tg)) and tb else None})
-    summary = with_formats(pd.DataFrame(rows), {"EX Baseline": "pct", "EX GraphRAG": "pct", "Δ EX": "pp",
-                                                 "T Baseline": "num1", "T GraphRAG": "num1", "Relative change T": "rel"},
+    summary = with_formats(pd.DataFrame(rows), {"EX 1-stage": "pct", "EX 2-stage": "pct", "Δ EX": "pp",
+                                                 "T 1-stage": "num1", "T 2-stage": "num1", "Relative change T": "rel"},
                             title="Model comparison · summary")
     spec = [("llm_model", "Model", None, None), ("mode", "Pipeline", None, None), ("n", "Queries", "int", None),
             ("ex", "EX", "pct", 0.01), ("esm", "ESM", "pct", 0.01), ("avg_t_in", "T_in", "num1", None),
             ("avg_t_out", "T_out", "num1", None), ("avg_token_consumption", "Token consumption", "num1", None),
             ("few_shot_k", "Few-shot k", "int", None), ("few_shot_selection", "Few-shot selection", None, None),
             ("tables_pct", "Tables pct", "num2", None), ("columns_pct", "Columns pct", "num2", None)]
-    return [summary, _select(df, spec, "Model comparison · detail")]
+    return [summary, _select(df.assign(mode=df["mode"].map(pipeline_label)), spec, "Model comparison · detail")]
 
 
-_TRIAL_SPEC = [("trial", "Trial", None, None), ("table_threshold", "Table threshold (T)", "num2", None),
-               ("column_threshold", "Column threshold (K)", "num2", None), ("stopword", "Stopword mode", None, None),
-               ("value_link", "Value linking", None, None), ("traversal", "Traversal", None, None),
-               ("no_pk", "Connect no-PK tables", None, None), ("nama_embed", "Embedded names", None, None),
-               ("max_ngram", "max_ngram", "int", None),
-               ("tbl_P", "Table P", "pct", None), ("tbl_R", "Table R", "pct", None), ("tbl_F1", "Table F1", "pct", None),
-               ("col_P", "Column P", "pct", None), ("col_R", "Column R", "pct", None), ("col_F1", "Column F1", "pct", None),
-               ("col_P_ne", "Column P (non-empty gold)", "pct", None), ("col_R_ne", "Column R (non-empty gold)", "pct", None),
-               ("cols_sent", "Columns in prompt", "num1", None), ("col_reduction", "Column reduction vs full DB", "pct", None),
-               ("cols_tables_full", "Columns of prompt tables (full)", "num1", None),
-               ("schema_tokens", "Schema tokens (DDL)", "num1", None),
-               ("prompt_tokens_k0", "Prompt tokens (zero-shot)", "num1", None),
-               ("n", "Queries", "int", None)]
-
-_TRIAL_VS_SPEC = [("table_threshold", "Table threshold (T)", "num2", None), ("column_threshold", "Column threshold (K)", "num2", None),
-                  ("tbl_R", "GraphRAG table R", "pct", None), ("col_P_ne", "GraphRAG column P (non-empty gold)", "pct", None),
-                  ("col_R_ne", "GraphRAG column R (non-empty gold)", "pct", None),
-                  ("col_R_ne_B", "Baseline column R (non-empty gold)", "pct", None),
-                  ("cols_G", "Columns GraphRAG", "num1", None), ("cols_B", "Columns Baseline", "num1", None),
-                  ("cols_red", "Column reduction", "rel", None),
-                  ("schema_tok_G", "Schema tokens GraphRAG", "num1", None), ("schema_tok_B", "Schema tokens Baseline", "num1", None),
-                  ("schema_tok_red", "Schema-token reduction", "rel", None),
-                  ("prompt_tok_G", "Prompt tokens GraphRAG (k=0)", "num1", None),
-                  ("prompt_tok_B", "Prompt tokens Baseline (k=0)", "num1", None),
-                  ("prompt_tok_red", "Prompt-token reduction (k=0)", "rel", None),
-                  ("table_effect", "Column reduction: table-selection effect", "rel", None),
-                  ("prune_effect", "Column reduction: column-pruning effect", "rel", None),
-                  ("n", "Queries", "int", None)]
+def _with_median(field: str, header: str, kind: str) -> list:
+    """Rata-rata, lalu median per query (median_summary() di token_reduction.py)."""
+    return [(field, f"Avg {header}", kind, None), (f"{field}_med", f"Median {header}", kind, None)]
 
 
-def sla_trial_tables(recap: Optional[pd.DataFrame], configs: Optional[list],
-                     vs_baseline: Optional[pd.DataFrame] = None) -> list:
-    out = []
-    if recap is not None and not recap.empty:
-        out.append(_select(recap, _TRIAL_SPEC, "SLA trial · recap (G1-G7)"))
-    if configs:
-        df = pd.concat(configs)
-        df.index.name = "pipeline"
-        df = df.reset_index().sort_values(["table_threshold", "column_threshold", "pipeline"])
-        out.append(_select(df, [("pipeline", "Pipeline", None, None)] + _TRIAL_SPEC[1:3] + _TRIAL_SPEC[8:],
-                           "SLA trial · per threshold pair"))
-    if vs_baseline is not None and not vs_baseline.empty:
-        out.append(_select(vs_baseline, _TRIAL_VS_SPEC, "SLA trial · GraphRAG (T, K) vs Baseline at the same T"))
-    return out
+_TRIAL_THRESHOLDS = [("table_threshold", "Table threshold (T)", "num2", None),
+                     ("column_threshold", "Column threshold (K)", "num2", None)]
+_TRIAL_SETTINGS = [("stopword", "Stopwords", None, None), ("value_link", "Value linking", None, None),
+                   ("traversal", "Traversal", None, None), ("no_pk", "No-PK tables", None, None),
+                   ("nama_embed", "Embedded names", None, None)]
+_TRIAL_MEASURES = [("max_ngram", "max_ngram", "int", None),
+                   ("ex", "EX (zero-shot)", "pct", None),
+                   ("tbl_P", "Table P", "pct", None), ("tbl_R", "Table R", "pct", None), ("tbl_F1", "Table F1", "pct", None),
+                   ("col_P", "Column P", "pct", None), ("col_R", "Column R", "pct", None), ("col_F1", "Column F1", "pct", None),
+                   ("col_P_ne", "Column P (non-empty gold)", "pct", None), ("col_R_ne", "Column R (non-empty gold)", "pct", None),
+                   *_with_median("tables_sent", "tables in prompt", "num1"), *_with_median("tables_db", "tables in DB", "num1"),
+                   *_with_median("tables_pct", "tables retrieved, % of DB", "pct"),
+                   *_with_median("cols_sent", "columns in prompt", "num1"),
+                   ("cols_tables_full", "Avg columns of prompt tables, if sent whole", "num1", None),
+                   *_with_median("cols_db", "columns in DB", "num1"), *_with_median("cols_pct", "columns retrieved, % of DB", "pct"),
+                   ("col_reduction", "Column reduction vs full DDL", "pct", None),
+                   *_with_median("schema_tokens", "schema tokens", "num1"), ("schema_tokens_db", "Avg schema tokens, full DDL", "num1", None),
+                   ("schema_red_db", "Schema-token reduction vs full DDL", "pct", None),
+                   *_with_median("prompt_tokens_k0", "prompt tokens (k=0)", "num1"),
+                   ("prompt_tokens_k0_db", "Avg prompt tokens, full DDL (k=0)", "num1", None),
+                   ("prompt_red_db", "Prompt-token reduction vs full DDL", "pct", None),
+                   ("n", "Queries", "int", None)]
+# Nilai pengaturan yang ditulis notebook trial -> teks Excel
+_TRIAL_SETTING_VALUES = {"value_link": {"mati": "off", "teks": "text", "teks+angka": "text + numbers"},
+                         "no_pk": {"lepas": "not connected", "sambung": "connected"},
+                         "nama_embed": {"asli": "original"}}
+
+# Tiap langkah preprocessing dibandingkan dengan langkah yang menjadi dasarnya: G5 dibangun dari G3, bukan G4 (angka tidak dipakai).
+_STEP_PARENT = {"G2": "G1", "G3": "G2", "G4": "G3", "G5": "G3", "G6": "G5", "G7": "G6"}
+_STEP_DELTAS = {"ex": "d_ex", "col_P_ne": "d_col_P_ne", "col_R_ne": "d_col_R_ne", "prompt_tokens_k0": "d_prompt_tokens"}
+_TRIAL_STEP_SPEC = [("trial", "Trial", None, None), *_TRIAL_THRESHOLDS, *_TRIAL_SETTINGS,
+    ("compared_to", "Compared with", None, None),
+    ("ex", "EX (zero-shot)", "pct", None), ("d_ex", "Δ EX", "pp", 100),
+    ("col_P_ne", "Column P (non-empty gold)", "pct", None), ("d_col_P_ne", "Δ Column P", "pp", 100),
+    ("col_R_ne", "Column R (non-empty gold)", "pct", None), ("d_col_R_ne", "Δ Column R", "pp", 100),
+    ("tables_pct", "Tables retrieved, % of DB", "pct", None), ("cols_pct", "Columns retrieved, % of DB", "pct", None),
+    ("cols_sent", "Avg columns in prompt", "num1", None), ("col_reduction", "Column reduction vs full DDL", "pct", None),
+    ("schema_tokens", "Avg schema tokens", "num1", None), ("schema_red_db", "Schema-token reduction vs full DDL", "pct", None),
+    ("prompt_tokens_k0", "Avg prompt tokens (k=0)", "num1", None), ("d_prompt_tokens", "Δ Prompt tokens", "dnum1", None),
+    ("prompt_red_db", "Prompt-token reduction vs full DDL", "pct", None),
+    ("n", "Queries", "int", None)]
+
+
+def _english_settings(df: pd.DataFrame) -> pd.DataFrame:
+    return df.assign(**{c: df[c].replace(m) for c, m in _TRIAL_SETTING_VALUES.items() if c in df.columns})
+
+
+def preprocessing_steps(recap: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """G1-G7 pada satu pasangan (T, K): apa yang berubah di tiap langkah preprocessing, untuk bab metodologi."""
+    step = recap["trial"].str.extract(r"^(G\d) ")[0]
+    first = recap[step == "G1"]
+    if first.empty:
+        return None
+    same_pair = (recap["table_threshold"] == first["table_threshold"].iloc[0]) & (
+        recap["column_threshold"] == first["column_threshold"].iloc[0])
+    df = recap[step.notna() & same_pair].copy()
+    df.index = step[df.index]
+    df = df.sort_index()
+    df["compared_to"] = df.index.map(_STEP_PARENT)
+    for src, delta in _STEP_DELTAS.items():
+        if src in df.columns:
+            df[delta] = df[src] - df["compared_to"].map(df[src])
+    return _select(df, _TRIAL_STEP_SPEC, f"SLA trial · preprocessing steps at T{first['table_threshold'].iloc[0]:.2f}"
+                                         f"/K{first['column_threshold'].iloc[0]:.2f}")
+
+
+def sla_trial_tables(recap: Optional[pd.DataFrame]) -> dict:
+    """Satu tabel per sheet Excel: riwayat preprocessing dan grid threshold; None kalau belum ada. Baris dikenali dari id trial di CSV."""
+    if recap is None or recap.empty:
+        return {"steps": None, "grid": None}
+    recap = _english_settings(recap)
+    # Langkah terakhir (nama natural) ada di dua sheet: di sini hanya pada pasangan (T, K) yang sama dengan langkah lainnya
+    earlier = recap[recap["trial"].str.match(r"G[1-6] ")]
+    same_pair = pd.MultiIndex.from_frame(recap[["table_threshold", "column_threshold"]]).isin(
+        pd.MultiIndex.from_frame(earlier[["table_threshold", "column_threshold"]]))
+    steps = recap[recap["trial"].str.match(r"G[1-6] ") | (recap["trial"].str.match("G7 ") & same_pair)]
+    grid = recap[recap["trial"].str.match("G7|Baseline")].sort_values(
+        ["table_threshold", "column_threshold"], na_position="first")     # 1-stage (tanpa K) di atas 2-stage pada T yang sama
+    grid = grid.assign(pipeline=grid["trial"].map(lambda t: pipeline_label("baseline" if t.startswith("Baseline") else "graphrag")))
+    # Tanpa kolom Trial: baris preprocessing sudah dibedakan oleh kolom pengaturannya
+    step_spec = _TRIAL_SETTINGS + _TRIAL_THRESHOLDS + _TRIAL_MEASURES
+    grid_spec = [("pipeline", "Pipeline", None, None), *_TRIAL_THRESHOLDS, *_TRIAL_SETTINGS, *_TRIAL_MEASURES]
+    return {"steps": _select(steps, step_spec, "Threshold trial · preprocessing steps") if len(steps) else None,
+            "grid": _select(grid, grid_spec, "Threshold trial · threshold grid") if len(grid) else None}

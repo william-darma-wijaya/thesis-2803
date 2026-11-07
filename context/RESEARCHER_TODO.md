@@ -53,7 +53,7 @@ Ablation bertahap (`IMPLEMENTATION_DECISIONS.md` poin 28) — urutannya wajib,
 tiap tahap memakai pemenang tahap sebelumnya. Setelah tiap tahap, **tulis
 pemenangnya ke `config.py`** (atau oper lewat flag `--tables-pct` dkk).
 
-- [ ] **Tahap 1 — threshold tabel & kolom** (tanpa LLM, SLA): sejak poin 30/32
+- [ ] **Tahap 1 — threshold tabel & kolom** (SLA; EX zero-shot butuh GPU, poin 35, `RUN_EX = False` untuk tanpa LLM): sejak poin 30/32
   tidak lagi top-k%. GraphRAG dan Baseline sama-sama memilih tabel by
   `table_similarity_threshold` (default 0.60), kolom GraphRAG by
   `semantic_similarity_threshold` (0.70). Dituning di

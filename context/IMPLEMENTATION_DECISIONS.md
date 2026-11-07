@@ -649,6 +649,36 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 
 **Tes:** `python tests/test_sampling.py` (skema mainan, parser + `eval_hardness` resmi SPIDER; kalau data nltk `punkt` belum ada di lokal, tes memakai tokenizer regex pengganti).
 
+## 35. Trial threshold melacak EX, persentase tabel/kolom per DB, dan reduksi terhadap DDL penuh (2026-11-05)
+
+**Keputusan peneliti:** ablation threshold juga mencatat EX, persentase tabel & kolom yang di-retrieve dari total database yang dipakai, serta reduksi kolom dan token terhadap DDL penuh database tersebut. Ini tracing tambahan, bukan aturan pilih: threshold tetap dipilih manual oleh peneliti (poin 33). Semua kode di bawah adalah kode custom skripsi; hanya skor EX yang berasal dari `eval_exec_match()` resmi SPIDER lewat `esm_ex_cm.py`.
+
+**Definisi per query** (`_row()` di `graphrag_sla_trial.ipynb`, kedua pipeline dengan cara yang sama):
+- `tables_sent` = jumlah tabel unik di `predicted_schema`; `tables_db` = jumlah tabel di database pertanyaan itu.
+- `cols_sent` = jumlah kolom di `predicted_schema`; `cols_db` = jumlah kolom database itu, tanpa `*`.
+- `schema_tokens_db` = token DDL penuh database; `prompt_tokens_k0_db` = token prompt zero-shot kalau DDL penuh yang dikirim.
+- DDL penuh dibangun dengan `build_table_schema_context()` atas semua tabel DB. Satu string pembanding untuk GraphRAG dan Baseline, jadi angka reduksi kedua pipeline bisa dibandingkan langsung. Tokenizer sama dengan T_in (string mentah, poin 33).
+
+**Agregasi per konfigurasi** (`full_db_summary()` di `src/metrics/token_reduction.py`):
+- `tables_pct` = rata-rata per query dari `tables_sent / tables_db`; `cols_pct` = rata-rata per query dari `cols_sent / cols_db`. Setiap query berbobot sama, berapa pun ukuran DB-nya.
+- `col_reduction` = `1 - Σ cols_sent / Σ cols_db`; `schema_red_db` = `1 - Σ schema_tokens / Σ schema_tokens_db`; `prompt_red_db` = `1 - Σ prompt_tokens_k0 / Σ prompt_tokens_k0_db`. Rasio total, sama seperti reduksi terhadap Baseline (poin 33).
+- Karena beda agregasi, `1 - cols_pct` tidak harus sama dengan `col_reduction`: DB besar berbobot lebih di rasio total.
+- **Median** (`median_summary()`, keputusan peneliti): distribusi per query miring karena ukuran DB dan fallback seluruh DB. Tabel, kolom, dan token di prompt, ukuran DB, serta persentase dari DB dilaporkan dengan median di samping rata-rata. Kuartil sempat ditambahkan lalu dibuang atas permintaan peneliti. Rata-rata tetap dipakai untuk total, biaya, reduksi, dan TEP (median tidak bisa mengembalikan total). EX (0/1 per query) dan P/R SLA (macro-average, guide) tetap rata-rata saja. Outlier tidak dibuang karena merupakan perilaku dan biaya nyata.
+
+**EX (bagian 9a notebook, `RUN_EX`, kode `src/experiments/trial_ex.py`):**
+- **Zero-shot.** k belum dipilih pada tahap ini, dan tanpa contoh few-shot beda EX hanya berasal dari beda schema. Prompt-nya persis prompt yang dihitung di `prompt_tokens_k0`, jadi EX dan token di satu baris berasal dari prompt yang sama. EX absolut lebih rendah daripada run akhir (k > 0), jadi yang dibaca adalah perbandingan antar konfigurasi.
+- **Semua baris rekap:** G1-G6 di pasangan `THRESHOLDS`, G7 di tiap `(T, K)`, Baseline di tiap `T`. Maksimum 36 konfigurasi × sampel 20%. G1-G6 hanya dokumentasi preprocessing untuk bab metodologi (kenapa tiap langkah dipakai atau ditolak); preprocessing tetap diputuskan di poin 30 dan tidak dipilih ulang dari angka ini.
+- **Tiap prompt unik digenerate sekali** (greedy decoding deterministik), dengan cache JSONL `outputs/tables/sla_trial_ex_cache.jsonl`, sehingga run yang terputus bisa dilanjutkan. Generasi yang gagal dihitung salah, dihitung di `failed`, dan tidak disimpan.
+- **Konsekuensi:** tahap threshold kini butuh GPU kalau `RUN_EX = True`; `RUN_EX = False` mengembalikan tabel tanpa LLM. EX ini dihitung di dev, jadi ikut dalam limitation poin 34 kalau dipakai sebagai bahan pertimbangan memilih threshold.
+
+**Output:** kolom baru di `sla_trial_recap.csv`; `ex_G` / `ex_B` / `ex_delta` di `sla_trial_vs_baseline.csv`; sheet Excel trial threshold ada dua: `Trial Preprocessing` (riwayat preprocessing G1-G7 di satu pasangan `THRESHOLDS`, default `(0.50, 0.70)`, tanpa kolom Trial karena barisnya dibedakan oleh kolom pengaturan; baris G7 pada pasangan itu sengaja ada di kedua sheet supaya langkah nama natural ikut terdokumentasi) dan `Trial Thresholds` (G7 di tiap `(T, K)`, Baseline di tiap `T`, dengan kolom `Pipeline`). Perbandingan GraphRAG vs Baseline di T yang sama dan tabel Δ per langkah preprocessing (`preprocessing_steps()`, G5 dibanding G3 karena angka G4 tidak dipakai) tetap ditampilkan di notebook (bagian 9b dan 9a) dan `sla_trial_vs_baseline.csv`, tetapi tidak diekspor ke Excel, atas permintaan peneliti.
+
+**Tampilan workbook (keputusan peneliti, berlaku untuk semua sheet):** tabel `result_tables.py` memberi label pipeline `1-stage` (Baseline) dan `2-stage` (GraphRAG), jadi `eval_pipeline.ipynb` ikut berubah. Excel tidak menulis label G1-G7, seluruh teksnya berbahasa Inggris, tidak punya sheet `Info`, dan tiap sheet langsung dimulai dari tabel di baris 1 tanpa judul atau catatan. Akibatnya definisi metrik, nilai α, dan daftar sumber data tidak lagi ada di workbook, dan kolom alasan skip di sheet `Dimensions` dibuang karena teksnya berbahasa Indonesia (tetap ada di `dimensions_report.txt`). Kode, `raw_logs`, CSV, dan notebook trial tetap memakai baseline/graphrag dan id G1-G7.
+
+**Tes:** `python tests/test_trial_tracing.py` (angka dihitung tangan, cache EX, tabel Excel, CSV lama tanpa kolom baru). Sel notebook belum dijalankan dengan Spider asli.
+
+---
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER
