@@ -15,6 +15,8 @@ import re
 import shutil
 # subprocess untuk menjalankan evaluator resmi Spider
 import subprocess
+# time untuk mengukur waktu menulis Excel dan zip
+import time
 # sys untuk mendapatkan lokasi Python yang sedang dipakai
 import sys
 # Path untuk menulis lokasi file
@@ -118,6 +120,10 @@ from src.retrieval.retrieval import (
     # Mencari kolom dari nilai sel yang disebut di pertanyaan
     value_linked_columns,
 )
+# Fungsi membuat indeks nilai sel untuk value linking
+from src.retrieval.value_linking import get_value_index
+# Pencatat latensi per tahap
+from src.utils import timing
 # Fungsi membaca daftar kolom tiap database
 from src.utils.schema_utils import load_db_schema
 # Fungsi menghitung ukuran schema di prompt, untuk reduksi kolom dan token
@@ -188,10 +194,12 @@ class SqlEvaluator:
         print("Loading db_schema + foreign-key maps ...")
         # Simpan konfigurasi
         self.cfg = cfg
-        # Baca daftar kolom tiap database
-        self.db_schema = load_db_schema(str(cfg.tables_json))
-        # Baca peta foreign key tiap database
-        self.kmaps = esm_ex_cm.build_kmaps(str(cfg.tables_json))
+        # Catat waktu menyiapkan evaluator
+        with timing.run_step("evaluator_setup"):
+            # Baca daftar kolom tiap database
+            self.db_schema = load_db_schema(str(cfg.tables_json))
+            # Baca peta foreign key tiap database
+            self.kmaps = esm_ex_cm.build_kmaps(str(cfg.tables_json))
         # Tempat menyimpan objek schema supaya tidak dibuat berulang
         self.schema_cache = {}
         # Tampilkan jumlah database yang terbaca
@@ -272,12 +280,14 @@ def show_run_config(cfg, sample_ratio: float, artifact_dir: Path, raw_logs_dir: 
 
 # Membaca pertanyaan dev set dan mengambil sampel kalau perlu
 def load_dev_questions(cfg, sample_ratio: float) -> list:
-    # Buka file dev set Spider
-    with open(cfg.dev_json, encoding="utf-8") as f:
-        # Baca semua pertanyaan dan gold SQL
-        dev_data = json.load(f)
-    # Ambil sampel per tingkat kesulitan; sample_ratio 1.0 berarti seluruh dev set
-    questions = stratified_sample(dev_data, sample_ratio, cfg.seed)
+    # Catat waktu membaca data dan mengambil sampel
+    with timing.run_step("load_data"):
+        # Buka file dev set Spider
+        with open(cfg.dev_json, encoding="utf-8") as f:
+            # Baca semua pertanyaan dan gold SQL
+            dev_data = json.load(f)
+        # Ambil sampel per tingkat kesulitan; sample_ratio 1.0 berarti seluruh dev set
+        questions = stratified_sample(dev_data, sample_ratio, cfg.seed)
     # Tampilkan jumlah pertanyaan yang dipakai
     print(f"Dev set: {len(questions)} dari {len(dev_data)} pertanyaan dipakai")
     # Kembalikan pertanyaannya
@@ -302,10 +312,12 @@ def write_gold_file(questions: list, artifact_dir: Path) -> Path:
 def build_graphs(cfg) -> tuple:
     # Baca tables.json menjadi tabel berisi semua kolom
     schema_df = load_spider_schema(cfg.tables_json)
-    # Bangun graph per kolom untuk 2-Stage
-    col_graph = build_schema_graph(schema_df)
-    # Bangun graph per tabel untuk 1-Stage
-    tbl_graph = build_table_graph(schema_df)
+    # Bangun graph per kolom untuk 2-Stage, dan catat waktunya
+    with timing.run_step("graph_2stage"):
+        col_graph = build_schema_graph(schema_df)
+    # Bangun graph per tabel untuk 1-Stage, dan catat waktunya
+    with timing.run_step("graph_1stage"):
+        tbl_graph = build_table_graph(schema_df)
     # Tampilkan ukuran graph 2-Stage
     print(f"Graph 2-Stage: {col_graph.number_of_nodes():,} node, {col_graph.number_of_edges():,} edge")
     # Tampilkan ukuran graph 1-Stage
@@ -318,12 +330,14 @@ def build_graphs(cfg) -> tuple:
 def load_models(cfg) -> tuple:
     # Tampilkan model embedding yang dimuat
     print(f"Loading embedding model: {cfg.embedding_model}")
-    # Muat model embedding
-    embed_model = SentenceTransformer(cfg.embedding_model)
+    # Muat model embedding, dan catat waktunya
+    with timing.run_step("load_embedding_model"):
+        embed_model = SentenceTransformer(cfg.embedding_model)
     # Tampilkan LLM yang dimuat
     print(f"Loading LLM: {cfg.llm_model} (4-bit) ...")
-    # Muat LLM dan tokenizer sesuai MODEL yang dipilih
-    llm, tokenizer = load_model_and_tokenizer(cfg)
+    # Muat LLM dan tokenizer sesuai MODEL yang dipilih, dan catat waktunya
+    with timing.run_step("load_llm"):
+        llm, tokenizer = load_model_and_tokenizer(cfg)
     # Tanda bahwa kedua model sudah siap
     print("Model siap.")
     # Kembalikan ketiganya
@@ -338,12 +352,29 @@ def build_indexes(cfg, questions: list, col_graph, tbl_graph, embed_model) -> tu
     print(f"{len(db_ids)} database unik di sampel ini")
     # Tempat embedding kolom dan tabel per database
     col_cache, tbl_cache = {}, {}
-    # Proses tiap database dengan progress bar
-    for db_id in tqdm(db_ids, desc="Index schema"):
-        # Buat embedding kolom untuk 2-Stage
-        col_cache[db_id] = build_schema_index(col_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
-        # Buat embedding tabel untuk 1-Stage
-        tbl_cache[db_id] = build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
+    # Catat total waktu embedding kolom
+    with timing.run_step("index_2stage"):
+        # Proses tiap database dengan progress bar
+        for db_id in tqdm(db_ids, desc="Index schema 2-Stage"):
+            # Buat embedding kolom untuk 2-Stage, dan catat waktu per database
+            with timing.run_step(f"index_2stage/{db_id}"):
+                col_cache[db_id] = build_schema_index(col_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
+    # Catat total waktu embedding tabel
+    with timing.run_step("index_1stage"):
+        # Proses tiap database dengan progress bar
+        for db_id in tqdm(db_ids, desc="Index schema 1-Stage"):
+            # Buat embedding tabel untuk 1-Stage, dan catat waktu per database
+            with timing.run_step(f"index_1stage/{db_id}"):
+                tbl_cache[db_id] = build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
+    # Value linking memakai indeks nilai sel; dibuat di sini supaya tidak masuk latensi per pertanyaan
+    if cfg.use_value_linking:
+        # Catat total waktu membuat indeks nilai sel
+        with timing.run_step("value_index_build"):
+            # Proses tiap database
+            for db_id in db_ids:
+                # Hasilnya disimpan di cache value_linking.py, dan catat waktu per database
+                with timing.run_step(f"value_index_build/{db_id}"):
+                    get_value_index(col_graph, db_id, cfg)
     # Kalau k = 0, kedua varian berjalan tanpa contoh
     if cfg.few_shot_k == 0:
         # Tampilkan keterangannya
@@ -352,8 +383,9 @@ def build_indexes(cfg, questions: list, col_graph, tbl_graph, embed_model) -> tu
         return col_cache, tbl_cache, None
     # Tampilkan status proses
     print("Building few-shot index dari train set ...")
-    # Buat embedding contoh dari train set
-    few_shot_idx = build_few_shot_index(cfg.train_json, embed_model, cfg)
+    # Buat embedding contoh dari train set, dan catat waktunya
+    with timing.run_step("few_shot_train_embedding"):
+        few_shot_idx = build_few_shot_index(cfg.train_json, embed_model, cfg)
     # Tampilkan jumlah contoh dan cara seleksinya
     print(f"Few-shot index: {len(few_shot_idx.examples)} contoh training (selection={few_shot_idx.selection})")
     # Kembalikan semua index
@@ -501,50 +533,58 @@ def walk_through_1stage(tools: Tools, item: dict, two_stage: dict) -> None:
 def _run_2stage(tools: Tools, item: dict, i: int, results: RunResults) -> dict:
     # Coba jalankan
     try:
-        # Terima SQL, proxy, schema, kolom terpilih, dan jumlah token
-        pred, recall, precision, schema_context, nodes, n_in, n_out = run_single(
-            # Input pertanyaan, gold SQL, dan database
-            item["question"], item["query"], item["db_id"],
-            # Graph, model, dan konfigurasi
-            tools.col_graph, tools.embed_model, tools.llm, tools.tokenizer, tools.cfg,
-            # Index yang sudah dibuat
-            schema_index=tools.col_cache[item["db_id"]], few_shot_index=tools.few_shot_idx,
-        )
+        # Kumpulkan waktu tiap tahap untuk pertanyaan ini
+        with timing.collect() as latency:
+            # Terima SQL, proxy, schema, kolom terpilih, dan jumlah token
+            pred, recall, precision, schema_context, nodes, n_in, n_out = run_single(
+                # Input pertanyaan, gold SQL, dan database
+                item["question"], item["query"], item["db_id"],
+                # Graph, model, dan konfigurasi
+                tools.col_graph, tools.embed_model, tools.llm, tools.tokenizer, tools.cfg,
+                # Index yang sudah dibuat
+                schema_index=tools.col_cache[item["db_id"]], few_shot_index=tools.few_shot_idx,
+            )
     # Kalau generate gagal, catat errornya dan lanjut
     except Exception as e:
         # Catat varian, posisi, database, dan pesan error
         results.gen_errors.append(("graphrag", i, item["db_id"], repr(e)))
         # Pakai SQL pengganti supaya run tidak berhenti
         pred, recall, precision, schema_context, nodes, n_in, n_out = "SELECT 1", 0.0, 0.0, "", [], 0, 0
-    # Kembalikan hasilnya sebagai dictionary
-    return {"pred": pred, "recall": recall, "precision": precision, "schema_context": schema_context, "nodes": nodes, "n_in": n_in, "n_out": n_out}
+    # Kembalikan hasilnya sebagai dictionary; tanpa generate (n_in = 0), latensi tidak dicatat
+    return {"pred": pred, "recall": recall, "precision": precision, "schema_context": schema_context, "nodes": nodes, "n_in": n_in, "n_out": n_out,
+            # Waktu tiap tahap, ditambah total retrieval dan end-to-end
+            "latency": timing.finish_query(latency) if n_in else None}
 
 
 # Menjalankan 1-Stage untuk satu pertanyaan
 def _run_1stage(tools: Tools, item: dict, i: int, results: RunResults) -> dict:
     # Coba jalankan
     try:
-        # Terima SQL, proxy, tabel terpilih, dan jumlah token
-        pred, recall, precision, nodes, n_in, n_out = run_single_baseline(
-            # Input pertanyaan, gold SQL, dan database
-            item["question"], item["query"], item["db_id"],
-            # Graph, model, dan konfigurasi
-            tools.tbl_graph, tools.embed_model, tools.llm, tools.tokenizer, tools.cfg,
-            # Index yang sudah dibuat
-            table_index=tools.tbl_cache[item["db_id"]], few_shot_index=tools.few_shot_idx,
-        )
+        # Kumpulkan waktu tiap tahap untuk pertanyaan ini
+        with timing.collect() as latency:
+            # Terima SQL, proxy, tabel terpilih, dan jumlah token
+            pred, recall, precision, nodes, n_in, n_out = run_single_baseline(
+                # Input pertanyaan, gold SQL, dan database
+                item["question"], item["query"], item["db_id"],
+                # Graph, model, dan konfigurasi
+                tools.tbl_graph, tools.embed_model, tools.llm, tools.tokenizer, tools.cfg,
+                # Index yang sudah dibuat
+                table_index=tools.tbl_cache[item["db_id"]], few_shot_index=tools.few_shot_idx,
+            )
     # Kalau generate gagal, catat errornya dan lanjut
     except Exception as e:
         # Catat varian, posisi, database, dan pesan error
         results.gen_errors.append(("baseline", i, item["db_id"], repr(e)))
         # Pakai SQL pengganti supaya run tidak berhenti
         pred, recall, precision, nodes, n_in, n_out = "SELECT 1", 0.0, 0.0, [], 0, 0
-    # Kembalikan hasilnya sebagai dictionary
-    return {"pred": pred, "recall": recall, "precision": precision, "nodes": nodes, "n_in": n_in, "n_out": n_out}
+    # Kembalikan hasilnya sebagai dictionary; tanpa generate (n_in = 0), latensi tidak dicatat
+    return {"pred": pred, "recall": recall, "precision": precision, "nodes": nodes, "n_in": n_in, "n_out": n_out,
+            # Waktu tiap tahap, ditambah total retrieval dan end-to-end
+            "latency": timing.finish_query(latency) if n_in else None}
 
 
 # Menyusun satu catatan raw_logs
-def _log_entry(query_id: str, item: dict, gold_schema: list, predicted_schema: list, stats: dict, side: dict, evaluation) -> dict:
+def _log_entry(query_id: str, item: dict, gold_schema: list, predicted_schema: list, stats: dict, side: dict, evaluation, eval_time: dict) -> dict:
     # Isinya mengikuti skema di EVALUATION_ANALYSIS_GUIDE.md Bagian 2
     return {
         # Identitas pertanyaan
@@ -559,6 +599,8 @@ def _log_entry(query_id: str, item: dict, gold_schema: list, predicted_schema: l
         **stats,
         # Jumlah token input dan output
         "token_input": side["n_in"], "token_output": side["n_out"],
+        # Latensi tiap tahap dalam detik, kosong kalau generate gagal
+        "latency": {**side["latency"], **eval_time} if side["latency"] else None,
         # Hasil ESM dan EX
         "esm_result": evaluation.esm, "ex_result": evaluation.ex,
         # Hasil CM per klausa
@@ -574,10 +616,12 @@ def _evaluate_and_log(tools: Tools, item: dict, i: int, two: dict, one: dict, ta
         db_id, gold_sql = item["db_id"], item["query"]
         # Ambil kolom yang dipakai gold SQL
         gold_schema = tools.evaluator.gold_columns(gold_sql, db_id)
-        # Evaluasi prediksi 2-Stage
-        eval_2 = tools.evaluator.evaluate(two["pred"], gold_sql, db_id)
-        # Evaluasi prediksi 1-Stage
-        eval_1 = tools.evaluator.evaluate(one["pred"], gold_sql, db_id)
+        # Evaluasi prediksi 2-Stage, dan catat waktunya
+        with timing.collect() as time_2, timing.step("evaluation"):
+            eval_2 = tools.evaluator.evaluate(two["pred"], gold_sql, db_id)
+        # Evaluasi prediksi 1-Stage, dan catat waktunya
+        with timing.collect() as time_1, timing.step("evaluation"):
+            eval_1 = tools.evaluator.evaluate(one["pred"], gold_sql, db_id)
         # Perbarui penghitung confound; ini tidak mengubah nilai metrik
         _update_confound_diag(results.confound_diag, tools.evaluator.db_path(db_id), gold_sql, two["pred"], eval_2, one["pred"], eval_1)
         # Buat ID pertanyaan dari posisinya
@@ -593,16 +637,17 @@ def _evaluate_and_log(tools: Tools, item: dict, i: int, two: dict, one: dict, ta
         # Hitung token schema dan jumlah kolom 1-Stage
         stats_1 = prompt_stats(schema_1, db_id, table_cols, context_1, tools.tokenizer)
         # Simpan catatan 2-Stage
-        results.graphrag_logs.append(_log_entry(query_id, item, gold_schema, schema_2, stats_2, two, eval_2))
+        results.graphrag_logs.append(_log_entry(query_id, item, gold_schema, schema_2, stats_2, two, eval_2, time_2))
         # Simpan catatan 1-Stage
-        results.baseline_logs.append(_log_entry(query_id, item, gold_schema, schema_1, stats_1, one, eval_1))
+        results.baseline_logs.append(_log_entry(query_id, item, gold_schema, schema_1, stats_1, one, eval_1, time_1))
     # Catat error evaluasi
     except Exception as e:
         # Simpan posisi, database, dan pesan error
         results.eval_errors.append((i, item["db_id"], repr(e)))
 
 
-# Menjalankan kedua varian untuk semua pertanyaan
+# Menjalankan kedua varian untuk semua pertanyaan, dan mencatat total waktunya
+@timing.run_step("main_loop")
 def run_all_questions(tools: Tools, questions: list) -> RunResults:
     # Siapkan wadah hasil
     results = RunResults(confound_diag=_new_confound_diag())
@@ -747,6 +792,10 @@ def show_diagnostics(results: RunResults, alpha: float) -> None:
     show(rt.sql_feature_usage(results.baseline_logs, results.graphrag_logs))
     # Tampilkan confound diagnostics
     show(rt.confound_table(results.confound_diag))
+    # Proses tabel latensi per tahap
+    for table in rt.latency_tables(results.baseline_logs, results.graphrag_logs):
+        # Tampilkan tabelnya
+        show(table)
 
 
 # ---------------------------------------------------------------------------
@@ -808,8 +857,9 @@ def run_spider_check(cfg, artifact_dir: Path, gold_path: Path) -> dict:
     scores = {}
     # Proses kedua file prediksi
     for label, pred_path in prediction_paths(artifact_dir).items():
-        # Jalankan evaluator resmi
-        scores[label] = _run_spider_for(cfg, label, pred_path, gold_path, tmp)
+        # Jalankan evaluator resmi, dan catat waktunya per varian
+        with timing.run_step(f"spider_official/{label}"):
+            scores[label] = _run_spider_for(cfg, label, pred_path, gold_path, tmp)
     # Tampilkan ringkasan skor resmi
     show(rt.spider_summary(scores))
     # Kembalikan skornya untuk disimpan di akhir
@@ -931,14 +981,20 @@ def save_all_results(model: str, results: RunResults, metrics_results: dict, spi
                      dim_results: dict, dim_report: str, artifact_dir: Path, raw_logs_dir: Path) -> Path:
     # Folder tabel model ini
     tables_dir = artifact_dir / "tables"
-    # Simpan keenam metrik ke JSON
-    print(f"Tersimpan: {save_metrics_results(metrics_results, tables_dir)}")
-    # Simpan hasil dimensi ke JSON dan teks
-    save_dimension_outputs(dim_results, dim_report, tables_dir)
-    # Simpan laporan teks dan confound diagnostics
-    _save_comparison_report(results, tables_dir)
-    # Simpan skor evaluator resmi
-    _save_spider_scores(spider_scores, tables_dir)
+    # Catat waktu menyimpan JSON dan laporan
+    with timing.run_step("save_json_reports"):
+        # Simpan keenam metrik ke JSON
+        print(f"Tersimpan: {save_metrics_results(metrics_results, tables_dir)}")
+        # Simpan hasil dimensi ke JSON dan teks
+        save_dimension_outputs(dim_results, dim_report, tables_dir)
+        # Simpan laporan teks dan confound diagnostics
+        _save_comparison_report(results, tables_dir)
+        # Simpan skor evaluator resmi
+        _save_spider_scores(spider_scores, tables_dir)
+    # Simpan waktu sekali-jalan, GPU, dan puncak VRAM supaya ikut masuk Excel
+    timing.save_run(tables_dir)
+    # Mulai mengukur waktu Excel dan zip; keduanya tidak bisa mencatat dirinya sendiri di dalam file
+    start = time.perf_counter()
     # Buat satu file Excel dari semua hasil
     xlsx = build_workbook(raw_logs_dir, tables_dir, tables_dir / "hasil_skripsi.xlsx", skip_missing=True)
     # Tampilkan lokasi Excel
@@ -957,5 +1013,7 @@ def save_all_results(model: str, results: RunResults, metrics_results: dict, spi
         shutil.copytree(raw_logs_dir, raw_copy, dirs_exist_ok=True)
     # Siapkan file unduhan kalau berjalan di Kaggle
     _make_kaggle_download(model, xlsx, artifact_dir)
+    # Tampilkan waktu menulis Excel dan zip
+    print(f"Waktu menulis Excel dan zip: {time.perf_counter() - start:.1f} detik")
     # Kembalikan lokasi Excel
     return xlsx

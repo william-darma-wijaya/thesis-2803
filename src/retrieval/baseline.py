@@ -58,6 +58,7 @@ from src.core.config import PipelineConfig
 from src.generation.few_shot import FewShotIndex, build_few_shot_block, build_few_shot_index
 from src.generation.generation import build_prompt, generate_sql_with_token_count, load_model_and_tokenizer
 from src.retrieval.retrieval import _extract_phrases, k_from_pct
+from src.utils import timing
 from src.core.schema import load_spider_schema, normalize_identifier
 
 logging.basicConfig(
@@ -461,10 +462,12 @@ def retrieve_baseline_tables(
     ):
         return _all_table_nodes(graph, db_id)
 
-    detected = semantic_linking_table_level(table_index, question, embed_model, cfg)
+    with timing.step("table_linking"):
+        detected = semantic_linking_table_level(table_index, question, embed_model, cfg)
     if not detected:
         return _all_table_nodes(graph, db_id)
-    return trace_table_paths(graph, detected)
+    with timing.step("path_tracing"):
+        return trace_table_paths(graph, detected)
 
 
 def table_nodes_to_schema(graph: nx.Graph, table_nodes: list[str]) -> list[str]:
@@ -513,21 +516,27 @@ def run_single_baseline(
                       generate_sql_with_token_count() pattern as pipeline.py's
                       run_single() and ablation.py's _run_k()
     """
-    table_nodes = retrieve_baseline_tables(graph, db_id, question, table_index, embed_model, cfg)
+    with timing.step("retrieval_search"):
+        table_nodes = retrieve_baseline_tables(graph, db_id, question, table_index, embed_model, cfg)
     if not table_nodes:
         return "SELECT 1", 0.0, 0.0, [], 0, 0
 
-    recall, precision = evaluate_table_linking(gold_sql, table_nodes, graph, db_id)
-    schema_context = build_table_schema_context(graph, table_nodes)
-    few_shot_block = build_few_shot_block(question, few_shot_index, embed_model, cfg)
+    with timing.step("proxy_eval"):
+        recall, precision = evaluate_table_linking(gold_sql, table_nodes, graph, db_id)
+    with timing.step("build_ddl"):
+        schema_context = build_table_schema_context(graph, table_nodes)
+    with timing.step("few_shot"):
+        few_shot_block = build_few_shot_block(question, few_shot_index, embed_model, cfg)
 
     extracted_values = {
         "strings": re.findall(r"'([^']*)'", question),
         "numbers": re.findall(r"\d+", question),
     }
-    prompt = build_prompt(question, schema_context, extracted_values, few_shot_block)
+    with timing.step("build_prompt"):
+        prompt = build_prompt(question, schema_context, extracted_values, few_shot_block)
     pred_sql, n_out = generate_sql_with_token_count(prompt, model, tokenizer, cfg)
-    n_in = len(tokenizer.encode(prompt))
+    with timing.step("count_t_in"):
+        n_in = len(tokenizer.encode(prompt))
 
     return pred_sql, recall, precision, table_nodes, n_in, n_out
 

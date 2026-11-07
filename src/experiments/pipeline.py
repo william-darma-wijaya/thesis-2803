@@ -77,6 +77,8 @@ from src.utils.sql_normalize import normalize_sql_file_for_parsing
 from src.metrics.sla import extract_ground_truth_schema
 from src.utils.prompt_stats import columns_per_table, prompt_stats
 from src.utils.sampling import stratified_sample
+from src.retrieval.value_linking import get_value_index
+from src.utils import timing
 from src.utils.schema_utils import load_db_schema
 from src.utils.sql_execution import compare_execution_results, execute_sql
 
@@ -165,26 +167,32 @@ def run_single(
         schema_index = build_schema_index(graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
 
     # --- Schema retrieval (Stage 1 tables -> Stage 2 columns -> traversal) ---
-    column_nodes, _ = retrieve_graphrag_schema(graph, db_id, question, schema_index, embed_model, cfg)
+    with timing.step("retrieval_search"):
+        column_nodes, _ = retrieve_graphrag_schema(graph, db_id, question, schema_index, embed_model, cfg)
 
     if not column_nodes:
         return "SELECT 1", 0.0, 0.0, "", [], 0, 0
 
     # --- Schema linking evaluation ---
-    recall, precision = evaluate_schema_linking(gold_sql, column_nodes, graph, db_id)
+    with timing.step("proxy_eval"):
+        recall, precision = evaluate_schema_linking(gold_sql, column_nodes, graph, db_id)
 
     # --- Few-shot example retrieval (same helper + k as the baseline) ---
-    few_shot_block = build_few_shot_block(question, few_shot_index, embed_model, cfg)
+    with timing.step("few_shot"):
+        few_shot_block = build_few_shot_block(question, few_shot_index, embed_model, cfg)
 
     # --- Prompt construction & SQL generation ---
-    schema_context = build_schema_context(graph, column_nodes)
+    with timing.step("build_ddl"):
+        schema_context = build_schema_context(graph, column_nodes)
     extracted_values = {
         "strings": re.findall(r"'([^']*)'", question),
         "numbers": re.findall(r"\d+", question),
     }
-    prompt = build_prompt(question, schema_context, extracted_values, few_shot_block)
+    with timing.step("build_prompt"):
+        prompt = build_prompt(question, schema_context, extracted_values, few_shot_block)
     pred_sql, n_out = generate_sql_with_token_count(prompt, model, tokenizer, cfg)
-    n_in = len(tokenizer.encode(prompt))  # T_in -- same pattern as ablation.py's _run_k()
+    with timing.step("count_t_in"):
+        n_in = len(tokenizer.encode(prompt))  # T_in -- same pattern as ablation.py's _run_k()
 
     return pred_sql, recall, precision, schema_context, column_nodes, n_in, n_out
 
@@ -594,16 +602,18 @@ def run_metrics_analysis(
     if full_dev:
         with open(dev_json, "r", encoding="utf-8") as f:
             dev_data = json.load(f)
-        qvt_conditions = set(build_qvt_files(dev_data, raw_logs_dir, qvt_dir))
+        with timing.run_step("qvt_build"):
+            qvt_conditions = set(build_qvt_files(dev_data, raw_logs_dir, qvt_dir))
     with open(raw_logs_dir / "baseline_log.json", encoding="utf-8") as f:
         baseline_logs = json.load(f)
     with open(raw_logs_dir / "graphrag_log.json", encoding="utf-8") as f:
         graphrag_logs = json.load(f)
-    results = build_metrics_results(
-        baseline_logs, graphrag_logs, cfg.token_output_weight,
-        qvt_dir=qvt_dir if full_dev else None, qvt_conditions=qvt_conditions,
-        meta=run_metadata(cfg, sample_ratio),
-    )
+    with timing.run_step("metrics"):
+        results = build_metrics_results(
+            baseline_logs, graphrag_logs, cfg.token_output_weight,
+            qvt_dir=qvt_dir if full_dev else None, qvt_conditions=qvt_conditions,
+            meta=run_metadata(cfg, sample_ratio),
+        )
     if save:
         logger.info("Six metrics saved -> %s", save_metrics_results(results, out_dir))
     return results
@@ -630,10 +640,11 @@ def compute_dimension_analysis(
     elif not full_dev:
         logger.info("Subsampled run -> QVT/Dimension 4 skipped (needs the full dev set).")
 
-    return run_all(
-        raw_logs_dir=raw_logs_dir, qvt_dir=qvt_dir, only=only,
-        ex_per_k=ex_per_k, always_dim5=always_dim5,
-    )
+    with timing.run_step("dimensions"):
+        return run_all(
+            raw_logs_dir=raw_logs_dir, qvt_dir=qvt_dir, only=only,
+            ex_per_k=ex_per_k, always_dim5=always_dim5,
+        )
 
 
 def run_dimension_analysis(
@@ -758,6 +769,7 @@ def run_comparison(
     )
 
     set_seed(cfg.seed)
+    timing.reset_run()
     for sub in ("predictions", "tables", "logs"):
         (out_dir / sub).mkdir(parents=True, exist_ok=True)
     # run_official_evaluation() reads cfg.predictions_file (and writes its
@@ -781,10 +793,12 @@ def run_comparison(
         )
 
     logger.info("Loading embedding model: %s", cfg.embedding_model)
-    embed_model = SentenceTransformer(cfg.embedding_model)
+    with timing.run_step("load_embedding_model"):
+        embed_model = SentenceTransformer(cfg.embedding_model)
 
     logger.info("Loading LLM: %s (4-bit)", cfg.llm_model)
-    llm, tokenizer = load_model_and_tokenizer(cfg)
+    with timing.run_step("load_llm"):
+        llm, tokenizer = load_model_and_tokenizer(cfg)
 
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_data))
 
@@ -810,7 +824,14 @@ def run_comparison(
     few_shot_idx = None
     if cfg.few_shot_k > 0:
         logger.info("Building few-shot index (k=%d, GraphRAG + Baseline) …", cfg.few_shot_k)
-        few_shot_idx = build_few_shot_index(cfg.train_json, embed_model, cfg)
+        with timing.run_step("few_shot_train_embedding"):
+            few_shot_idx = build_few_shot_index(cfg.train_json, embed_model, cfg)
+
+    # Built here so a per-question latency never includes building a database's value index.
+    if cfg.use_value_linking:
+        with timing.run_step("value_index_build"):
+            for db_id in unique_db_ids:
+                get_value_index(col_graph, db_id, cfg)
 
     # ── Raw-log evaluation setup (SLA/ESM/EX/CM per query -> data/raw_logs/) ──
     # This is what feeds src/dimensions/ later (see context/EVALUATION_ANALYSIS_GUIDE.md
@@ -845,29 +866,33 @@ def run_comparison(
 
             # GraphRAG
             try:
-                g_pred, g_recall, g_prec, g_schema, g_column_nodes, g_n_in, g_n_out = run_single(
-                    question, gold_sql, db_id,
-                    col_graph, embed_model, llm, tokenizer, cfg,
-                    schema_index=col_cache[db_id],
-                    few_shot_index=few_shot_idx,
-                )
+                with timing.collect() as g_steps:
+                    g_pred, g_recall, g_prec, g_schema, g_column_nodes, g_n_in, g_n_out = run_single(
+                        question, gold_sql, db_id,
+                        col_graph, embed_model, llm, tokenizer, cfg,
+                        schema_index=col_cache[db_id],
+                        few_shot_index=few_shot_idx,
+                    )
             except Exception:
                 logger.exception("GraphRAG error on sample %d", i)
                 g_pred, g_recall, g_prec, g_schema = "SELECT 1", 0.0, 0.0, ""
                 g_column_nodes, g_n_in, g_n_out = [], 0, 0
+                g_steps = None
 
             # Baseline
             try:
-                b_pred, b_recall, b_prec, b_table_nodes, b_n_in, b_n_out = run_single_baseline(
-                    question, gold_sql, db_id,
-                    tbl_graph, embed_model, llm, tokenizer, cfg,
-                    table_index=tbl_cache[db_id],
-                    few_shot_index=few_shot_idx,
-                )
+                with timing.collect() as b_steps:
+                    b_pred, b_recall, b_prec, b_table_nodes, b_n_in, b_n_out = run_single_baseline(
+                        question, gold_sql, db_id,
+                        tbl_graph, embed_model, llm, tokenizer, cfg,
+                        table_index=tbl_cache[db_id],
+                        few_shot_index=few_shot_idx,
+                    )
             except Exception:
                 logger.exception("Baseline error on sample %d", i)
                 b_pred, b_recall, b_prec = "SELECT 1", 0.0, 0.0
                 b_table_nodes, b_n_in, b_n_out = [], 0, 0
+                b_steps = None
 
             graphrag_results.append(PipelineResult(
                 index=i + 1, db_id=db_id, question=question,
@@ -894,8 +919,10 @@ def run_comparison(
 
                 gold_schema = sorted(extract_ground_truth_schema(gold_sql, db_id, db_schema))
 
-                g_eval = esm_ex_cm.evaluate_single_query(g_pred, gold_sql, db_id, db_path, spider_schema, kmap)
-                b_eval = esm_ex_cm.evaluate_single_query(b_pred, gold_sql, db_id, db_path, spider_schema, kmap)
+                with timing.collect() as g_eval_time, timing.step("evaluation"):
+                    g_eval = esm_ex_cm.evaluate_single_query(g_pred, gold_sql, db_id, db_path, spider_schema, kmap)
+                with timing.collect() as b_eval_time, timing.step("evaluation"):
+                    b_eval = esm_ex_cm.evaluate_single_query(b_pred, gold_sql, db_id, db_path, spider_schema, kmap)
 
                 # Read-only confound instrumentation (never mutates the values
                 # written to raw_logs below). Self-contained try/except inside.
@@ -917,6 +944,7 @@ def run_comparison(
                     "gold_schema": gold_schema,
                     "predicted_schema": g_schema_list,
                     "token_input": g_n_in, "token_output": g_n_out,
+                    "latency": {**timing.finish_query(g_steps), **g_eval_time} if g_n_in else None,
                     **prompt_stats(g_schema_list, db_id, table_cols, g_schema, tokenizer),
                     "esm_result": g_eval.esm, "ex_result": g_eval.ex,
                     "cm_per_clause": g_eval.cm_per_clause,
@@ -927,6 +955,7 @@ def run_comparison(
                     "gold_schema": gold_schema,
                     "predicted_schema": b_schema_list,
                     "token_input": b_n_in, "token_output": b_n_out,
+                    "latency": {**timing.finish_query(b_steps), **b_eval_time} if b_n_in else None,
                     **prompt_stats(b_schema_list, db_id, table_cols, b_context, tokenizer),
                     "esm_result": b_eval.esm, "ex_result": b_eval.ex,
                     "cm_per_clause": b_eval.cm_per_clause,
@@ -1065,6 +1094,7 @@ def run_comparison(
 
     # ── Everything of this run in one workbook ─────────────────────────────
     try:
+        timing.save_run(out_dir / "tables")
         from src.experiments.export_excel import build_workbook
         logger.info("Excel saved -> %s", build_workbook(raw_logs_dir, out_dir / "tables", out_dir / "tables" / "hasil_skripsi.xlsx", skip_missing=True))
     except Exception:

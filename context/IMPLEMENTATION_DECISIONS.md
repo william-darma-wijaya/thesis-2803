@@ -676,6 +676,23 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 - Risiko hasil `ablation.py` tertimpa belum diperbaiki: run dengan sebagian `--k-values` menghapus baris k lain, dan nama file tidak memuat sample atau model.
 - Alur ini baru diuji dengan raw_logs sintetis dan library ML yang di-mock, belum dengan GPU. Memori 14B di T4 belum diukur.
 
+## 36. Latensi per tahap sebagai lampiran (2026-11-07)
+
+**Keputusan peneliti:** semua tahap yang bisa diukur dicatat dan masuk Excel sebagai lampiran; yang dilaporkan di skripsi dipilih nanti. Latensi **bukan** salah satu dari enam metrik di `EVALUATION_ANALYSIS_GUIDE.md`, dan formula metrik yang ada tidak berubah. Ini kode custom skripsi, bukan bagian SPIDER.
+
+**Yang dicatat:**
+- **Per pertanyaan** (field `latency` di raw_logs, detik): 2-Stage `stage1_tables`, `stage2_columns`, `value_linking`, `traversal`; 1-Stage `table_linking`, `path_tracing`; keduanya `retrieval_search`, `build_ddl`, `few_shot`, `build_prompt`, `prompt_tokenize`, `llm_generate`, `sql_clean`, `count_t_in`, `proxy_eval`, `evaluation`, ditambah `retrieval_total` dan `end_to_end`.
+- **Sekali per run** (`tables/latency_run.json`): baca data, graph, muat model, embedding schema (total dan per database), embedding training set, indeks value linking, evaluator, loop utama, evaluator resmi per varian, pembuatan data QVT, metrik, dimensi, simpan JSON/laporan, total waktu, GPU, dan puncak VRAM.
+- **Turunan:** token output per detik, token input per detik generation, porsi retrieval dan generation terhadap end-to-end. Mean, median, dan P95 per tahap, keseluruhan dan per tingkat kesulitan.
+
+**Definisi:** `end_to_end` = pencarian schema + DDL + few-shot + prompt + tokenisasi input + generation + pembersihan SQL. Evaluasi proxy, penghitungan T_in, dan evaluasi SQL tidak ikut, karena bukan bagian dari menjawab pertanyaan.
+
+**Agar tidak bias:** statistik membuang pertanyaan pertama (pemanasan model) dan pertanyaan tanpa generate (`token_input = 0`), tetapi sheet per pertanyaan tetap menampilkan pertanyaan pertama. Indeks value linking dibuat saat setup, supaya tidak masuk latensi pertanyaan pertama tiap database; isi indeks dan hasil retrieval tidak berubah. `torch.cuda.synchronize()` dipanggil di batas tiap tahap saat pencatatan aktif. 2-Stage tetap selalu berjalan lebih dulu per pertanyaan. `gpu` masuk metadata, dan `combine_models.py` memberi peringatan kalau GPU antarmodel berbeda.
+
+**Implementasi:** `src/utils/timing.py`. `timing.step()` tidak melakukan apa pun tanpa `collect()` aktif, jadi `ablation.py`, `sweep.py`, dan signature `run_single()` tidak berubah. Tampilan di `result_tables.latency_tables()` dan `latency_per_query()`, sheet `Latency` dan `Latency Per Query`, serta sheet `Latency` di `hasil_gabungan.xlsx`.
+
+**Keterbatasan:** tahap yang sangat singkat tetap berderau; angka yang paling bisa diandalkan adalah total retrieval, generation, dan end-to-end. Waktu menulis Excel dan zip hanya dicetak di notebook, karena tidak bisa dicatat di dalam file itu sendiri. Masking skeleton berjalan lokal sebelum run, jadi tidak terukur. Jalur CLI `run_comparison()` mencatat latensi per pertanyaan, tetapi hanya sebagian tahap sekali-jalan. Belum diuji dengan GPU.
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER

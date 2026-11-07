@@ -607,6 +607,114 @@ def metric_tables(results: dict) -> list:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Latensi per tahap (lampiran, bukan salah satu dari 6 metrik; poin 36)
+# ---------------------------------------------------------------------------
+
+LATENCY_NOTE = ("Appendix, not one of the six metrics. Times are in seconds and depend on the GPU of the run. "
+                "The first question of a run is left out of the statistics (model warm-up); failed generations are left out too. "
+                "End-to-end excludes proxy evaluation, T_in counting, and SQL evaluation.")
+LATENCY_STEPS = {
+    "stage1_tables": "Stage 1: select tables", "stage2_columns": "Stage 2: select columns",
+    "value_linking": "Value linking", "traversal": "Graph traversal",
+    "table_linking": "Select tables", "path_tracing": "Table path tracing",
+    "retrieval_search": "Schema search (sum of the steps above)", "build_ddl": "Build DDL",
+    "retrieval_total": "Total retrieval (search + DDL)", "few_shot": "Few-shot retrieval", "build_prompt": "Build prompt",
+    "prompt_tokenize": "Tokenize prompt for the LLM", "llm_generate": "LLM generation", "sql_clean": "Decode and clean SQL",
+    "end_to_end": "End-to-end", "count_t_in": "Count T_in (not in end-to-end)",
+    "proxy_eval": "Proxy evaluation (not in end-to-end)", "evaluation": "ESM, EX, CM evaluation (not in end-to-end)",
+}
+_LATENCY_FORMATS = {"Queries": "int", "Mean (s)": "num3", "Median (s)": "num3", "P95 (s)": "num3"}
+
+
+def _latency_entries(logs: list) -> list:
+    return [e for e in (logs[1:] if len(logs) > 1 else logs) if e.get("latency")]
+
+
+def _latency_row(values: list) -> dict:
+    s = pd.Series(values, dtype=float)
+    return {"Queries": len(s), "Mean (s)": s.mean(), "Median (s)": s.median(), "P95 (s)": s.quantile(0.95)}
+
+
+def _latency_by_step(logs_by_stage: dict) -> pd.DataFrame:
+    rows = []
+    for c, label in _STAGES:
+        entries = _latency_entries(logs_by_stage[c])
+        for key, name in LATENCY_STEPS.items():
+            values = [e["latency"][key] for e in entries if key in e["latency"]]
+            if values:
+                rows.append({"Variant": label, "Step": name, **_latency_row(values)})
+    return with_formats(pd.DataFrame(rows), _LATENCY_FORMATS, title="Per-question latency by step")
+
+
+def _latency_by_difficulty(logs_by_stage: dict) -> pd.DataFrame:
+    rows = []
+    for c, label in _STAGES:
+        entries = _latency_entries(logs_by_stage[c])
+        for d in DIFFICULTIES:
+            subset = [e for e in entries if e["difficulty"] == d]
+            for key, name in LATENCY_STEPS.items():
+                values = [e["latency"][key] for e in subset if key in e["latency"]]
+                if values:
+                    rows.append({"Variant": label, "Difficulty": DIFF_LABEL[d], "Step": name, **_latency_row(values)})
+    return with_formats(pd.DataFrame(rows), _LATENCY_FORMATS, title="Per-question latency by difficulty")
+
+
+def _latency_derived(logs_by_stage: dict) -> pd.DataFrame:
+    rows = []
+    for c, label in _STAGES:
+        entries = _latency_entries(logs_by_stage[c])
+        if not entries:
+            continue
+
+        def total(key):
+            return sum(e["latency"].get(key, 0.0) for e in entries)
+
+        generate, end_to_end = total("llm_generate"), total("end_to_end")
+        rows.append({
+            "Variant": label,
+            "Output tokens per second": sum(e["token_output"] for e in entries) / generate if generate else None,
+            "Input tokens per generation second": sum(e["token_input"] for e in entries) / generate if generate else None,
+            "Retrieval share of end-to-end": total("retrieval_total") / end_to_end if end_to_end else None,
+            "Generation share of end-to-end": generate / end_to_end if end_to_end else None,
+        })
+    return with_formats(pd.DataFrame(rows), {"Output tokens per second": "num1", "Input tokens per generation second": "num1",
+                                             "Retrieval share of end-to-end": "pct", "Generation share of end-to-end": "pct"},
+                        title="Derived latency measures")
+
+
+def _latency_run_table(run: dict) -> pd.DataFrame:
+    rows = [{"Item": name, "Value": f"{seconds:,.3f} s"} for name, seconds in run.get("steps", {}).items()]
+    if run.get("elapsed_s") is not None:
+        rows.append({"Item": "Elapsed, first timed step to saving this file", "Value": f"{run['elapsed_s']:,.1f} s"})
+    rows.append({"Item": "GPU", "Value": str(run.get("gpu"))})
+    if run.get("peak_vram_gb") is not None:
+        rows.append({"Item": "Peak VRAM allocated", "Value": f"{run['peak_vram_gb']:.2f} GB"})
+    return with_formats(pd.DataFrame(rows), title="One-time steps, GPU, and peak VRAM")
+
+
+def latency_tables(baseline_logs: list, graphrag_logs: list, run: Optional[dict] = None) -> list:
+    """Tabel ringkasan latensi. raw_logs lama tanpa field latency -> tabel per pertanyaan dilewati."""
+    tables = [_latency_run_table(run)] if run else []
+    logs = {"baseline": baseline_logs, "graphrag": graphrag_logs}
+    if _latency_entries(baseline_logs) or _latency_entries(graphrag_logs):
+        tables += [_latency_by_step(logs), _latency_derived(logs), _latency_by_difficulty(logs)]
+    return tables
+
+
+def latency_per_query(baseline_logs: list, graphrag_logs: list) -> Optional[pd.DataFrame]:
+    """Satu baris per pertanyaan dan varian, semua tahap dalam detik. Pertanyaan pertama tetap ditampilkan."""
+    rows = []
+    for (_, label), logs in zip(_STAGES, (baseline_logs, graphrag_logs)):
+        for e in logs:
+            if e.get("latency"):
+                rows.append({"Query ID": e["query_id"], "DB": e["db_id"], "Variant": label, "Difficulty": DIFF_LABEL[e["difficulty"]],
+                             **{name: e["latency"].get(key) for key, name in LATENCY_STEPS.items()}})
+    if not rows:
+        return None
+    return with_formats(pd.DataFrame(rows), {name: "num3" for name in LATENCY_STEPS.values()}, title="Latency per question")
+
+
 def cm_from_logs(baseline_logs: list, graphrag_logs: list) -> pd.DataFrame:
     """Component Match per klausa dari raw_logs (definisi aggregate_cm: rata-rata nilai non-None)."""
     def agg(logs, c):

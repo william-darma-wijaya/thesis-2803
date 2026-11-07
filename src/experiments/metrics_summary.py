@@ -30,6 +30,7 @@ from src.experiments.result_tables import CLAUSES, DIFFICULTIES, _t, condition_s
 from src.metrics.qvt import aggregate_qvt, compute_qvt_per_query  # noqa: E402
 from src.metrics.sla import aggregate_sla, compute_sla  # noqa: E402
 from src.metrics.tep import compute_tep  # noqa: E402
+from src.utils import timing  # noqa: E402
 
 CONDITIONS = ("baseline", "graphrag")
 CONDITION_LABELS = {"baseline": "1-Stage", "graphrag": "2-Stage"}
@@ -161,6 +162,7 @@ def run_metadata(cfg, sample_ratio: float) -> dict:
         "few_shot_selection": cfg.few_shot_selection,
         "table_threshold": cfg.table_similarity_threshold,
         "column_threshold": cfg.semantic_similarity_threshold,
+        "gpu": timing.gpu_name(),
         "generated_at": f"{datetime.now():%Y-%m-%d %H:%M}",
     }
 

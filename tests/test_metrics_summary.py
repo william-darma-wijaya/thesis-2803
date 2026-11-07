@@ -17,6 +17,7 @@ from src.experiments import combine_models as cm  # noqa: E402
 from src.experiments import result_tables as rt  # noqa: E402
 from src.experiments.export_excel import build_workbook  # noqa: E402
 from src.experiments.metrics_summary import build_metrics_results, save_metrics_results  # noqa: E402
+from src.utils import timing  # noqa: E402
 
 CLAUSE_VALUES = {c: None for c in rt.CLAUSES}
 
@@ -112,6 +113,62 @@ def test_excel_has_metric_sheets_in_order():
         assert names[:8] == ["Info", "Summary", "M1 SLA", "M2 ESM", "M3 EX", "M4 CM", "M5 Token TEP", "M6 QVT"]
         assert names.index("M6 QVT") < names.index("Dimensions") < names.index("Overall")
         assert any("TEP" in str(c.value) for row in wb["M5 Token TEP"].iter_rows() for c in row)
+        wb.close()
+
+
+def _with_latency(entries, scale):
+    return [{**e, "latency": timing.finish_query({
+        "retrieval_search": 0.1 * scale, "build_ddl": 0.1 * scale, "few_shot": 0.1, "build_prompt": 0.1,
+        "prompt_tokenize": 0.1, "llm_generate": 1.0 * (i + 1), "sql_clean": 0.1, "count_t_in": 9.0, "evaluation": 9.0})}
+        for i, e in enumerate(entries)]
+
+
+def test_timing_only_records_inside_collect():
+    with timing.step("outside"):
+        pass
+    with timing.collect() as steps, timing.step("inside"):
+        pass
+    assert list(steps) == ["inside"] and steps["inside"] >= 0
+    with timing.collect() as nested:
+        with timing.step("a"), timing.step("b"):
+            pass
+    assert set(nested) == {"a", "b"}
+    assert timing.finish_query(None) is None
+    done = _with_latency(BASELINE, 1)[0]["latency"]
+    assert abs(done["retrieval_total"] - 0.2) < 1e-9
+    assert abs(done["end_to_end"] - 1.6) < 1e-9   # tanpa count_t_in dan evaluation
+
+
+def test_latency_tables_skip_first_and_failed_question():
+    logs = _with_latency(BASELINE + BASELINE, 1)
+    logs[3] = {**logs[3], "latency": None}
+    run = {"steps": {"load_llm": 1.5}, "elapsed_s": 9.0, "gpu": "1 x T4", "peak_vram_gb": 2.0}
+    tables = rt.latency_tables(logs, _with_latency(GRAPHRAG + GRAPHRAG, 2), run)
+    assert len(tables) == 4
+    by_step = tables[1]
+    row = by_step[(by_step["Variant"] == "1-Stage") & (by_step["Step"] == "LLM generation")].iloc[0]
+    assert row["Queries"] == 2 and row["Mean (s)"] == 2.5   # pertanyaan ke-1 dan ke-4 tidak dihitung
+    assert rt.latency_tables(BASELINE, GRAPHRAG) == []      # raw_logs lama tetap terbaca
+    assert rt.latency_per_query(BASELINE, GRAPHRAG) is None
+    assert len(rt.latency_per_query(logs, logs)) == 6
+
+
+def test_latency_reaches_both_workbooks():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        _write_run(root, "Qwen/Qwen2.5-Coder-7B-Instruct")
+        run = root / "Qwen2.5-Coder-7B-Instruct"
+        (run / "raw_logs" / "baseline_log.json").write_text(json.dumps(_with_latency(BASELINE, 1)), encoding="utf-8")
+        (run / "raw_logs" / "graphrag_log.json").write_text(json.dumps(_with_latency(GRAPHRAG, 2)), encoding="utf-8")
+        (run / "tables" / timing.RUN_FILENAME).write_text(json.dumps({"steps": {"load_llm": 1.5}, "gpu": "1 x T4"}), encoding="utf-8")
+        out = build_workbook(run / "raw_logs", run / "tables", run / "tables" / "hasil.xlsx", skip_missing=True)
+        wb = load_workbook(out)
+        assert {"Latency", "Latency Per Query"} <= set(wb.sheetnames)
+        wb.close()
+        runs = cm.load_runs(root)
+        _, xlsx = cm.write_outputs(runs, cm.find_warnings(runs), root / "combined", root / "none")
+        wb = load_workbook(xlsx)
+        assert "Latency" in wb.sheetnames
         wb.close()
 
 

@@ -4,6 +4,7 @@ export_excel.py — rangkum seluruh hasil run jadi SATU workbook Excel untuk dok
 Membaca (yang tidak ada dilewati; statusnya ditulis di sheet "Info"):
     data/raw_logs/{baseline,graphrag}_log.json      -> Overall, By Difficulty, Retrieval, SQL Diagnostics, Per Query
     outputs/tables/metrics_results.json             -> M1..M6, satu sheet per metrik (metrics_summary.py)
+    outputs/tables/latency_run.json                 -> Latency (src/utils/timing.py)
     outputs/tables/confound_diagnostics.json        -> SQL Diagnostics (pipeline.py --baseline / eval_pipeline.ipynb)
     outputs/tables/spider_official_eval.csv         -> Spider Official (eval_pipeline.ipynb bagian 14)
     outputs/tables/dimensions_results.json          -> Dimensions, D1..D6 (run_all_dimensions.py)
@@ -206,6 +207,7 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
     logs = {c: _read_json(raw_logs_dir / f"{c}_log.json") for c in ("baseline", "graphrag")}
     metrics = _read_json(tables_dir / "metrics_results.json")
     dims = _read_json(tables_dir / "dimensions_results.json")
+    latency_run = _read_json(tables_dir / "latency_run.json")
     confound = _read_json(tables_dir / "confound_diagnostics.json")
     spider = _read_csv(tables_dir / "spider_official_eval.csv")
     ablation = _read_csv(tables_dir / "ablation_results.csv")
@@ -289,6 +291,10 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
         add("Spider Official", "Official Spider evaluation (cross-check)", [],
             f"{tables_dir}/spider_official_eval.csv (written by eval_pipeline.ipynb section 14)")
     add("Per Query", "Per-query results", [rt.per_query(b, g, alpha)] if have_logs else [], raw_missing, freeze_col="D")
+    add("Latency", "Latency per step (appendix)", rt.latency_tables(b, g, latency_run), raw_missing, rt.LATENCY_NOTE)
+    latency_rows = rt.latency_per_query(b, g)
+    add("Latency Per Query", "Latency per question and step, in seconds (appendix)",
+        [latency_rows] if latency_rows is not None else [], raw_missing, freeze_col="D")
 
     add("Ablation", "Ablation stage 2: few-shot k", rt.ablation_tables(ablation), f"{tables_dir}/ablation_results.csv")
     add("Models", "Ablation stage 3: LLM comparison", rt.model_tables(models), f"{tables_dir}/model_comparison.csv")

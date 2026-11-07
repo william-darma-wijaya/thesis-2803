@@ -29,10 +29,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.experiments import result_tables as rt  # noqa: E402
 from src.experiments.export_excel import D6_NOTE, Sheet, _read_csv  # noqa: E402
 from src.experiments.metrics_summary import CONDITION_LABELS, CONDITIONS, RESULTS_FILENAME  # noqa: E402
+from src.utils.timing import RUN_FILENAME  # noqa: E402
 
 # Harus sama di semua model supaya perbandingannya adil.
 COMPARABLE_KEYS = ("commit", "sample_ratio", "seed", "few_shot_k", "few_shot_selection",
-                   "table_threshold", "column_threshold", "alpha", "queries")
+                   "table_threshold", "column_threshold", "alpha", "queries", "gpu")
 
 
 def _slug(model: str) -> str:
@@ -67,7 +68,9 @@ def load_runs(input_dir: Path) -> dict:
         logs = None
         if (logs_dir / "baseline_log.json").exists() and (logs_dir / "graphrag_log.json").exists():
             logs = tuple(json.loads((logs_dir / f"{c}_log.json").read_text(encoding="utf-8")) for c in CONDITIONS)
-        found[slug] = {"path": path, "metrics": metrics, "dimensions": dims, "logs": logs}
+        run_path = path.parent / RUN_FILENAME
+        latency_run = json.loads(run_path.read_text(encoding="utf-8")) if run_path.exists() else None
+        found[slug] = {"path": path, "metrics": metrics, "dimensions": dims, "logs": logs, "latency_run": latency_run}
     return dict(sorted(found.items(), key=lambda kv: (_model_size(kv[0]), kv[0])))
 
 
@@ -175,6 +178,14 @@ def write_outputs(runs: dict, warnings: list, out_dir: Path, shared_tables_dir: 
     if reduction:
         sheet = Sheet(wb, "Token Reduction", "Column and token reduction: 2-Stage vs 1-Stage")
         for table in _concat_by_title(reduction):
+            sheet.table(table)
+        sheet.finish()
+
+    latency = [(s, rt.latency_tables(*(r["logs"] or ([], [])), r["latency_run"])) for s, r in runs.items()]
+    latency = _concat_by_title(latency)
+    if latency:
+        sheet = Sheet(wb, "Latency", "Latency per step (appendix)", rt.LATENCY_NOTE)
+        for table in latency:
             sheet.table(table)
         sheet.finish()
 
