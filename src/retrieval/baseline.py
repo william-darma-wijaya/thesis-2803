@@ -174,13 +174,17 @@ def build_table_index(
     db_name: str,
     embed_model: SentenceTransformer,
     use_natural_names: bool = False,
+    include_columns: bool = False,
 ) -> TableSchemaIndex:
     """
-    Encode each table as a text string that includes the table name AND all
-    its column names. This gives the embedder more signal than just the table
-    name alone, and mirrors the approach from the notebook.
+    Encode each table for Stage 1 table linking.
 
-    Text format: "table <name> columns <col1> <col2> ..."
+    include_columns=False (PipelineConfig.baseline_embed_columns, default): the
+    table NAME only, the same text GraphRAG Stage 1 embeds
+    (retrieval.build_schema_index), so both arms score tables identically.
+
+    include_columns=True ("1-Stage+"): "table <name> columns <col1> <col2> ...",
+    more signal per table but diluted cosine scores against short n-grams.
 
     `use_natural_names=True` (PipelineConfig.embed_natural_names, the same schema
     preprocessing as GraphRAG 2-Stage) embeds Spider's annotated names ("student id")
@@ -204,8 +208,11 @@ def build_table_index(
             c_names = [c.get("ColumnNatural") or c["Column"] for c in d["columns"]]
         else:
             t_name, c_names = d["table"], [c["Column"] for c in d["columns"]]
-        col_names = " ".join(normalize_identifier(c) for c in c_names)
-        texts.append(f"table {normalize_identifier(t_name)} columns {col_names}")
+        if include_columns:
+            col_names = " ".join(normalize_identifier(c) for c in c_names)
+            texts.append(f"table {normalize_identifier(t_name)} columns {col_names}")
+        else:
+            texts.append(normalize_identifier(t_name))
         table_node_ids.append(node_id)
 
     embeddings = embed_model.encode(texts, convert_to_tensor=True)
@@ -236,9 +243,10 @@ def semantic_linking_table_level(
          k_from_pct(pct, #tables in DB) are kept (a cap, never a target);
       3. if nothing passes, the single best table is kept.
 
-    The only difference to GraphRAG 2-Stage is WHAT is matched: here the table text is
-    "table <name> columns <c1> <c2> ..." (a table-level unit), there it is the
-    table name, and GraphRAG 1-Stage has no column stage afterwards.
+    By default (cfg.baseline_embed_columns=False) the matched text is the table
+    NAME, exactly as in GraphRAG 2-Stage, so both arms select the same tables and
+    the only difference is that GraphRAG 1-Stage has no column stage afterwards.
+    With baseline_embed_columns=True the table text is "table <name> columns <c1> ...".
 
     Returns:
         List of table node IDs (e.g. ["concert_singer.singer", ...])
@@ -681,7 +689,8 @@ def run_baseline(
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_data))
     logger.info("Building table indices for %d databases …", len(unique_db_ids))
     table_cache: dict[str, TableSchemaIndex] = {
-        db_id: build_table_index(table_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
+        db_id: build_table_index(table_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names,
+                                 include_columns=cfg.baseline_embed_columns)
         for db_id in tqdm(unique_db_ids, desc="Indexing tables")
     }
 

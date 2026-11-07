@@ -365,7 +365,8 @@ def build_indexes(cfg, questions: list, col_graph, tbl_graph, embed_model) -> tu
         for db_id in tqdm(db_ids, desc="Index schema 1-Stage"):
             # Buat embedding tabel untuk 1-Stage, dan catat waktu per database
             with timing.run_step(f"index_1stage/{db_id}"):
-                tbl_cache[db_id] = build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
+                tbl_cache[db_id] = build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names,
+                                                          include_columns=cfg.baseline_embed_columns)
     # Value linking memakai indeks nilai sel; dibuat di sini supaya tidak masuk latensi per pertanyaan
     if cfg.use_value_linking:
         # Catat total waktu membuat indeks nilai sel

@@ -105,6 +105,11 @@ class PipelineConfig:
     # ORIGINAL names ("stuid"); True = Spider's annotated natural names from
     # tables.json ("student id"). SQL, DDL and node ids always use the original names.
     embed_natural_names: bool = True             # preprocessing (fixed)
+    # Baseline (1-Stage) Stage-1 table text. False (default, head-to-head) = the table
+    # NAME only, exactly what GraphRAG Stage 1 embeds, so both arms pick tables with the
+    # same scores and the same threshold. True = "table <name> columns <c1> <c2> ..."
+    # ("1-Stage+", a stronger baseline; its scores are diluted, so tune its own threshold).
+    baseline_embed_columns: bool = False
 
     # --- Value linking (GraphRAG, exact match; src/retrieval/value_linking.py) ---
     # Question n-grams that exactly equal a cell value ("asia") add that column
@@ -209,6 +214,14 @@ class PipelineConfig:
             raise ValueError(f"few_shot_selection must be 'question' or 'skeleton', got {self.few_shot_selection!r}")
 
 
+def _str2bool(value: str) -> bool:
+    if value.lower() in ("true", "1", "yes"):
+        return True
+    if value.lower() in ("false", "0", "no"):
+        return False
+    raise ValueError(f"expected true|false, got {value!r}")
+
+
 # CLI overrides shared by pipeline.py and ablation.py, so a Kaggle run can use
 # the stage 1/2 winners before they are committed to the defaults above.
 _CLI_OVERRIDES = (
@@ -222,6 +235,8 @@ _CLI_OVERRIDES = (
     ("--few-shot-k", "few_shot_k", int),
     ("--few-shot-selection", "few_shot_selection", str),
     ("--llm-model", "llm_model", str),
+    ("--baseline-embed-columns", "baseline_embed_columns", _str2bool),
+    ("--value-linking", "use_value_linking", _str2bool),
 )
 
 

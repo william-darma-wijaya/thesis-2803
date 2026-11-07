@@ -710,6 +710,29 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 
 **Status hasil saat ini:** semua metrik, dimensi, dan TEP yang dihasilkan kode membandingkan dua varian metode peneliti (2-Stage terhadap 1-Stage). Hasil ini belum merupakan perbandingan dengan baseline skripsi, jadi perbandingan terhadap DAIL-SQL tetap perlu ditambahkan (open item F).
 
+## 38. Stage 1 GraphRAG 1-Stage disamakan dengan 2-Stage: head-to-head, varian sebagai ablation (2026-11-08)
+
+**Temuan:** teks embed tabel berbeda antar varian. 2-Stage meng-embed nama tabel saja (`retrieval.build_schema_index`), sedangkan 1-Stage meng-embed `"table <nama> columns <kolom...>"` (`baseline.build_table_index`), dengan threshold tabel yang sama (0.60). Skor cosine n-gram pendek terhadap teks panjang lebih rendah, jadi threshold yang dituning untuk nama tabel terlalu ketat untuk 1-Stage dan banyak tabel gold jatuh ke fallback 1 tabel. Dugaan ini (belum terbukti, `raw_logs` belum ada) menjelaskan recall kolom 1-Stage 69.5% di bawah 2-Stage 89.5% pada trial awal, padahal 1-Stage mengirim semua kolom tabel terpilih. Poin 32 sudah mencatat risiko ini.
+
+**Keputusan peneliti:** perbandingan utama harus head-to-head, jadi Stage 1 harus identik di kedua varian. Varian lain dijalankan sebagai ablation terpisah.
+
+**Perubahan:**
+- Field baru `baseline_embed_columns` di `PipelineConfig`, default `False`: 1-Stage meng-embed **nama tabel saja**, persis seperti Stage 1 2-Stage (nama natural Spider tetap dipakai di keduanya). `build_table_index(..., include_columns=...)` dipanggil dari `baseline.py`, `pipeline.py`, `ablation.py`, `sweep.py`, dan `notebook_steps.py`.
+- `True` = varian **1-Stage+** (`"table <nama> columns <kolom...>"`), baseline tabel yang lebih kuat. Skornya terencerkan, jadi threshold tabelnya harus dituning sendiri.
+- Flag CLI baru (berlaku di `pipeline.py` dan `ablation.py`): `--baseline-embed-columns true|false` dan `--value-linking true|false`.
+
+**Ablation yang perlu dijalankan (satu faktor per run, semua tanpa mengubah faktor lain):**
+
+| Run | `baseline_embed_columns` | `use_value_linking` | Menjawab |
+|---|---|---|---|
+| Utama (default) | False | True (2-Stage) | Perbandingan sesuai desain peneliti |
+| Head-to-head murni | False | False | Selisih murni dari tahap kolom |
+| 1-Stage+ | True (threshold dituning sendiri) | True | Baseline tabel yang lebih kuat |
+
+**Catatan:** value linking tetap hanya ada di 2-Stage (poin 30), jadi run utama masih mengandung perbedaan itu. Run "head-to-head murni" yang mematikan value linking adalah pembandingnya. Semua varian menulis ke folder output yang sama kalau dijalankan tanpa memisahkan hasil, jadi simpan atau ganti nama `outputs/` dan `data/raw_logs/` antar run.
+
+**Dampak ke hasil lama:** run yang dibuat sebelum perubahan ini memakai teks embed tabel dengan kolom, jadi tidak sebanding dengan run sesudahnya (SLA tabel dan kolom 1-Stage akan berubah).
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER
