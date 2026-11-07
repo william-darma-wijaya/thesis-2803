@@ -111,6 +111,8 @@ lokal) — jalankan di Kaggle.
 
 ## 3. Keputusan yang perlu didiskusikan
 
+- [ ] **Baseline DAIL-SQL** (dikerjakan nanti, `IMPLEMENTATION_DECISIONS.md` poin 37 dan open item F). GraphRAG 1-Stage dan 2-Stage adalah metode peneliti; baseline skripsi adalah DAIL-SQL. Perlu diputuskan cara menjalankannya, syarat kesebandingan, metrik yang dibandingkan, dan pembanding TEP.
+
 - [x] **Definisi final Baseline** — DIPUTUSKAN 2026-09-06: **table-level
   retrieval** (`src/retrieval/baseline.py`) adalah baseline skripsi, FINAL.
   Full-schema bypass (`--full-schema`) tetap ada sebagai mode ablation, bukan

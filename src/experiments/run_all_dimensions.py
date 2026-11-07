@@ -341,8 +341,8 @@ def run_all(
             # Dijalankan untuk dua-duanya di sini supaya bisa dibandingkan --
             # bukan digabung jadi satu diagnosis.
             return {
-                "baseline": run_dimension_5(b, condition_label="Baseline"),
-                "graphrag": run_dimension_5(g, condition_label="GraphRAG"),
+                "baseline": run_dimension_5(b, condition_label="GraphRAG 1-Stage"),
+                "graphrag": run_dimension_5(g, condition_label="GraphRAG 2-Stage"),
             }, _print_dim5
 
         def _print_dim5(result: dict) -> None:

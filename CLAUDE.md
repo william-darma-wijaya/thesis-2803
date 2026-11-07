@@ -9,12 +9,14 @@ Environment: Kaggle Notebook (GPU T4, memory terbatas)
 
 ## Konteks Penelitian
 
-Penelitian ini menganalisis trade-off antara performa SQL generation dan efisiensi token consumption. Ada dua pendekatan utama yang dibandingkan:
+Penelitian ini menganalisis trade-off antara performa SQL generation dan efisiensi token consumption. Metode peneliti punya dua varian:
 
-- **Baseline RAG** — table-level retrieval: retrieve top-k tabel, kirim semua kolom dari tabel terpilih ke LLM
-- **GraphRAG** — two-stage column-level retrieval + graph traversal: kirim hanya kolom yang relevan
+- **GraphRAG 1-Stage** (`baseline` di kode) — table-level retrieval + table path tracing: pilih tabel, kirim semua kolom dari tabel terpilih ke LLM
+- **GraphRAG 2-Stage** (`graphrag` di kode) — two-stage column-level retrieval + graph traversal: kirim hanya kolom yang relevan
 
-Token efficiency GraphRAG berasal dari selektivitas retrieval — bukan dari seluruh database, hanya k tabel → k kolom → kolom hasil traversal yang masuk ke prompt.
+**Baseline skripsi adalah DAIL-SQL (state of the art), yang belum diimplementasikan** (poin 37, open item F). `baseline` di kode, nama file, dan kunci data adalah nama lama untuk GraphRAG 1-Stage, BUKAN baseline skripsi. Di dokumen lama, "Baseline" juga berarti GraphRAG 1-Stage dan "GraphRAG" berarti GraphRAG 2-Stage.
+
+Token efficiency GraphRAG 2-Stage berasal dari selektivitas retrieval — bukan dari seluruh database, hanya k tabel → k kolom → kolom hasil traversal yang masuk ke prompt.
 
 ---
 
@@ -84,11 +86,11 @@ Semua modul di `src/` dipanggil sebagai `src.<paket>.<modul>` (mis. `from src.co
 - **`src/metrics/` — SEMUA sudah diimplementasi penuh** (bukan lagi stub): `sla.py`, `esm_ex_cm.py`, `token_consumption.py`, `tep.py`, `qvt.py`. `src/utils/` juga penuh: `schema_utils.py`, `sql_normalize.py` (fix parser JOIN-keyword, lihat `IMPLEMENTATION_DECISIONS.md` poin 11), `raw_logs.py` (helper grouping per difficulty, dipakai lintas `src/dimensions/`).
 - **`src/dimensions/` — KEENAM dimensi sudah diimplementasi** (tidak ada stub tersisa): Dimensi 1 (Efisiensi), 2 (Struktur SQL), 3 (Komponen SQL), 4 (Robustness/QVT), 5 (Bottleneck), 6 (Ablation Few-Shot, interpretasi saja — belum ada data nyata dari `ablation.py`). Dimensi 4 diimplementasi 2026-09-14 (lihat `IMPLEMENTATION_DECISIONS.md` poin 23) — `run_dimension_4()` menerima raw_logs opsional untuk silang-ESM langkah 6, karena data QVT sengaja cuma membawa EX (poin 10). - **`run_all_dimensions.py` — SUDAH terisi** (2026-09-17, lihat `IMPLEMENTATION_DECISIONS.md` poin 24), bukan skeleton lagi. Merangkai raw_logs → 6 dimensi jadi satu run, tulis `outputs/tables/dimensions_results.json` + `dimensions_report.txt`. Perilaku penting: setiap dimensi yang prasyarat datanya belum ada di-**skip dengan alasan + perintah remedy**, bukan crash (exit code 1 HANYA untuk bug tak terduga, bukan untuk "data belum ada") — jadi file ini aman dijalankan kapan saja sebagai checklist kesiapan. Dimensi 5 di-gate oleh hasil Dimensi 2 sesuai guide (`--always-dim5` untuk menimpa); Dimensi 6 butuh `--ex-per-k` manual (lihat open item D); Dimensi 1 di-import lazy dan ter-skip lokal karena `config.py` butuh `torch` (lihat open item C).
 - ✅ **Sudah divalidasi terhadap Spider dev set ASLI** (2026-08-26, bukan cuma sanity test SQLite sintetis lagi) — 1034 query dev set real (`data/spider_data/`, di luar git, lihat `.gitignore`), round-trip test lewat `esm_ex_cm.py`/`sla.py`: 0 exception, 0 kegagalan ESM. Satu limitation data upstream ditemukan (1 baris rusak encoding di `wta_1.sqlite`, pengaruh 0.19% dev set) dan didokumentasikan, bukan diperbaiki (lihat `IMPLEMENTATION_DECISIONS.md` poin 16 untuk alasan lengkap). `run_comparison()` di `pipeline.py` yang menulis `data/raw_logs/*.json` dari pipeline GraphRAG/Baseline sungguhan masih belum pernah dijalankan (butuh GPU/Kaggle, lihat `RESEARCHER_TODO.md`) — yang sudah divalidasi adalah lapisan metrics (`src/metrics/`), bukan pipeline retrieval+generation penuh.
-- **Semua keputusan implementasi** (konflik guide vs kode yang sudah ada, konflik guide vs keterbatasan tooling resmi SPIDER, dan open items yang belum diputuskan) ada di **`context/IMPLEMENTATION_DECISIONS.md`** — 29 keputusan tercatat sejauh ini, termasuk formula Token Consumption, EX order-sensitivity, label difficulty, casing CM clause, keterbatasan `union_all`, fix parser JOIN-keyword, hasil validasi dev set asli, bug fix `_set_op_clause_match()` (UNION/INTERSECT/EXCEPT salah skor akibat mutasi in-place), definisi Baseline final (poin 18), proxy schema-linking vs SLA (poin 19), confound diagnostics read-only (poin 20), QVT variations dari paraphrase alami dev.json (poin 21), penghapusan `few_shot_same_db_first` (poin 22), kontrak silang QVT×ESM di Dimensi 4 (poin 23), orkestrasi 6 dimensi (poin 24), penghapusan `prune_path_nodes()` (poin 25), integrasi pipeline → dimensi (poin 26), seleksi kolom GraphRAG global + threshold + traversal by node ID (poin 27), dan ablation 3 tahap: top-k persentase by SLA, few-shot k sama untuk Baseline & GraphRAG by EX, perbandingan model (poin 28), de-semanticization pertanyaan untuk seleksi few-shot — tahap masking saja (poin 29), preprocessing GraphRAG tetap (poin 30), bug fix DDL Baseline (poin 31), seleksi tabel Baseline = Stage 1 GraphRAG (poin 32), dan hasil bimbingan 2026-11-02 (poin 33): threshold dipilih manual oleh peneliti, skeleton langsung tanpa A/B, model 3B/7B/14B terakhir, definisi apple-to-apple reduksi kolom/token (`src/utils/prompt_stats.py`, `src/metrics/token_reduction.py`). Poin 34: ablation di dev set (few-shot dari train), sampel 20% **stratified per difficulty** lewat satu sampler `src/utils/sampling.py` untuk semua script/notebook, alur tiga model 1-Stage/2-Stage (poin 35), latensi per tahap sebagai lampiran Excel (poin 36). Open items yang masih terbuka: B (metrics jalan di mana), C (`config.py` mengikat lapisan dimensi ke torch). E selesai di poin 34. D (EX per k Dimensi 6) selesai di poin 28.
+- **Semua keputusan implementasi** (konflik guide vs kode yang sudah ada, konflik guide vs keterbatasan tooling resmi SPIDER, dan open items yang belum diputuskan) ada di **`context/IMPLEMENTATION_DECISIONS.md`** — 29 keputusan tercatat sejauh ini, termasuk formula Token Consumption, EX order-sensitivity, label difficulty, casing CM clause, keterbatasan `union_all`, fix parser JOIN-keyword, hasil validasi dev set asli, bug fix `_set_op_clause_match()` (UNION/INTERSECT/EXCEPT salah skor akibat mutasi in-place), definisi Baseline final (poin 18), proxy schema-linking vs SLA (poin 19), confound diagnostics read-only (poin 20), QVT variations dari paraphrase alami dev.json (poin 21), penghapusan `few_shot_same_db_first` (poin 22), kontrak silang QVT×ESM di Dimensi 4 (poin 23), orkestrasi 6 dimensi (poin 24), penghapusan `prune_path_nodes()` (poin 25), integrasi pipeline → dimensi (poin 26), seleksi kolom GraphRAG global + threshold + traversal by node ID (poin 27), dan ablation 3 tahap: top-k persentase by SLA, few-shot k sama untuk Baseline & GraphRAG by EX, perbandingan model (poin 28), de-semanticization pertanyaan untuk seleksi few-shot — tahap masking saja (poin 29), preprocessing GraphRAG tetap (poin 30), bug fix DDL Baseline (poin 31), seleksi tabel Baseline = Stage 1 GraphRAG (poin 32), dan hasil bimbingan 2026-11-02 (poin 33): threshold dipilih manual oleh peneliti, skeleton langsung tanpa A/B, model 3B/7B/14B terakhir, definisi apple-to-apple reduksi kolom/token (`src/utils/prompt_stats.py`, `src/metrics/token_reduction.py`). Poin 34: ablation di dev set (few-shot dari train), sampel 20% **stratified per difficulty** lewat satu sampler `src/utils/sampling.py` untuk semua script/notebook, alur tiga model 1-Stage/2-Stage (poin 35), latensi per tahap sebagai lampiran Excel (poin 36), kedua pipeline adalah metode peneliti dan baseline skripsi = DAIL-SQL (poin 37). Open items yang masih terbuka: B (metrics jalan di mana), C (`config.py` mengikat lapisan dimensi ke torch), F (baseline DAIL-SQL). E selesai di poin 34. D (EX per k Dimensi 6) selesai di poin 28.
 
 ---
 
-## Arsitektur Pipeline (GraphRAG)
+## Arsitektur Pipeline (GraphRAG 2-Stage, `graphrag` di kode)
 
 ```
 Pertanyaan user (bahasa alami)
@@ -123,7 +125,7 @@ predictions.txt → Spider Official Eval (EM + EX)
 
 ---
 
-## Arsitektur Pipeline (Baseline)
+## Arsitektur Pipeline (GraphRAG 1-Stage, `baseline` di kode)
 
 ```
 Pertanyaan user
@@ -254,7 +256,7 @@ Tujuan tahap 2 tetap cari **elbow point** (Dimensi 6) — hipotesis: lonjakan te
 | Execution Accuracy (EX) | Spider `external/spider_eval/evaluation.py --etype exec` | |
 | Component Match (CM) | Spider `external/spider_eval/evaluation.py` | |
 | Token Consumption | `avg_token_consumption` di `ablation_results.csv` | T = T_in + α×T_out. T_in = prompt tokens, T_out = generated SQL tokens, α = `token_output_weight` di config.py (**3.0**, fixed dari proposal). Diukur inline per sample setelah generate_sql. |
-| TEP (Token Elasticity of Performance) | Custom metric, hitung post-hoc | TEP_G = (ΔEX_G/EX_B) / (ΔT_G/T_B) — elastisitas performa GraphRAG relatif terhadap konsumsi token vs Baseline. ΔEX_G = EX_G − EX_B, ΔT_G = T_G − T_B. Hitung dari `ablation_results.csv` + EX dari Spider eval. |
+| TEP (Token Elasticity of Performance) | Custom metric, hitung post-hoc | TEP_G = (ΔEX_G/EX_B) / (ΔT_G/T_B) — elastisitas performa GraphRAG 2-Stage relatif terhadap konsumsi token vs GraphRAG 1-Stage (B di rumus = 1-Stage untuk saat ini; pembanding DAIL-SQL belum diputuskan, open item F). ΔEX_G = EX_G − EX_B, ΔT_G = T_G − T_B. Hitung dari `ablation_results.csv` + EX dari Spider eval. |
 | QVT (Query Variance Testing) | Custom metric | Stabilitas output terhadap variasi pertanyaan |
 | Schema Linking Accuracy (SLA) | `src/metrics/sla.py` | Precision/recall/F1 retrieval vs gold schema, table-level & column-level terpisah, parser resmi SPIDER, macro-average per query. **INI metrik SLA yang dilaporkan.** Recall/precision yang di-print `retrieval.py`/`baseline.py` saat run = proxy internal (name-matching tanpa kualifikasi `table.column`, table+column dicampur satu set) — untuk progress/sweep saja, JANGAN dilaporkan sebagai SLA (`IMPLEMENTATION_DECISIONS.md` poin 19). |
 
@@ -349,10 +351,11 @@ data_path = Path("/kaggle/input/datasets/alrette/spiderdataset/spider_data")
 - Format prompt di `generation.py` — sudah di-tune, perubahan kecil berdampak besar ke output LLM
 - Struktur graph di `schema.py` — node identifier `{db}.{table}.{col}` dipakai di banyak tempat
 - Greedy decoding (`temperature=0.0`, `do_sample=False`) — perlu deterministik untuk reprodusibilitas
-- **Definisi Baseline = table-level retrieval** (`src/retrieval/baseline.py`) — FINAL per 2026-09-06. Full-schema bypass (`--full-schema` / `use_full_schema_bypass=True`) adalah mode ablation saja, BUKAN baseline skripsi. Lihat `IMPLEMENTATION_DECISIONS.md` poin 18.
+- **Definisi GraphRAG 1-Stage = table-level retrieval** (`src/retrieval/baseline.py`) — FINAL per 2026-09-06. Full-schema bypass (`--full-schema` / `use_full_schema_bypass=True`) adalah mode ablation saja, BUKAN varian ini dan BUKAN baseline skripsi. Baseline skripsi = DAIL-SQL (belum diimplementasikan). Lihat `IMPLEMENTATION_DECISIONS.md` poin 18 dan 37.
 
 ## Hal yang Masih TBD (update setelah eksperimen)
 
+- Implementasi baseline DAIL-SQL dan cara membandingkannya dengan GraphRAG 1-Stage dan 2-Stage, dikerjakan nanti (`IMPLEMENTATION_DECISIONS.md` open item F)
 - Nilai final `top_k_tables_pct`, `top_k_columns_pct`, `baseline_top_k_tables_pct` → tunggu ablation tahap 1 (`sweep.py`, SLA); `semantic_similarity_threshold` → `sweep.py --thresholds`
 - Nilai final `few_shot_k` (sama untuk Baseline & GraphRAG) → tunggu ablation tahap 2 (`ablation.py`, EX)
 - Nilai final `llm_model` → tunggu ablation tahap 3 (`pipeline.py --baseline --models all`)

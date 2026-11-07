@@ -120,7 +120,7 @@ def print_dimension_1(result: dict) -> None:
     print("=" * 70)
     print("Token Consumption (T = T_in + mu*T_out)")
     print("=" * 70)
-    print(f"{'':10} {'Baseline mean':>15} {'Baseline med':>15} {'GraphRAG mean':>15} {'GraphRAG med':>15}")
+    print(f"{'':10} {'1S mean':>15} {'1S median':>15} {'2S mean':>15} {'2S median':>15}")
     b_o, g_o = tc["baseline"]["overall"], tc["graphrag"]["overall"]
     print(f"{'overall':10} {_fmt(b_o,'mean'):>15} {_fmt(b_o,'median'):>15} {_fmt(g_o,'mean'):>15} {_fmt(g_o,'median'):>15}")
     for lvl in DIFFICULTY_LEVELS:
@@ -130,7 +130,7 @@ def print_dimension_1(result: dict) -> None:
     print("\n" + "=" * 70)
     print("EX (%)")
     print("=" * 70)
-    print(f"{'':10} {'Baseline':>12} {'GraphRAG':>12}")
+    print(f"{'':10} {'1S':>12} {'2S':>12}")
     b_ex, g_ex = ex["baseline"]["overall"], ex["graphrag"]["overall"]
     print(f"{'overall':10} {b_ex:>12.2f} {g_ex:>12.2f}")
     for lvl in DIFFICULTY_LEVELS:

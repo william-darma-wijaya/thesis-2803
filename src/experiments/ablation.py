@@ -9,7 +9,7 @@ src/metrics/esm_ex_cm.py — the same evaluator that fills pipeline.py's
 raw_logs), so EX per k is stored as a number instead of only being printed
 by the Spider CLI (closes open item D, IMPLEMENTATION_DECISIONS.md poin 28).
 
-Baseline and GraphRAG get the SAME k (the baseline is no longer zero-shot).
+GraphRAG 1-Stage and GraphRAG 2-Stage get the SAME k (the baseline is no longer zero-shot).
 Best k = highest EX; once ablation_results.csv holds both modes, the shared
 recommendation is the k with the highest mean EX of the two (ties -> smaller k).
 Run the two modes as separate processes (Kaggle time/memory):
@@ -478,14 +478,14 @@ def main(
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_subset))
 
     if mode == "graphrag":
-        logger.info("Building column-level graph (GraphRAG) …")
+        logger.info("Building column-level graph (GraphRAG 2-Stage) …")
         graph = build_schema_graph(schema_df)
         cache = {
             db_id: build_schema_index(graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
             for db_id in tqdm(unique_db_ids, desc="Indexing columns")
         }
     else:  # baseline
-        logger.info("Building table-level graph (Baseline) …")
+        logger.info("Building table-level graph (GraphRAG 1-Stage) …")
         graph = build_table_graph(schema_df)
         cache = {
             db_id: build_table_index(graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)

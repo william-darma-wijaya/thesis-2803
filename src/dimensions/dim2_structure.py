@@ -9,8 +9,8 @@ Tabel interpretasi WAJIB (jangan buat sendiri):
 
 KEPUTUSAN (2026-08-26, lihat context/IMPLEMENTATION_DECISIONS.md poin 12):
 guide menulis baris ke-4 sebagai "EX rendah, ESM rendah" -- beda kata dari
-"naik"/"turun" di 3 baris lain (yang jelas directional: GraphRAG dibanding
-Baseline), tanpa angka threshold ATAU acuan siapa yang "rendah". Peneliti
+"naik"/"turun" di 3 baris lain (yang jelas directional: GraphRAG 2-Stage dibanding
+GraphRAG 1-Stage), tanpa angka threshold ATAU acuan siapa yang "rendah". Peneliti
 mengonfirmasi baris ke-4 dibaca sebagai directional juga -- EX TURUN dan ESM
 TURUN (melengkapi kuadran ke-4 dari 4 kemungkinan arah delta, pasangan alami
 baris "EX naik, ESM naik" = "kondisi paling ideal"). TIDAK memakai threshold
@@ -36,7 +36,7 @@ _INTERPRETATIONS = {
     ),
     "keduanya_naik": (
         "EX naik, ESM naik",
-        "Kondisi paling ideal -- konteks ringkas GraphRAG presisi",
+        "Kondisi paling ideal -- konteks ringkas GraphRAG 2-Stage presisi",
     ),
     "keduanya_turun": (
         "EX rendah, ESM rendah",
@@ -73,7 +73,7 @@ def _condition_stats(logs: List[dict]) -> dict:
 
 def _classify(delta_ex: float, delta_esm: float) -> dict:
     """
-    Klasifikasi 4-kuadran berdasarkan arah delta (GraphRAG - Baseline), lihat
+    Klasifikasi 4-kuadran berdasarkan arah delta (GraphRAG 2-Stage - GraphRAG 1-Stage), lihat
     catatan KEPUTUSAN di docstring modul. delta persis 0 di salah satu metrik
     tidak cocok kuadran manapun -- dilaporkan apa adanya, bukan dipaksakan ke
     salah satu dari 4 kategori resmi (guide tidak mendefinisikan kasus ini).
@@ -145,7 +145,7 @@ def print_dimension_2(result: dict) -> None:
     print("=" * 78)
     print("ESM & EX (%) -- dibaca berpasangan")
     print("=" * 78)
-    print(f"{'':10} {'Baseline ESM':>13} {'Baseline EX':>13} {'GraphRAG ESM':>13} {'GraphRAG EX':>13}")
+    print(f"{'':10} {'1S ESM':>13} {'1S EX':>13} {'2S ESM':>13} {'2S EX':>13}")
     b_o, g_o = stats["baseline"]["overall"], stats["graphrag"]["overall"]
     print(f"{'overall':10} {_fmt(b_o['esm']):>13} {_fmt(b_o['ex']):>13} {_fmt(g_o['esm']):>13} {_fmt(g_o['ex']):>13}")
     for lvl in DIFFICULTY_LEVELS:
@@ -153,7 +153,7 @@ def print_dimension_2(result: dict) -> None:
         print(f"{lvl:10} {_fmt(b['esm']):>13} {_fmt(b['ex']):>13} {_fmt(g['esm']):>13} {_fmt(g['ex']):>13}")
 
     print("\n" + "=" * 78)
-    print("Klasifikasi (overall, GraphRAG vs Baseline)")
+    print("Klasifikasi (overall, GraphRAG 2-Stage vs GraphRAG 1-Stage)")
     print("=" * 78)
     print(f"delta_EX = {cls['delta_ex']:.4f}   delta_ESM = {cls['delta_esm']:.4f}")
     print(f"Kombinasi: {cls['combination'] or '(tidak terklasifikasi)'}")

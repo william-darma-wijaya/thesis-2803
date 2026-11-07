@@ -1,5 +1,5 @@
 """
-Main entry point for the GraphRAG Text-to-SQL pipeline.
+Main entry point for the GraphRAG 2-Stage Text-to-SQL pipeline.
 
 Usage:
     python src/experiments/pipeline.py [--full-schema]
@@ -7,7 +7,7 @@ Usage:
 Flags:
                     
     "--full-schema", action="store_true",
-        help="Bypass GraphRAG and feed the full DB schema to the LLM (ablation mode).",
+        help="Bypass GraphRAG 2-Stage and feed the full DB schema to the LLM (ablation mode).",
     
     "--skip-sweep", action="store_true",
         help="Skip the precision sweep and use top_k values from config.py as-is.",
@@ -280,7 +280,7 @@ def print_schema_linking_summary(results: list[PipelineResult]) -> None:
     avg_precision = sum(r.precision for r in valid) / len(valid) * 100
 
     print("\n" + "=" * 60)
-    print("📈 SCHEMA LINKING SUMMARY (GraphRAG)")
+    print("📈 SCHEMA LINKING SUMMARY (GraphRAG 2-Stage)")
     print("=" * 60)
     print(f"  Recall    : {avg_recall:.2f}%  — how many gold elements were retrieved")
     print(f"  Precision : {avg_precision:.2f}%  — fraction of retrieved elements that were relevant")
@@ -430,19 +430,19 @@ def _format_confound_diag(diag: dict) -> str:
         "",
         "  Outer JOIN usage  (LEFT/RIGHT/FULL — normalized to JOIN for parsing, poin 11)",
         f"    gold queries with outer JOIN       : {diag['outer_join_gold']:>4}  ({diag['outer_join_gold']/n*100:.1f}%)",
-        f"    GraphRAG predictions               : {diag['outer_join_pred_graphrag']:>4}  "
+        f"    GraphRAG 2-Stage predictions       : {diag['outer_join_pred_graphrag']:>4}  "
         f"(ESM=1 & EX=0: {diag['outer_join_norm_masked_graphrag']})",
-        f"    Baseline predictions               : {diag['outer_join_pred_baseline']:>4}  "
+        f"    GraphRAG 1-Stage predictions       : {diag['outer_join_pred_baseline']:>4}  "
         f"(ESM=1 & EX=0: {diag['outer_join_norm_masked_baseline']})",
         "",
         "  EX order-sensitivity  (official EX=0 but order-insensitive row multiset matches gold)",
-        f"    GraphRAG : {diag['ex0_orderinsensitive_match_graphrag']:>4}   "
+        f"    GraphRAG 2-Stage : {diag['ex0_orderinsensitive_match_graphrag']:>4}   "
         f"(gold has ORDER BY: {diag['ex0_orderinsensitive_match_graphrag_gold_orderby']}, "
         f"gold without ORDER BY: {g_fn})",
-        f"    Baseline : {diag['ex0_orderinsensitive_match_baseline']:>4}   "
+        f"    GraphRAG 1-Stage : {diag['ex0_orderinsensitive_match_baseline']:>4}   "
         f"(gold has ORDER BY: {diag['ex0_orderinsensitive_match_baseline_gold_orderby']}, "
         f"gold without ORDER BY: {b_fn})",
-        f"    difference (GraphRAG - Baseline), gold without ORDER BY : {g_fn - b_fn:+d}",
+        f"    difference (GraphRAG 2-Stage - GraphRAG 1-Stage), gold without ORDER BY : {g_fn - b_fn:+d}",
         f"    gold SQL unexecutable (excluded)   : {diag['gold_unexecutable']}",
         "=" * 70,
         "",
@@ -489,7 +489,7 @@ def main(cfg: PipelineConfig) -> None:
 
     # --- 4. Pre-build schema indices for every database in the dev set ---
     # Done ONCE at startup so embeddings are never recomputed mid-loop.
-    mode_label = "FULL SCHEMA (bypass)" if cfg.use_full_schema_bypass else "GraphRAG"
+    mode_label = "FULL SCHEMA (bypass)" if cfg.use_full_schema_bypass else "GraphRAG 2-Stage"
     logger.info("Starting pipeline — mode: %s", mode_label)
 
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_data))
@@ -740,15 +740,15 @@ def run_comparison(
     qvt_dir: Path = Path("data/qvt_variations"),
 ) -> dict:
     """
-    Run GraphRAG (column/node) AND Baseline (table/node) on the same
+    Run GraphRAG 2-Stage (column/node) AND GraphRAG 1-Stage (table/node) on the same
     dev-set sample, then print a side-by-side schema-linking + prediction
     comparison report. Both arms use the same LLM and the same few-shot k
     (cfg.few_shot_k); only the retrieval differs.
 
     Saved (paths relative to out_dir / raw_logs_dir; the defaults are the
     single-model run, model_run_dirs() gives the per-model ones):
-        predictions/predictions.txt          — GraphRAG
-        predictions/baseline_predictions.txt — Baseline
+        predictions/predictions.txt          — GraphRAG 2-Stage
+        predictions/baseline_predictions.txt — GraphRAG 1-Stage
         tables/comparison_report.txt         — side-by-side summary
         raw_logs_dir/*.json                  — per-query raw logs (input of the 6 dimensions)
         tables/dimensions_{results.json,report.txt}
@@ -803,7 +803,7 @@ def run_comparison(
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_data))
 
     # ── Build both graphs & indices ───────────────────────────────────────
-    logger.info("Building column graph (GraphRAG) …")
+    logger.info("Building column graph (GraphRAG 2-Stage) …")
     col_graph = build_schema_graph(schema_df)
     col_cache: dict[str, "SchemaIndex"] = {
         db_id: build_schema_index(col_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
@@ -813,7 +813,7 @@ def run_comparison(
     # Per-table column counts for the column/token reduction fields (poin 33).
     table_cols = columns_per_table(col_graph)
 
-    logger.info("Building table graph (Baseline) …")
+    logger.info("Building table graph (GraphRAG 1-Stage) …")
     tbl_graph = build_table_graph(schema_df)
     tbl_cache = {
         db_id: build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
@@ -823,7 +823,7 @@ def run_comparison(
     # Few-shot index — shared by BOTH arms, same k (cfg.few_shot_k)
     few_shot_idx = None
     if cfg.few_shot_k > 0:
-        logger.info("Building few-shot index (k=%d, GraphRAG + Baseline) …", cfg.few_shot_k)
+        logger.info("Building few-shot index (k=%d, GraphRAG 2-Stage + GraphRAG 1-Stage) …", cfg.few_shot_k)
         with timing.run_step("few_shot_train_embedding"):
             few_shot_idx = build_few_shot_index(cfg.train_json, embed_model, cfg)
 
@@ -874,7 +874,7 @@ def run_comparison(
                         few_shot_index=few_shot_idx,
                     )
             except Exception:
-                logger.exception("GraphRAG error on sample %d", i)
+                logger.exception("GraphRAG 2-Stage error on sample %d", i)
                 g_pred, g_recall, g_prec, g_schema = "SELECT 1", 0.0, 0.0, ""
                 g_column_nodes, g_n_in, g_n_out = [], 0, 0
                 g_steps = None
@@ -889,7 +889,7 @@ def run_comparison(
                         few_shot_index=few_shot_idx,
                     )
             except Exception:
-                logger.exception("Baseline error on sample %d", i)
+                logger.exception("GraphRAG 1-Stage error on sample %d", i)
                 b_pred, b_recall, b_prec = "SELECT 1", 0.0, 0.0
                 b_table_nodes, b_n_in, b_n_out = [], 0, 0
                 b_steps = None
@@ -974,9 +974,9 @@ def run_comparison(
                 print(f"  Q              : {question}")
                 print(f"  GOLD           : {gold_sql}")
                 print("-" * W)
-                print(f"  [GraphRAG] pred: {g_pred}")
+                print(f"  [GraphRAG 2-Stage] pred: {g_pred}")
                 print(f"             R={g_recall*100:.1f}%  P={g_prec*100:.1f}%")
-                print(f"  [Baseline] pred: {b_pred}")
+                print(f"  [GraphRAG 1-Stage] pred: {b_pred}")
                 print(f"             R={b_recall*100:.1f}%  P={b_prec*100:.1f}%")
                 print("=" * W)
 
@@ -999,7 +999,7 @@ def run_comparison(
 
     # ── Schema linking summaries ───────────────────────────────────────────
     print_schema_linking_summary(graphrag_results)
-    bl_print_summary(baseline_results, label="Baseline (table/node)")
+    bl_print_summary(baseline_results, label="GraphRAG 1-Stage (table/node)")
 
     # ── Side-by-side comparison report ────────────────────────────────────
     g_r = np.mean([r.recall    for r in graphrag_results]) * 100
@@ -1010,16 +1010,16 @@ def run_comparison(
     report_lines = [
         "",
         "=" * 70,
-        "  COMPARISON REPORT — GraphRAG (column/node) vs Baseline (table/node)",
+        "  COMPARISON REPORT — GraphRAG 2-Stage (column/node) vs GraphRAG 1-Stage (table/node)",
         "=" * 70,
-        f"  {'Metric':<22} {'GraphRAG':>12}  {'Baseline':>12}  {'Delta (G-B)':>12}",
+        f"  {'Metric':<22} {'2S':>12}  {'1S':>12}  {'Delta (2S-1S)':>12}",
         "-" * 70,
         f"  {'Schema Recall':<22} {g_r:>11.2f}%  {b_r:>11.2f}%  {g_r-b_r:>+11.2f}%",
         f"  {'Schema Precision':<22} {g_p:>11.2f}%  {b_p:>11.2f}%  {g_p-b_p:>+11.2f}%",
         "-" * 70,
         "  Node granularity      column/node      table/node",
         "  Schema context        pruned cols      all cols in table",
-        "  Linking strategy      n-gram match     n-gram match (same as GraphRAG Stage 1)",
+        "  Linking strategy      n-gram match     n-gram match (same as GraphRAG 2-Stage Stage 1)",
         f"  Table threshold       {cfg.table_similarity_threshold:<16} {cfg.table_similarity_threshold}",
         f"  Top-k tables (pct)    {cfg.top_k_tables_pct:<16} {cfg.baseline_top_k_tables_pct}",
         f"  Top-k columns (pct)   {cfg.top_k_columns_pct:<16} -",
@@ -1047,12 +1047,12 @@ def run_comparison(
 
     # ── Official Spider eval for both ──────────────────────────────────────
     print("\n" + "=" * 60)
-    print("  SPIDER EVAL — GraphRAG (column/node)")
+    print("  SPIDER EVAL — GraphRAG 2-Stage (column/node)")
     print("=" * 60)
     run_official_evaluation(cfg)
 
     print("\n" + "=" * 60)
-    print("  SPIDER EVAL — Baseline (table/node)")
+    print("  SPIDER EVAL — GraphRAG 1-Stage (table/node)")
     print("=" * 60)
     bl_spider_eval(b_pred_path, cfg)
 
@@ -1178,10 +1178,10 @@ def run_model_comparison(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GraphRAG Text-to-SQL Pipeline")
+    parser = argparse.ArgumentParser(description="GraphRAG 2-Stage Text-to-SQL Pipeline")
     parser.add_argument(
         "--full-schema", action="store_true",
-        help="Bypass GraphRAG and feed the full DB schema to the LLM (ablation mode).",
+        help="Bypass GraphRAG 2-Stage and feed the full DB schema to the LLM (ablation mode).",
     )
     parser.add_argument(
         "--skip-sweep", action="store_true",

@@ -266,6 +266,8 @@ Penerapan beda per jalur, karena constraint arsitektur beda:
 
 ## 18. Definisi Baseline: table-level retrieval (FINAL)
 
+> **Pembaruan (2026-11-07, poin 37):** yang didefinisikan di sini sekarang disebut **GraphRAG 1-Stage**, salah satu varian metode peneliti. Definisi teknisnya tetap, tetapi varian ini bukan lagi baseline skripsi. Baseline skripsi = DAIL-SQL. Teks di bawah dibiarkan sebagai riwayat.
+
 **Konflik/ambiguitas:** `CLAUDE.md` + `RESEARCHER_TODO.md` lama mencatat baseline "saat ini table-level retrieval, mungkin diubah ke full-schema bypass — diskusikan dulu". Selama belum diputuskan, tiap run raw_logs/ablation berisiko harus diulang kalau definisi berubah.
 
 **Keputusan (2026-09-06):** Baseline skripsi = **table-level retrieval** (`src/retrieval/baseline.py`: top-k table selection + FK-path expansion + semua kolom tabel terpilih, tanpa pruning). Full-schema bypass (`use_full_schema_bypass` / `--full-schema`) tetap ada sebagai **mode ablation**, BUKAN baseline.
@@ -693,6 +695,21 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 
 **Keterbatasan:** tahap yang sangat singkat tetap berderau; angka yang paling bisa diandalkan adalah total retrieval, generation, dan end-to-end. Waktu menulis Excel dan zip hanya dicetak di notebook, karena tidak bisa dicatat di dalam file itu sendiri. Masking skeleton berjalan lokal sebelum run, jadi tidak terukur. Jalur CLI `run_comparison()` mencatat latensi per pertanyaan, tetapi hanya sebagian tahap sekali-jalan. Belum diuji dengan GPU.
 
+## 37. Nama tampilan: GraphRAG 1-Stage dan GraphRAG 2-Stage (2026-11-07)
+
+**Keputusan peneliti:**
+- **GraphRAG 1-Stage** (`baseline` di kode) dan **GraphRAG 2-Stage** (`graphrag` di kode) adalah **dua varian metode peneliti**, bukan baseline dan metode.
+- **Baseline skripsi adalah DAIL-SQL (state of the art)**, yang dikerjakan nanti dan belum diimplementasikan.
+- Nama "Baseline" dan "GraphRAG" di semua output diganti menjadi GraphRAG 1-Stage dan GraphRAG 2-Stage. Ini melanjutkan poin 35, yang baru mengganti label di tabel metrik baru.
+
+**Yang berubah:** tabel notebook dan Excel, CSV evaluator resmi, teks interpretasi dan laporan dimensi, pesan konsol, serta teks ketiga notebook. Tabel konsol yang lebarnya tetap memakai singkatan `1S` dan `2S`.
+
+**Yang sengaja tetap:** identifier dan kontrak kode, yaitu `baseline.py`, `run_single_baseline()`, `--baseline`, `--mode baseline`, `baseline_log.json`, kunci JSON `baseline` dan `graphrag`, kolom CSV `mode`, serta nama file `graphrag_sla_trial.ipynb`. Dokumen `context/` dan komentar kode juga tidak ditulis ulang. Mengganti semua itu tidak mengubah hasil, tetapi berisiko merusak pembacaan file antarmodul.
+
+**Yang tidak berubah:** definisi teknis di poin 18, retrieval, prompt, dan semua formula. Di dokumen lama, "Baseline" berarti GraphRAG 1-Stage dan "GraphRAG" berarti GraphRAG 2-Stage.
+
+**Status hasil saat ini:** semua metrik, dimensi, dan TEP yang dihasilkan kode membandingkan dua varian metode peneliti (2-Stage terhadap 1-Stage). Hasil ini belum merupakan perbandingan dengan baseline skripsi, jadi perbandingan terhadap DAIL-SQL tetap perlu ditambahkan (open item F).
+
 ## Belum diputuskan / open items
 
 ### A. `LEFT JOIN` / `RIGHT JOIN` / `INNER JOIN` tidak didukung parser resmi SPIDER
@@ -744,6 +761,10 @@ Efek nyata: dijalankan lokal apa adanya sekarang, `run_all_dimensions.py` melapo
 Untuk sekarang `run_all_dimensions.py` menerima angkanya manual (`--ex-per-k` / `--ex-per-k-file`) dan men-skip Dimensi 6 dengan penjelasan kalau tidak diberikan (poin 24c).
 
 **Belum diputuskan:** (1) tambahkan kolom `ex`/`esm` ke `ablation_results.csv` dengan cara meng-capture + parse stdout `evaluation.py` di `_run_ablation_evals()`; atau (2) pindahkan evaluasi ablation ke `esm_ex_cm.evaluate_single_query()` in-process (seperti yang sudah dilakukan `run_comparison()` di `pipeline.py`) supaya EX per k langsung tersedia sebagai angka, sekaligus menutup gap "`ablation.py` belum memproduksi raw_logs" yang sudah tercatat di CLAUDE.md; atau (3) biarkan manual — peneliti copy angka dari output Spider eval sekali saja setelah run ablation. Opsi 2 paling menyelesaikan akar masalah tapi menyentuh `ablation.py` yang jalan di Kaggle, jadi butuh konfirmasi peneliti dulu.
+
+### F. Baseline DAIL-SQL belum diimplementasikan
+
+**Dicatat (2026-11-07, poin 37).** Baseline skripsi adalah DAIL-SQL, dikerjakan nanti. Belum diputuskan: cara DAIL-SQL dijalankan, model dan few-shot yang dipakai supaya sebanding, metrik apa saja yang dibandingkan, dan pembanding TEP (saat ini `B` di rumus = GraphRAG 1-Stage). `combine_models.py` dan kode lain belum punya tempat untuk kondisi ketiga.
 
 ### E. Ablation (threshold + few-shot k) di dev atau di train?
 

@@ -69,12 +69,12 @@ def test_summary_table_has_all_six_metrics_in_one_table():
     with tempfile.TemporaryDirectory() as d:
         table = rt.metrics_summary_table(build_metrics_results(BASELINE, GRAPHRAG, 3.0, qvt_dir=_qvt_dir(Path(d))))
     rows = table.set_index("Metric")
-    for metric in ("SLA column F1", "ESM", "EX", "CM SELECT", "CM WHERE", "Mean token consumption (T)", "TEP (2-Stage vs 1-Stage)", "QVT"):
+    for metric in ("SLA column F1", "ESM", "EX", "CM SELECT", "CM WHERE", "Mean token consumption (T)", "TEP (GraphRAG 2-Stage vs 1-Stage)", "QVT"):
         assert metric in rows.index, metric
     assert "CM HAVING" not in rows.index  # klausa tanpa nilai tidak ditampilkan
-    assert abs(rows.loc["EX", "Difference (2-Stage − 1-Stage)"] - 50.0) < 1e-9
-    assert rows.loc["Mean token consumption (T)", "Difference (2-Stage − 1-Stage)"] == -50
-    assert abs(rows.loc["TEP (2-Stage vs 1-Stage)", "2-Stage"] - (-2.6)) < 1e-9
+    assert abs(rows.loc["EX", "Difference (GraphRAG 2-Stage − GraphRAG 1-Stage)"] - 50.0) < 1e-9
+    assert rows.loc["Mean token consumption (T)", "Difference (GraphRAG 2-Stage − GraphRAG 1-Stage)"] == -50
+    assert abs(rows.loc["TEP (GraphRAG 2-Stage vs 1-Stage)", "GraphRAG 2-Stage"] - (-2.6)) < 1e-9
     trial = rt.metrics_summary_table(build_metrics_results(BASELINE, GRAPHRAG, 3.0)).set_index("Metric")
     assert "run penuh" in trial.loc["QVT", "Note"]
 
@@ -146,7 +146,7 @@ def test_latency_tables_skip_first_and_failed_question():
     tables = rt.latency_tables(logs, _with_latency(GRAPHRAG + GRAPHRAG, 2), run)
     assert len(tables) == 4
     by_step = tables[1]
-    row = by_step[(by_step["Variant"] == "1-Stage") & (by_step["Step"] == "LLM generation")].iloc[0]
+    row = by_step[(by_step["Variant"] == "GraphRAG 1-Stage") & (by_step["Step"] == "LLM generation")].iloc[0]
     assert row["Queries"] == 2 and row["Mean (s)"] == 2.5   # pertanyaan ke-1 dan ke-4 tidak dihitung
     assert rt.latency_tables(BASELINE, GRAPHRAG) == []      # raw_logs lama tetap terbaca
     assert rt.latency_per_query(BASELINE, GRAPHRAG) is None
@@ -183,7 +183,7 @@ def test_combine_three_models():
         assert all("dimensions_results.json" in w for w in warnings), warnings
         table = cm.summary_table(runs)
         assert len(table) == 6
-        assert table["TEP (2-Stage vs 1-Stage)"].notna().sum() == 3
+        assert table["TEP (GraphRAG 2-Stage vs 1-Stage)"].notna().sum() == 3
         json_path, xlsx_path = cm.write_outputs(runs, warnings, Path(d) / "out", Path(d) / "none")
         assert set(json.loads(json_path.read_text(encoding="utf-8"))["models"]) == set(runs)
         wb = load_workbook(xlsx_path)

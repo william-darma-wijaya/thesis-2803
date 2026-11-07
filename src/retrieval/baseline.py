@@ -1,21 +1,21 @@
 """
-Baseline comparison module: Table-level Graph vs Column-level Graph (GraphRAG).
+GraphRAG 1-Stage comparison module: Table-level Graph vs Column-level Graph (GraphRAG 2-Stage).
 
 This module implements the *table/node* baseline from the notebook experiment
 (graph-rag-text-to-sql-baseline-vs-graph.ipynb) and integrates it cleanly into
 the existing pipeline architecture.
 
 Architecture difference:
-  - GraphRAG  (column/node) : each node = one column. Semantic linking matches
+  - GraphRAG 2-Stage  (column/node) : each node = one column. Semantic linking matches
                                query phrases to individual column embeddings.
-  - Baseline  (table/node)  : each node = one table + all its columns. Semantic
+  - GraphRAG 1-Stage  (table/node)  : each node = one table + all its columns. Semantic
                                linking splits the query into n-grams and picks
-                               tables by threshold, exactly like GraphRAG Stage 1,
+                               tables by threshold, exactly like GraphRAG 2-Stage Stage 1,
                                but against table-level embeddings. Coarser
                                granularity → higher recall, lower precision.
 
 Everything after retrieval is identical for both arms, INCLUDING few-shot:
-the baseline gets the same cfg.few_shot_k examples as GraphRAG, so the
+the baseline gets the same cfg.few_shot_k examples as GraphRAG 2-Stage, so the
 comparison isolates the retrieval strategy (IMPLEMENTATION_DECISIONS.md poin 28).
 
 Usage:
@@ -24,7 +24,7 @@ Usage:
     python src/retrieval/baseline.py --sample 1.0             # full dev set
     python src/retrieval/baseline.py --skip-sweep             # skip top-k sweep
 
-For a side-by-side GraphRAG-vs-Baseline comparison with per-query ESM/EX/CM and
+For a side-by-side GraphRAG 2-Stage-vs-GraphRAG 1-Stage comparison with per-query ESM/EX/CM and
 data/raw_logs/*.json, use `python src/experiments/pipeline.py --baseline`
 instead — this module only runs the baseline arm on its own.
 
@@ -118,7 +118,7 @@ def build_table_graph(schema_df) -> nx.Graph:
 
     This is the baseline described in the notebook: coarser granularity means
     the schema context given to the LLM is always at the full-table level,
-    whereas GraphRAG prunes down to individual columns.
+    whereas GraphRAG 2-Stage prunes down to individual columns.
     """
     G = nx.Graph()
     df_clean = schema_df[schema_df["Column"] != "*"].copy()
@@ -183,7 +183,7 @@ def build_table_index(
     Text format: "table <name> columns <col1> <col2> ..."
 
     `use_natural_names=True` (PipelineConfig.embed_natural_names, the same schema
-    preprocessing as GraphRAG) embeds Spider's annotated names ("student id")
+    preprocessing as GraphRAG 2-Stage) embeds Spider's annotated names ("student id")
     instead of the original ones ("StuID"). Node ids and the DDL keep the
     original names.
     """
@@ -227,7 +227,7 @@ def semantic_linking_table_level(
     cfg: PipelineConfig,
 ) -> list[str]:
     """
-    Select table node IDs for `user_query`, the same way GraphRAG Stage 1 does
+    Select table node IDs for `user_query`, the same way GraphRAG 2-Stage Stage 1 does
     (retrieval.retrieve_candidate_tables): the question is split into n-grams
     (cfg.max_ngram, cfg.query_stopword_mode), each table is scored by the best
     (max) cosine any n-gram gives it, then
@@ -236,9 +236,9 @@ def semantic_linking_table_level(
          k_from_pct(pct, #tables in DB) are kept (a cap, never a target);
       3. if nothing passes, the single best table is kept.
 
-    The only difference to GraphRAG is WHAT is matched: here the table text is
+    The only difference to GraphRAG 2-Stage is WHAT is matched: here the table text is
     "table <name> columns <c1> <c2> ..." (a table-level unit), there it is the
-    table name, and Baseline has no column stage afterwards.
+    table name, and GraphRAG 1-Stage has no column stage afterwards.
 
     Returns:
         List of table node IDs (e.g. ["concert_singer.singer", ...])
@@ -450,12 +450,12 @@ def retrieve_baseline_tables(
     cfg: PipelineConfig,
 ) -> list[str]:
     """
-    The whole Baseline retrieval step for one question, shared by
+    The whole GraphRAG 1-Stage retrieval step for one question, shared by
     run_single_baseline(), ablation.py, sweep.py and the notebook:
     tables by n-gram similarity >= cfg.table_similarity_threshold (optionally
     capped by baseline_top_k_tables_pct) -> FK path tracing. Full-schema bypass,
     or both limits off (pct = 0 and threshold <= 0) -> every table, same
-    semantics as GraphRAG Stage 1.
+    semantics as GraphRAG 2-Stage Stage 1.
     """
     if cfg.use_full_schema_bypass or (
         cfg.baseline_top_k_tables_pct <= 0 and cfg.table_similarity_threshold <= 0
@@ -473,7 +473,7 @@ def retrieve_baseline_tables(
 def table_nodes_to_schema(graph: nx.Graph, table_nodes: list[str]) -> list[str]:
     """
     Table node ids -> sorted ["table.column", ...] (raw_logs predicted_schema /
-    SLA input). Baseline sends ALL columns of the selected tables, so every
+    SLA input). GraphRAG 1-Stage sends ALL columns of the selected tables, so every
     column of each table node is listed, not just the table names.
     """
     out = set()
@@ -505,7 +505,7 @@ def run_single_baseline(
     Run the full BASELINE pipeline for one question:
         embed → link tables → trace paths → build context → few-shot → generate SQL.
 
-    few_shot_index : same index GraphRAG uses; cfg.few_shot_k examples are
+    few_shot_index : same index GraphRAG 2-Stage uses; cfg.few_shot_k examples are
                      added exactly like run_single() does. None -> zero-shot.
 
     Returns:
@@ -580,7 +580,7 @@ def _save_csv(results: list[BaselineResult], path: Path) -> None:
     logger.info("CSV saved → %s", path)
 
 
-def _print_summary(results: list[BaselineResult], label: str = "Baseline (table/node)") -> None:
+def _print_summary(results: list[BaselineResult], label: str = "GraphRAG 1-Stage (table/node)") -> None:
     valid = [r for r in results if r.recall >= 0]
     if not valid:
         return
@@ -695,7 +695,7 @@ def run_baseline(
     results: list[BaselineResult] = []
 
     with open(pred_path, "w", encoding="utf-8") as pf:
-        for i, item in enumerate(tqdm(dev_data, desc="Baseline — generating SQL")):
+        for i, item in enumerate(tqdm(dev_data, desc="GraphRAG 1-Stage — generating SQL")):
             db_id    = item["db_id"]
             question = item["question"]
             gold_sql = item["query"]
@@ -733,7 +733,7 @@ def run_baseline(
     # 8. Save artefacts
     _save_log(results, log_path)
     _save_csv(results, csv_path)
-    _print_summary(results, label="Baseline (table/node)")
+    _print_summary(results, label="GraphRAG 1-Stage (table/node)")
 
     # 9. Spider eval
     if run_eval:
@@ -760,7 +760,7 @@ def run_baseline(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Baseline (table/node) pipeline for GraphRAG comparison."
+        description="GraphRAG 1-Stage (table/node) pipeline for GraphRAG 2-Stage comparison."
     )
     parser.add_argument(
         "--sample", type=float, default=0.2,

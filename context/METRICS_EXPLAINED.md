@@ -4,6 +4,8 @@
 >
 > Throughout: 🔧 marks something that's the **actual official SPIDER benchmark source code** (from `external/spider_eval/`, downloaded from the official `taoyds/spider` GitHub repo) — not written for this thesis. ✍️ marks code **written specifically for this thesis** (usually wrapping or extending the 🔧 pieces). See `CLAUDE.md` → "Atribusi kode: SPIDER resmi vs custom" for the full rule.
 
+> **Status penamaan (poin 37):** di dokumen ini, "Baseline"/B berarti **GraphRAG 1-Stage** dan "GraphRAG"/G berarti **GraphRAG 2-Stage**. Keduanya metode peneliti. Baseline skripsi yang sebenarnya adalah **DAIL-SQL**, yang belum diimplementasikan.
+
 ## SLA (Schema Linking Accuracy)
 
 > Code: `src/metrics/sla.py`. Formulas/algorithm: guide Section 1.1.

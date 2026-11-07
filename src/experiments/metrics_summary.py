@@ -33,7 +33,7 @@ from src.metrics.tep import compute_tep  # noqa: E402
 from src.utils import timing  # noqa: E402
 
 CONDITIONS = ("baseline", "graphrag")
-CONDITION_LABELS = {"baseline": "1-Stage", "graphrag": "2-Stage"}
+CONDITION_LABELS = {"baseline": "GraphRAG 1-Stage", "graphrag": "GraphRAG 2-Stage"}
 RESULTS_FILENAME = "metrics_results.json"
 
 

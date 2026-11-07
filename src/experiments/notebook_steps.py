@@ -2,7 +2,7 @@
 notebook_steps.py — langkah-langkah eval_pipeline.ipynb, supaya sel notebook cukup satu atau dua baris.
 
 Di sini tidak ada metode baru: isinya logika yang sebelumnya tertulis di sel notebook.
-1-Stage = "baseline" di kode, 2-Stage = "graphrag" di kode.
+GraphRAG 1-Stage = "baseline" di kode, GraphRAG 2-Stage = "graphrag" di kode.
 """
 
 # Membuat wadah data sederhana
@@ -244,7 +244,7 @@ def show_run_config(cfg, sample_ratio: float, artifact_dir: Path, raw_logs_dir: 
         # Threshold tabel
         ("Table threshold (Stage 1, both pipelines)", cfg.table_similarity_threshold),
         # Threshold kolom
-        ("Column threshold (Stage 2, GraphRAG)", cfg.semantic_similarity_threshold),
+        ("Column threshold (Stage 2, GraphRAG 2-Stage)", cfg.semantic_similarity_threshold),
         # Apakah embedding memakai nama natural Spider
         ("Embed natural names", cfg.embed_natural_names),
         # Cara menangani stopword
@@ -252,7 +252,7 @@ def show_run_config(cfg, sample_ratio: float, artifact_dir: Path, raw_logs_dir: 
         # Batas top-k tabel dan kolom
         ("Top-k tables / columns pct (0 = no cap)", f"{cfg.top_k_tables_pct:.0%} / {cfg.top_k_columns_pct:.0%}"),
         # Batas top-k tabel pada 1-Stage
-        ("Baseline top-k tables pct (0 = no cap)", f"{cfg.baseline_top_k_tables_pct:.0%}"),
+        ("GraphRAG 1-Stage top-k tables pct (0 = no cap)", f"{cfg.baseline_top_k_tables_pct:.0%}"),
         # Status value linking
         ("Value linking (text / numbers)", f"{cfg.use_value_linking} / {cfg.value_link_numbers}"),
         # Kolom jalur yang masuk prompt
@@ -514,15 +514,15 @@ def walk_through_1stage(tools: Tools, item: dict, two_stage: dict) -> None:
     # Hitung ESM, EX, dan CM
     evaluation = tools.evaluator.evaluate(pred, gold, db)
     # Susun baris 2-Stage
-    row_2 = {"Variant": "2-Stage", "Predicted SQL": two_stage["pred"], "T_in": two_stage["n_in"], "T_out": two_stage["n_out"],
+    row_2 = {"Variant": "GraphRAG 2-Stage", "Predicted SQL": two_stage["pred"], "T_in": two_stage["n_in"], "T_out": two_stage["n_out"],
              # Nilai ESM, EX, dan SLA kolom 2-Stage
              "ESM": two_stage["eval"].esm, "EX": two_stage["eval"].ex, "SLA column F1": two_stage["sla"].f1}
     # Susun baris 1-Stage
-    row_1 = {"Variant": "1-Stage", "Predicted SQL": pred, "T_in": n_in, "T_out": n_out,
+    row_1 = {"Variant": "GraphRAG 1-Stage", "Predicted SQL": pred, "T_in": n_in, "T_out": n_out,
              # Nilai ESM, EX, dan SLA kolom 1-Stage
              "ESM": evaluation.esm, "EX": evaluation.ex, "SLA column F1": sla.f1}
     # Tampilkan perbandingan kedua varian
-    show(rt.with_formats(pd.DataFrame([row_1, row_2]), {"SLA column F1": "pct"}), "Contoh satu pertanyaan: 1-Stage vs 2-Stage")
+    show(rt.with_formats(pd.DataFrame([row_1, row_2]), {"SLA column F1": "pct"}), "Contoh satu pertanyaan: GraphRAG 1-Stage vs 2-Stage")
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +654,7 @@ def run_all_questions(tools: Tools, questions: list) -> RunResults:
     # Hitung jumlah kolom tiap tabel sekali saja
     table_cols = columns_per_table(tools.col_graph)
     # Proses tiap pertanyaan dengan progress bar
-    for i, item in enumerate(tqdm(questions, desc="1-Stage + 2-Stage")):
+    for i, item in enumerate(tqdm(questions, desc="GraphRAG 1-Stage + GraphRAG 2-Stage")):
         # Jalankan 2-Stage
         two = _run_2stage(tools, item, i, results)
         # Jalankan 1-Stage
@@ -682,9 +682,9 @@ def run_all_questions(tools: Tools, questions: list) -> RunResults:
             # Gold SQL
             print(f"  Gold    : {item['query']}")
             # Prediksi 2-Stage
-            print(f"  2-Stage : {two['pred']}")
+            print(f"  GraphRAG 2-Stage : {two['pred']}")
             # Prediksi 1-Stage
-            print(f"  1-Stage : {one['pred']}")
+            print(f"  GraphRAG 1-Stage : {one['pred']}")
     # Kembalikan semua hasil
     return results
 
@@ -721,9 +721,9 @@ def show_loop_summary(results: RunResults) -> None:
 # Menentukan lokasi file prediksi kedua varian
 def prediction_paths(artifact_dir: Path) -> dict:
     # graphrag = 2-Stage, baseline = 1-Stage
-    return {"GraphRAG": artifact_dir / "predictions" / "predictions.txt",
+    return {"GraphRAG 2-Stage": artifact_dir / "predictions" / "predictions.txt",
             # Lokasi file prediksi 1-Stage
-            "Baseline": artifact_dir / "predictions" / "baseline_predictions.txt"}
+            "GraphRAG 1-Stage": artifact_dir / "predictions" / "baseline_predictions.txt"}
 
 
 # Menyimpan prediksi dan raw_logs supaya hasil generate aman kalau langkah berikutnya gagal
@@ -731,9 +731,9 @@ def save_generation_results(results: RunResults, artifact_dir: Path, raw_logs_di
     # Ambil lokasi file prediksi
     paths = prediction_paths(artifact_dir)
     # Tulis prediksi 2-Stage, satu SQL per baris
-    paths["GraphRAG"].write_text("\n".join(results.graphrag_preds) + "\n", encoding="utf-8")
+    paths["GraphRAG 2-Stage"].write_text("\n".join(results.graphrag_preds) + "\n", encoding="utf-8")
     # Tulis prediksi 1-Stage, satu SQL per baris
-    paths["Baseline"].write_text("\n".join(results.baseline_preds) + "\n", encoding="utf-8")
+    paths["GraphRAG 1-Stage"].write_text("\n".join(results.baseline_preds) + "\n", encoding="utf-8")
     # Buka file raw_logs 2-Stage
     with open(raw_logs_dir / "graphrag_log.json", "w", encoding="utf-8") as f:
         # Simpan catatan per pertanyaan
@@ -925,9 +925,9 @@ def _save_comparison_report(results: RunResults, tables_dir: Path) -> None:
         # Baris kosong dan garis pembuka
         "", "=" * 70,
         # Judul laporan dan garis
-        "  COMPARISON REPORT — GraphRAG (column/node) vs Baseline (table/node)", "=" * 70,
+        "  COMPARISON REPORT — GraphRAG 2-Stage (column/node) vs GraphRAG 1-Stage (table/node)", "=" * 70,
         # Nama kolom dan garis
-        f"  {'Metric':<26} {'GraphRAG':>10}  {'Baseline':>10}  {'Delta (G-B)':>12}", "-" * 70,
+        f"  {'Metric':<26} {'2S':>10}  {'1S':>10}  {'Delta (2S-1S)':>12}", "-" * 70,
         # Baris recall
         f"  {'Recall (proxy)':<26} {g_r:>9.2f}%  {b_r:>9.2f}%  {g_r-b_r:>+11.2f}%",
         # Baris precision

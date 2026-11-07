@@ -106,11 +106,11 @@ def summary_table(runs: dict) -> pd.DataFrame:
                 "Model": slug, "Variant": CONDITION_LABELS[c], "Queries": q[c],
                 "SLA column F1": sla.get("f1"), "ESM": m["esm"][c]["overall"], "EX": m["ex"][c]["overall"],
                 "T mean": m["token_tep"]["token"][c]["t_mean"],
-                "TEP (2-Stage vs 1-Stage)": tep.get("tep") if c == "graphrag" else None,
+                "TEP (GraphRAG 2-Stage vs 1-Stage)": tep.get("tep") if c == "graphrag" else None,
                 "QVT": qvt.get("qvt"),
             })
     return rt.with_formats(pd.DataFrame(rows), {"Queries": "int", "SLA column F1": "pct", "ESM": "pct", "EX": "pct",
-                                                "T mean": "num1", "TEP (2-Stage vs 1-Stage)": "num4", "QVT": "pct"},
+                                                "T mean": "num1", "TEP (GraphRAG 2-Stage vs 1-Stage)": "num4", "QVT": "pct"},
                            title="All models: six metrics")
 
 
@@ -176,7 +176,7 @@ def write_outputs(runs: dict, warnings: list, out_dir: Path, shared_tables_dir: 
     reduction = [(s, rt.token_reduction(*r["logs"], r["metrics"]["meta"]["alpha"]) + [rt.token_reduction_by_difficulty(*r["logs"])])
                  for s, r in runs.items() if r["logs"]]
     if reduction:
-        sheet = Sheet(wb, "Token Reduction", "Column and token reduction: 2-Stage vs 1-Stage")
+        sheet = Sheet(wb, "Token Reduction", "Column and token reduction: GraphRAG 2-Stage vs 1-Stage")
         for table in _concat_by_title(reduction):
             sheet.table(table)
         sheet.finish()

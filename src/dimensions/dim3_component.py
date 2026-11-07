@@ -17,7 +17,7 @@ from src.metrics.esm_ex_cm import CLAUSES, QueryEvalResult, aggregate_cm
 # poin 4).
 _QUALITATIVE_NOTES = {
     "where": "Dampak pemangkasan konteks terasa di logika filtering.",
-    "from": "GraphRAG kehilangan informasi relasi antar tabel.",
+    "from": "GraphRAG 2-Stage kehilangan informasi relasi antar tabel.",
 }
 
 
@@ -57,7 +57,7 @@ def run_dimension_3(baseline_logs: List[dict], graphrag_logs: List[dict]) -> dic
         is_decrease = delta < 0
         if not is_decrease:
             interpretation = (
-                f"Tidak ada klausa yang benar-benar menurun dari Baseline ke GraphRAG "
+                f"Tidak ada klausa yang benar-benar menurun dari GraphRAG 1-Stage ke GraphRAG 2-Stage "
                 f"-- delta terkecil ada di '{clause}' ({delta:+.2f} poin), tapi itu "
                 f"tetap kenaikan/tidak berubah, bukan penurunan."
             )
@@ -92,7 +92,7 @@ def print_dimension_3(result: dict) -> None:
     print("=" * 70)
     print("Component Match (CM) per klausa (%)")
     print("=" * 70)
-    print(f"{'clause':12} {'Baseline':>10} {'GraphRAG':>10} {'Delta':>10}")
+    print(f"{'clause':12} {'1S':>10} {'2S':>10} {'Delta':>10}")
     for clause in CLAUSES:
         b, g, d = cm["baseline"][clause], cm["graphrag"][clause], cm["delta"][clause]
         d_str = f"{d:+.2f}" if d is not None else "N/A"
