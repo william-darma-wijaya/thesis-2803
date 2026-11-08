@@ -50,9 +50,9 @@ All values come from the same stratified 20% sample of the Spider dev set, so ro
 
 On 1-stage rows, `Value linking`, `Traversal` and `No-PK tables` show `-` because those steps do not exist in that pipeline.
 
-### The seven rows of `Trial Preprocessing`
+### The eight rows of `Trial Preprocessing`
 
-Each row adds one change. The fourth row is the step that was rejected, so the fifth row goes back to `text`.
+Each of the first seven rows adds one change. The fourth row is the step that was rejected, so the fifth row goes back to `text`. The eighth row is an alternative final combination, not a further step.
 
 | Row | What changes | Compare it with |
 |---|---|---|
@@ -63,6 +63,7 @@ Each row adds one change. The fourth row is the step that was rejected, so the f
 | 5 | `Traversal` becomes `fk_only` | Row 3, not row 4 |
 | 6 | `No-PK tables` becomes `connected` | Row 5 |
 | 7 | `Embedded names` becomes `natural` | Row 6 |
+| 8 | Alternative: `Stopwords` back to `none` and `Value linking` `text + numbers`, on top of row 7 | Row 7. Two settings change at once, so the difference is their combined effect |
 
 Row 7 also appears in `Trial Thresholds`, as the 2-stage row at the same T and K.
 

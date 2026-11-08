@@ -99,6 +99,7 @@ def test_tables():
         recap_row("G6 + sambung no-PK | T0.50/K0.70", 0.5, 0.7, 0.50),
         recap_row("G7 + nama natural | T0.50/K0.75", 0.5, 0.75, 0.52),
         recap_row("G7 + nama natural | T0.50/K0.70", 0.5, 0.7, 0.55),
+        recap_row("G8 tanpa stopword + angka | T0.50/K0.70", 0.5, 0.7, 0.58),
         recap_row("Baseline | T0.50", 0.5, None, 0.50),
     ])
     tables = rt.sla_trial_tables(recap)
@@ -109,7 +110,7 @@ def test_tables():
     # Tanpa kolom Trial di kedua sheet, baris dikenali dari pengaturan dan pipeline
     assert "Trial" not in tables["steps"].columns and "Trial" not in tables["grid"].columns
     # Langkah nama natural ikut di sheet preprocessing, hanya pada pasangan (T, K) yang sama, dan tetap ada di grid
-    assert list(tables["steps"]["EX (zero-shot)"]) == [0.45, 0.50, 0.55]
+    assert list(tables["steps"]["EX (zero-shot)"]) == [0.45, 0.50, 0.55, 0.58]   # G8 di sheet preprocessing, tidak di grid
     assert set(tables["steps"]["Column threshold (K)"]) == {0.7} and len(tables["grid"]) == 3
     assert rt.sla_trial_tables(recap[recap["trial"].str.startswith("G7")])["steps"] is None   # tanpa langkah lain, bukan riwayat
     assert list(tables["grid"]["Pipeline"]) == ["1-stage", "2-stage", "2-stage"]
@@ -150,19 +151,20 @@ def test_preprocessing_steps():
         step("G1 threshold saja", 0.40, 0.70, 100.0), step("G2 + stopword edge", 0.42, 0.72, 110.0),
         step("G3 + value linking", 0.50, 0.80, 120.0), step("G4 + angka", 0.45, 0.82, 200.0),
         step("G5 + fk_only", 0.55, 0.85, 90.0), step("G6 + sambung no-PK", 0.56, 0.86, 95.0),
-        step("G7 + nama natural", 0.60, 0.90, 95.0),
+        step("G7 + nama natural", 0.60, 0.90, 95.0), step("G8 tanpa stopword + angka", 0.62, 0.93, 99.0),
         # pasangan lain dan Baseline bukan bagian dari riwayat preprocessing
         recap_row("G7 + nama natural | T0.60/K0.75", 0.6, 0.75, 0.99), recap_row("Baseline | T0.60", 0.6, None, 0.99),
     ])
     t = rt.preprocessing_steps(recap)
     rt.formatted(t)
-    assert len(t) == 7 and t.attrs["title"].endswith("T0.60/K0.70")
+    assert len(t) == 8 and t.attrs["title"].endswith("T0.60/K0.70")
     assert pd.isna(t["Δ EX"].iloc[0]) and t["Compared with"].iloc[0] != t["Compared with"].iloc[0]
     assert abs(t["Δ EX"].iloc[3] - (-5.0)) < 1e-9                    # G4 vs G3, ditolak
     assert t["Compared with"].iloc[4] == "G3"                        # G5 vs G3, bukan G4
     assert abs(t["Δ EX"].iloc[4] - 5.0) < 1e-9 and abs(t["Δ Column R"].iloc[4] - 5.0) < 1e-9
     assert t["Δ Prompt tokens"].iloc[4] == -30
     assert abs(t["Δ EX"].iloc[6] - 4.0) < 1e-9
+    assert t["Compared with"].iloc[7] == "G7" and abs(t["Δ EX"].iloc[7] - 2.0) < 1e-9 and t["Δ Prompt tokens"].iloc[7] == 4
 
     no_ex = rt.preprocessing_steps(recap.drop(columns="ex"))
     assert "Δ EX" not in no_ex.columns and "Δ Column R" in no_ex.columns

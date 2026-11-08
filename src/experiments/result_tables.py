@@ -867,7 +867,7 @@ _TRIAL_SETTING_VALUES = {"value_link": {"mati": "off", "teks": "text", "teks+ang
                          "nama_embed": {"asli": "original"}}
 
 # Tiap langkah preprocessing dibandingkan dengan langkah yang menjadi dasarnya: G5 dibangun dari G3, bukan G4 (angka tidak dipakai).
-_STEP_PARENT = {"G2": "G1", "G3": "G2", "G4": "G3", "G5": "G3", "G6": "G5", "G7": "G6"}
+_STEP_PARENT = {"G2": "G1", "G3": "G2", "G4": "G3", "G5": "G3", "G6": "G5", "G7": "G6", "G8": "G7"}   # G8 = alternatif dari G7
 _STEP_DELTAS = {"ex": "d_ex", "col_P_ne": "d_col_P_ne", "col_R_ne": "d_col_R_ne", "prompt_tokens_k0": "d_prompt_tokens"}
 _TRIAL_STEP_SPEC = [("trial", "Trial", None, None), *_TRIAL_THRESHOLDS, *_TRIAL_SETTINGS,
     ("compared_to", "Compared with", None, None),
@@ -910,11 +910,13 @@ def sla_trial_tables(recap: Optional[pd.DataFrame]) -> dict:
     if recap is None or recap.empty:
         return {"steps": None, "grid": None}
     recap = _english_settings(recap)
-    # Langkah terakhir (nama natural) ada di dua sheet: di sini hanya pada pasangan (T, K) yang sama dengan langkah lainnya
-    earlier = recap[recap["trial"].str.match(r"G[1-6] ")]
+    # G7 (preprocessing akhir) ada di dua sheet: di sini hanya pada pasangan (T, K) yang sama dengan langkah lainnya.
+    # Langkah lain = semua id G kecuali G7, termasuk kombinasi alternatif G8.
+    is_g7 = recap["trial"].str.match("G7 ")
+    earlier = recap[recap["trial"].str.match(r"G\d+ ") & ~is_g7]
     same_pair = pd.MultiIndex.from_frame(recap[["table_threshold", "column_threshold"]]).isin(
         pd.MultiIndex.from_frame(earlier[["table_threshold", "column_threshold"]]))
-    steps = recap[recap["trial"].str.match(r"G[1-6] ") | (recap["trial"].str.match("G7 ") & same_pair)]
+    steps = recap[recap.index.isin(earlier.index) | (is_g7 & same_pair)]
     grid = recap[recap["trial"].str.match("G7|Baseline")].sort_values(
         ["table_threshold", "column_threshold"], na_position="first")     # 1-stage (tanpa K) di atas 2-stage pada T yang sama
     grid = grid.assign(pipeline=grid["trial"].map(lambda t: pipeline_label("baseline" if t.startswith("Baseline") else "graphrag")))
