@@ -100,6 +100,7 @@ def test_tables():
         recap_row("G7 + nama natural | T0.50/K0.75", 0.5, 0.75, 0.52),
         recap_row("G7 + nama natural | T0.50/K0.70", 0.5, 0.7, 0.55),
         recap_row("G8 tanpa stopword + angka | T0.50/K0.70", 0.5, 0.7, 0.58),
+        recap_row("G8 tanpa stopword + angka | T0.50/K0.75", 0.5, 0.75, 0.53),
         recap_row("Baseline | T0.50", 0.5, None, 0.50),
     ])
     tables = rt.sla_trial_tables(recap)
@@ -111,10 +112,12 @@ def test_tables():
     assert "Trial" not in tables["steps"].columns and "Trial" not in tables["grid"].columns
     # Langkah nama natural ikut di sheet preprocessing, hanya pada pasangan (T, K) yang sama, dan tetap ada di grid
     assert list(tables["steps"]["EX (zero-shot)"]) == [0.45, 0.50, 0.55, 0.58]   # G8 di sheet preprocessing, tidak di grid
-    assert set(tables["steps"]["Column threshold (K)"]) == {0.7} and len(tables["grid"]) == 3
+    assert set(tables["steps"]["Column threshold (K)"]) == {0.7}
+    # Grid: G7 dan G8 di tiap (T, K), G7 lebih dulu pada (T, K) yang sama
+    assert list(tables["grid"]["EX (zero-shot)"]) == [0.50, 0.55, 0.58, 0.52, 0.53]
     assert rt.sla_trial_tables(recap[recap["trial"].str.startswith("G7")])["steps"] is None   # tanpa langkah lain, bukan riwayat
-    assert list(tables["grid"]["Pipeline"]) == ["1-stage", "2-stage", "2-stage"]
-    assert list(tables["grid"]["Column threshold (K)"].iloc[1:]) == [0.7, 0.75]
+    assert list(tables["grid"]["Pipeline"]) == ["1-stage"] + ["2-stage"] * 4
+    assert list(tables["grid"]["Column threshold (K)"].iloc[1:]) == [0.7, 0.7, 0.75, 0.75]
     assert list(tables["grid"].columns[:3]) == ["Pipeline", "Table threshold (T)", "Column threshold (K)"]
     for t in tables.values():
         for header in ("EX (zero-shot)", "Avg columns in prompt", "Avg tables retrieved, % of DB", "Avg columns retrieved, % of DB",
@@ -190,7 +193,7 @@ def test_workbook_sheets():
         assert wb.sheetnames == ["Trial Preprocessing", "Trial Thresholds"]      # tanpa sheet Info
         for ws in wb:
             assert len(ws.tables) == 1 and next(iter(ws.tables.values())).ref.startswith("A1:")   # tabel langsung di baris 1
-        assert wb["Trial Preprocessing"].freeze_panes == "F2" and wb["Trial Thresholds"].freeze_panes == "D2"
+        assert wb["Trial Preprocessing"].freeze_panes == "F2" and wb["Trial Thresholds"].freeze_panes == "F2"
         text = [c.value for ws in wb for row in ws.iter_rows() for c in row if isinstance(c.value, str)]
         assert not [t for t in text if re.search(r"\bG[1-7]\b|Baseline|GraphRAG|percentile", t)], text
         wb.close()

@@ -910,15 +910,16 @@ def sla_trial_tables(recap: Optional[pd.DataFrame]) -> dict:
     if recap is None or recap.empty:
         return {"steps": None, "grid": None}
     recap = _english_settings(recap)
-    # G7 (preprocessing akhir) ada di dua sheet: di sini hanya pada pasangan (T, K) yang sama dengan langkah lainnya.
-    # Langkah lain = semua id G kecuali G7, termasuk kombinasi alternatif G8.
-    is_g7 = recap["trial"].str.match("G7 ")
-    earlier = recap[recap["trial"].str.match(r"G\d+ ") & ~is_g7]
+    # G7 (preprocessing akhir) dan G8 (alternatif) jalan di seluruh grid; di sheet preprocessing hanya pada pasangan
+    # (T, K) yang sama dengan langkah G1-G6.
+    ladder = recap["trial"].str.match(r"G[1-6] ")
+    final = recap["trial"].str.match(r"G[78] ")
     same_pair = pd.MultiIndex.from_frame(recap[["table_threshold", "column_threshold"]]).isin(
-        pd.MultiIndex.from_frame(earlier[["table_threshold", "column_threshold"]]))
-    steps = recap[recap.index.isin(earlier.index) | (is_g7 & same_pair)]
-    grid = recap[recap["trial"].str.match("G7|Baseline")].sort_values(
-        ["table_threshold", "column_threshold"], na_position="first")     # 1-stage (tanpa K) di atas 2-stage pada T yang sama
+        pd.MultiIndex.from_frame(recap.loc[ladder, ["table_threshold", "column_threshold"]]))
+    steps = recap[ladder | (final & same_pair)]
+    # 1-stage (tanpa K) di atas 2-stage pada T yang sama; stable: G7 sebelum G8 di (T, K) yang sama
+    grid = recap[final | recap["trial"].str.match("Baseline")].sort_values(
+        ["table_threshold", "column_threshold"], na_position="first", kind="stable")
     grid = grid.assign(pipeline=grid["trial"].map(lambda t: pipeline_label("baseline" if t.startswith("Baseline") else "graphrag")))
     # Tanpa kolom Trial: baris preprocessing sudah dibedakan oleh kolom pengaturannya
     step_spec = _TRIAL_SETTINGS + _TRIAL_THRESHOLDS + _TRIAL_MEASURES

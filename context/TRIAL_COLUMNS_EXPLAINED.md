@@ -5,11 +5,11 @@ This file explains every column in the two threshold-trial sheets of the Excel w
 | Sheet | One row is | Use it for |
 |---|---|---|
 | `Trial Preprocessing` | One preprocessing step, at table threshold 0.50 and column threshold 0.70 by default | Explaining in the thesis why each preprocessing step is used or rejected |
-| `Trial Thresholds` | One pipeline at one threshold setting | Choosing the table and column thresholds |
+| `Trial Thresholds` | One pipeline (and, for 2-stage, one preprocessing combination) at one threshold setting | Choosing the table and column thresholds |
 
 Both sheets have the same columns, with two differences:
 
-- `Trial Thresholds` has `Pipeline` as its first column.
+- `Trial Thresholds` has `Pipeline` as its first column. It has two kinds of 2-stage rows: the final preprocessing (`Stopwords` `edge`, `Value linking` `text`) and the alternative combination (`none`, `text + numbers`). Both appear at every T and K, the final one first, and the frozen columns include `Stopwords` and `Value linking` so you can tell them apart.
 - `Trial Preprocessing` puts the settings columns first and freezes them, because they are what identifies each row.
 
 All values come from the same stratified 20% sample of the Spider dev set, so rows can be compared directly.
@@ -65,7 +65,7 @@ Each of the first seven rows adds one change. The fourth row is the step that wa
 | 7 | `Embedded names` becomes `natural` | Row 6 |
 | 8 | Alternative: `Stopwords` back to `none` and `Value linking` `text + numbers`, on top of row 7 | Row 7. Two settings change at once, so the difference is their combined effect |
 
-Row 7 also appears in `Trial Thresholds`, as the 2-stage row at the same T and K.
+Rows 7 and 8 also appear in `Trial Thresholds`, as the two 2-stage rows at the same T and K.
 
 ## 2. Accuracy
 

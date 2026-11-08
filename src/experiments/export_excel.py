@@ -223,7 +223,8 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
     add("Models", rt.model_tables(models), f"{tables_dir}/model_comparison.csv")
     tt = rt.sla_trial_tables(trial)
     # Kolom yang dibekukan = kolom yang mengenali baris saat digeser ke samping
-    for name, key, freeze_col in (("Trial Preprocessing", "steps", "F"), ("Trial Thresholds", "grid", "D")):
+    # Trial Thresholds: Pipeline, T, K, Stopwords, Value linking (dua yang terakhir membedakan kedua preprocessing 2-stage)
+    for name, key, freeze_col in (("Trial Preprocessing", "steps", "F"), ("Trial Thresholds", "grid", "F")):
         add(name, [tt[key]] if tt[key] is not None else [], f"{tables_dir}/sla_trial_recap.csv", freeze_col=freeze_col)
 
     if skip_missing and any(sh.has_data for sh in sheets):     # workbook butuh minimal satu sheet
