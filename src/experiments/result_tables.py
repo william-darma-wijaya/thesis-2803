@@ -1192,3 +1192,58 @@ def sla_trial_tables(recap: Optional[pd.DataFrame]) -> dict:
     grid_spec = [("pipeline", "Pipeline", None, None), *_TRIAL_THRESHOLDS, *_TRIAL_SETTINGS, *_TRIAL_MEASURES]
     return {"steps": _select(steps, step_spec, "Threshold trial · preprocessing steps") if len(steps) else None,
             "grid": _select(grid, grid_spec, "Threshold trial · threshold grid") if len(grid) else None}
+
+
+# ---------------------------------------------------------------------------
+# Trial dua notebook (poin 42): trial_preprocessing.ipynb dan trial_thresholds.ipynb
+# ---------------------------------------------------------------------------
+
+# Ukuran yang dirangkum per nilai langkah: (kolom rekap, nama, kind rata-rata, kind selisih, skala selisih)
+_EFFECT_MEASURES = [("ex", "EX (zero-shot)", "pct", "pp", 100), ("col_R_ne", "Column R (non-empty gold)", "pct", "pp", 100),
+                    ("col_P_ne", "Column P (non-empty gold)", "pct", "pp", 100),
+                    ("prompt_tokens_k0", "prompt tokens (k=0)", "num1", "dnum1", 1)]
+
+
+def preprocessing_effects(recap: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """
+    Efek utama tiap langkah preprocessing atas semua kombinasi: rata-rata ukuran untuk setiap nilai langkah,
+    dan selisihnya terhadap nilai pertama langkah itu (acuan "mati", urutan nilai di notebook). Pada desain
+    faktorial penuh, selisih ini = rata-rata efek mengganti satu langkah dengan langkah lain tetap sama.
+    Hanya angka; tidak memilih kombinasi.
+    """
+    if recap is None or recap.empty:
+        return None
+    df = _english_settings(recap)
+    measures = [m for m in _EFFECT_MEASURES if m[0] in df.columns]
+    rows, fmts = [], {"Configurations": "int"}
+    for field, header, _, _ in _TRIAL_SETTINGS:
+        values = list(dict.fromkeys(df[field])) if field in df.columns else []
+        if len(values) < 2:
+            continue
+        ref = df[df[field] == values[0]]
+        for v in values:
+            sub = df[df[field] == v]
+            r = {"Step": header, "Value": v, "Compared with": values[0], "Configurations": len(sub)}
+            for col, name, kind, dkind, scale in measures:
+                avg = sub[col].mean()
+                r[f"Avg {name}"], fmts[f"Avg {name}"] = avg, kind
+                r[f"Δ {name}"], fmts[f"Δ {name}"] = (avg - ref[col].mean()) * scale, dkind
+            rows.append(r)
+    return with_formats(pd.DataFrame(rows), fmts, title="Preprocessing trial · effect of each step") if rows else None
+
+
+def trial_tables(preprocessing: Optional[pd.DataFrame], thresholds: Optional[pd.DataFrame]) -> dict:
+    """Tabel sheet Trial Preprocessing, Trial Effects, dan Trial Thresholds dari rekap kedua notebook trial."""
+    out = dict.fromkeys(("steps", "effects", "grid"))
+    if preprocessing is not None and not preprocessing.empty:
+        out["steps"] = _select(_english_settings(preprocessing), _TRIAL_SETTINGS + _TRIAL_THRESHOLDS + _TRIAL_MEASURES,
+                               "Preprocessing trial · all combinations")
+        out["effects"] = preprocessing_effects(preprocessing)
+    if thresholds is not None and not thresholds.empty:
+        # 1-stage (tanpa K) di atas 2-stage pada T yang sama; stable: urutan preprocessing notebook tetap
+        grid = _english_settings(thresholds).sort_values(["table_threshold", "column_threshold"], na_position="first",
+                                                         kind="stable")
+        grid = grid.assign(pipeline=grid["pipeline"].map(pipeline_label))
+        out["grid"] = _select(grid, [("pipeline", "Pipeline", None, None), *_TRIAL_THRESHOLDS, *_TRIAL_SETTINGS,
+                                     *_TRIAL_MEASURES], "Threshold trial · threshold grid")
+    return out

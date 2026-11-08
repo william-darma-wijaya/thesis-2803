@@ -57,8 +57,9 @@ pemenangnya ke `config.py`** (atau oper lewat flag `--tables-pct` dkk).
   tidak lagi top-k%. GraphRAG dan Baseline sama-sama memilih tabel by
   `table_similarity_threshold` (default 0.60), kolom GraphRAG by
   `semantic_similarity_threshold` (0.70). Dituning di
-  `notebooks/graphrag_sla_trial.ipynb` (jalankan ulang G1-G7 dengan
-  `max_ngram=2`). Baseline belum punya trial sendiri: ukur SLA tabel Baseline
+  `notebooks/trial_thresholds.ipynb` (preprocessing: saklar on/off di bagian 3);
+  efek tiap langkah preprocessing di `notebooks/trial_preprocessing.ipynb` (semua
+  kombinasi, poin 42). Baseline belum punya trial sendiri: ukur SLA tabel Baseline
   di beberapa threshold. `sweep.py` hanya referensi (`best_config()` = `{}`).
   **Update 2026-11-03 (poin 33):** notebook trial tidak lagi memilih threshold
   otomatis. Baca rekap bagian 9 + tabel GraphRAG vs Baseline di T yang sama

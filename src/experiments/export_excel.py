@@ -10,7 +10,10 @@ Membaca (sheet yang sumbernya tidak ada hanya berisi catatan "Source not found",
     outputs/tables/dimensions_results.json          -> Dimensions, D1..D6 (run_all_dimensions.py)
     outputs/tables/ablation_results.csv             -> Ablation (few-shot k, tahap 2)
     outputs/tables/model_comparison.csv             -> Models (tahap 3)
-    outputs/tables/sla_trial_recap.csv              -> Trial Preprocessing, Trial Thresholds (graphrag_sla_trial.ipynb)
+    outputs/tables/trial_preprocessing_recap.csv    -> Trial Preprocessing, Trial Effects (trial_preprocessing.ipynb)
+    outputs/tables/trial_thresholds_recap.csv       -> Trial Thresholds (trial_thresholds.ipynb)
+    outputs/tables/sla_trial_recap.csv              -> Trial Preprocessing, Trial Thresholds (rekap lama graphrag_sla_trial.ipynb,
+                                                       hanya kalau dua file di atas belum ada)
 
 Tabelnya dibangun oleh src/experiments/result_tables.py, modul yang SAMA dengan yang ditampilkan
 eval_pipeline.ipynb, jadi angka notebook dan workbook identik. Isinya hanya angka faktual:
@@ -186,7 +189,9 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
     spider = _read_csv(tables_dir / "spider_official_eval.csv")
     ablation = _read_csv(tables_dir / "ablation_results.csv")
     models = _read_csv(tables_dir / "model_comparison.csv")
-    trial = _read_csv(tables_dir / "sla_trial_recap.csv")
+    trial_prep = _read_csv(tables_dir / "trial_preprocessing_recap.csv")
+    trial_thr = _read_csv(tables_dir / "trial_thresholds_recap.csv")
+    trial_old = _read_csv(tables_dir / "sla_trial_recap.csv") if trial_prep is None and trial_thr is None else None
     have_logs = bool(logs["baseline"]) and bool(logs["graphrag"])
     b, g = logs["baseline"] or [], logs["graphrag"] or []
 
@@ -238,11 +243,13 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
 
     add("Ablation", rt.ablation_tables(ablation), f"{tables_dir}/ablation_results.csv")
     add("Models", rt.model_tables(models), f"{tables_dir}/model_comparison.csv")
-    tt = rt.sla_trial_tables(trial)
+    tt = rt.trial_tables(trial_prep, trial_thr) if trial_old is None else {**rt.sla_trial_tables(trial_old), "effects": None}
     # Kolom yang dibekukan = kolom yang mengenali baris saat digeser ke samping
     # (Trial Thresholds: Pipeline, T, K, Stopwords, Value linking)
-    for name, key in (("Trial Preprocessing", "steps"), ("Trial Thresholds", "grid")):
-        add(name, [tt[key]] if tt[key] is not None else [], f"{tables_dir}/sla_trial_recap.csv", freeze_col="F")
+    for name, key, source, freeze_col in (("Trial Preprocessing", "steps", "trial_preprocessing_recap.csv", "F"),
+                                          ("Trial Effects", "effects", "trial_preprocessing_recap.csv", "C"),
+                                          ("Trial Thresholds", "grid", "trial_thresholds_recap.csv", "F")):
+        add(name, [tt[key]] if tt[key] is not None else [], f"{tables_dir}/{source}", freeze_col=freeze_col)
 
     if skip_missing and any(sh.has_data for sh in sheets):     # workbook butuh minimal satu sheet
         for sh in sheets:

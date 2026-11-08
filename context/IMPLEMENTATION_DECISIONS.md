@@ -841,6 +841,25 @@ Untuk sekarang `run_all_dimensions.py` menerima angkanya manual (`--ex-per-k` / 
 
 **Belum ditangani dari review:** latensi pertanyaan pemanasan bisa ikut statistik kalau pertanyaan pertama gagal, `torch.cuda.synchronize()` di tiap tahap, akhir baris campuran di `CLAUDE.md`, dan `tests/test_few_shot_selection.py` yang dilaporkan gagal (butuh data Spider).
 
+## 42. Notebook trial dipecah: semua kombinasi preprocessing, dan grid threshold dengan saklar (2026-11-08)
+
+**Keputusan peneliti:**
+- `graphrag_sla_trial.ipynb` dipecah jadi dua notebook dan dihapus:
+  - `notebooks/trial_preprocessing.ipynb`: **semua kombinasi** lima langkah preprocessing 2-Stage (stopword, value linking, traversal, tabel tanpa PK, nama embed) di satu pasangan (T, K), default T 0.50 / K 0.70. Default 2 x 3 x 2 x 2 x 2 = 48 kombinasi (`PREPROC_OPTIONS`; `remove` untuk stopword bisa ditambahkan). Menggantikan tangga G1-G8. EDA, walk-through, error analysis, statistik value linking, dan oracle traversal ikut di notebook ini.
+  - `notebooks/trial_thresholds.ipynb`: grid T x K 2-Stage dengan **saklar on/off** preprocessing (`STOPWORD_FILTER`, `VALUE_LINKING`, `VALUE_NUMBERS`, `FK_ONLY`, `CONNECT_NO_PK`, `NATURAL_NAMES`; default = `config.py`), opsional `EXTRA_PREPROC` untuk preprocessing tambahan di grid yang sama, dan 1-Stage di tiap T. `BEST_T` / `BEST_K` / `BEST_PREPROC` tetap dipilih peneliti.
+- **1-Stage di trial = nama tabel saja** (poin 39). Varian 1-Stage+ (nama + kolom) tidak dijalankan di trial; `BASELINE_TEXTS` dari poin 41 ikut hilang bersama notebook lama.
+- Peneliti setuju 1-Stage di trial threshold dijalankan ulang, karena angka `hasil_trial.xlsx` lama memakai teks tabel nama + kolom.
+
+**Implementasi:** kode bersama di `src/experiments/trial_steps.py` (kode custom skripsi): sampel stratified, gold schema (`extract_ground_truth_schema()`), satu baris per pertanyaan (SLA, kolom, token, DDL penuh; sama dengan `_row()` notebook lama), rangkuman per konfigurasi (`summarize()`, sama dengan `_summarize()`), run dengan cache, EX zero-shot (`ExScorer`, cache `sla_trial_ex_cache.jsonl` dipakai bersama kedua notebook), dan perbandingan 2-Stage vs 1-Stage di T yang sama. Tidak ada formula baru.
+
+**Output:** `outputs/tables/trial_preprocessing_recap.csv` -> sheet `Trial Preprocessing` (semua kombinasi) dan `Trial Effects` (`preprocessing_effects()`); `outputs/tables/trial_thresholds_recap.csv` -> sheet `Trial Thresholds`; `trial_thresholds_vs_1stage.csv` (pengganti `sla_trial_vs_baseline.csv`). Rekap punya kolom `pipeline` (`graphrag`/`baseline`), jadi baris tidak lagi dikenali dari nama trial. `sla_trial_recap.csv` lama masih dibaca kalau dua file baru belum ada.
+
+**Efek tiap langkah (`Trial Effects`):** untuk tiap nilai sebuah langkah, rata-rata EX, recall dan precision kolom (non-empty gold), dan token prompt atas semua kombinasi yang memakai nilai itu, ditambah selisih terhadap nilai pertama langkah itu di `PREPROC_OPTIONS` (acuan "mati"). Pada desain faktorial penuh, selisih ini sama dengan efek utama: rata-rata efek mengganti satu langkah sementara langkah lain bervariasi. Efek interaksi tidak dihitung; kombinasinya bisa dibaca langsung di `Trial Preprocessing`. Hanya angka, tidak memilih.
+
+**Biaya:** 48 kombinasi x sampel 20% (sekitar 207 pertanyaan) = sampai sekitar 9.900 generasi untuk EX, dikurangi prompt yang sama. Belum diukur di Kaggle.
+
+**Tes:** `python tests/test_trial_steps.py` (skema sintetis dengan SQLite untuk value linking, embedder palsu; gold schema ditulis tangan karena parser Spider butuh data NLTK). Sel kedua notebook juga dijalankan di data sintetis yang sama. Belum dijalankan dengan Spider asli maupun GPU.
+
 ### F. Baseline DAIL-SQL belum diimplementasikan
 
 **Dicatat (2026-11-07, poin 38).** Baseline skripsi adalah DAIL-SQL, dikerjakan nanti. Belum diputuskan: cara DAIL-SQL dijalankan, model dan few-shot yang dipakai supaya sebanding, metrik apa saja yang dibandingkan, dan pembanding TEP (saat ini `B` di rumus = GraphRAG 1-Stage). `combine_models.py` dan kode lain belum punya tempat untuk kondisi ketiga.

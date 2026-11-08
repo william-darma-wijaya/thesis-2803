@@ -55,9 +55,9 @@ class PipelineConfig:
     # --- Schema Linking ---
     # GraphRAG: the two thresholds below are the ONLY retrieval choices. Every other
     # GraphRAG schema-linking field in this section is fixed PREPROCESSING (researcher
-    # decision 2026-10-19, picked by SLA in notebooks/graphrag_sla_trial.ipynb, trial
-    # G7). Their flags exist only so that notebook can reproduce trials G1-G7; do not
-    # change them for experiments.
+    # decision 2026-10-19, picked by SLA in the SLA trial, trial
+    # G7). Their flags exist only so notebooks/trial_preprocessing.ipynb can run every combination and
+    # notebooks/trial_thresholds.ipynb can switch them; do not change them for experiments.
     #
     # Minimum cosine similarity (best n-gram match) for a column to be kept (Stage 2).
     semantic_similarity_threshold: float = 0.70
@@ -122,7 +122,7 @@ class PipelineConfig:
     value_max_columns_per_value: int = 3     # value in more columns than this = too common, ignored
     value_max_linked_columns: int = 5        # max columns added per question
     # Numbers ("played in 2013" -> matches.year). Off (fixed): in the SLA trial they
-    # added more false positives than recall (graphrag_sla_trial.ipynb, G4).
+    # added more false positives than recall (SLA trial, G4; see notebooks/trial_preprocessing.ipynb).
     value_link_numbers: bool = False
     value_max_columns_per_number: int = 2    # stricter than text: small numbers sit in many columns
     value_number_skip_after: list[str] = field(default_factory=lambda: [

@@ -2,7 +2,7 @@
 Top-k fraction sweep, ranked by SLA (no LLM). REFERENCE ONLY since poin 30/32:
 both pipelines now select tables by threshold with no top-k cap, so nothing is
 written back to cfg (best_config() == {}). The thresholds are tuned in
-notebooks/graphrag_sla_trial.ipynb.
+notebooks/trial_thresholds.ipynb.
 
 Grid (both from config.py's top_k_frame, see IMPLEMENTATION_DECISIONS.md poin 28):
     GraphRAG 2-Stage : top_k_tables_pct x top_k_columns_pct   (cross product, 16 configs)
@@ -192,7 +192,7 @@ def best_config(results: list[SweepResult], rank_by: str) -> dict:
     (fixed preprocessing, config.py "Schema Linking"; the GraphRAG 1-Stage follows
     GraphRAG 2-Stage Stage 1, poin 32), so the top-k grid rows are printed for reference
     but never written back to cfg. The table/column thresholds are tuned in
-    notebooks/graphrag_sla_trial.ipynb.
+    notebooks/trial_thresholds.ipynb.
     """
     return {}
 
@@ -308,7 +308,7 @@ def run_sweep(
         print(f"  {attr} = {value}")
     print("-> Nothing to write back: both pipelines select tables by threshold with no top-k cap\n"
           "   (fixed preprocessing, poin 30/32), so these rows are for reference only.\n"
-          "   Tune the thresholds in notebooks/graphrag_sla_trial.ipynb.\n")
+          "   Tune the thresholds in notebooks/trial_thresholds.ipynb.\n")
     return results, best
 
 
