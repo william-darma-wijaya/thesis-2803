@@ -4,7 +4,7 @@
 >
 > Every dimension in this project is 100% custom orchestration code (`src/dimensions/`) — it doesn't touch SPIDER's official tooling directly, it just combines numbers that `src/metrics/` already produced (and those modules' own 🔧/✍️ attribution is explained in `METRICS_EXPLAINED.md`, not repeated here).
 
-> **Status penamaan (poin 37):** di dokumen ini, "Baseline"/B berarti **GraphRAG 1-Stage** dan "GraphRAG"/G berarti **GraphRAG 2-Stage**. Keduanya metode peneliti. Baseline skripsi yang sebenarnya adalah **DAIL-SQL**, yang belum diimplementasikan.
+> **Status penamaan (poin 38):** di dokumen ini, "Baseline"/B berarti **GraphRAG 1-Stage** dan "GraphRAG"/G berarti **GraphRAG 2-Stage**. Keduanya metode peneliti. Baseline skripsi yang sebenarnya adalah **DAIL-SQL**, yang belum diimplementasikan.
 
 ## Dimension 1 (Efficiency)
 

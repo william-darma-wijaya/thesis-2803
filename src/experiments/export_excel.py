@@ -10,7 +10,7 @@ Membaca (yang tidak ada dilewati; statusnya ditulis di sheet "Info"):
     outputs/tables/dimensions_results.json          -> Dimensions, D1..D6 (run_all_dimensions.py)
     outputs/tables/ablation_results.csv             -> Ablation (few-shot k, tahap 2)
     outputs/tables/model_comparison.csv             -> Models (tahap 3)
-    outputs/tables/sla_trial_recap.csv, sla_trial_T*_K*.csv -> SLA Trial (graphrag_sla_trial.ipynb)
+    outputs/tables/sla_trial_recap.csv              -> Trial Preprocessing, Trial Thresholds (graphrag_sla_trial.ipynb)
 
 Tabelnya dibangun oleh src/experiments/result_tables.py, modul yang SAMA dengan yang ditampilkan
 eval_pipeline.ipynb, jadi angka notebook dan workbook identik. Isinya hanya angka faktual:
@@ -28,7 +28,6 @@ Usage (dari root repo, lokal maupun Kaggle):
 """
 
 import argparse
-import glob
 import json
 import re
 import sys
@@ -213,9 +212,6 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
     ablation = _read_csv(tables_dir / "ablation_results.csv")
     models = _read_csv(tables_dir / "model_comparison.csv")
     trial = _read_csv(tables_dir / "sla_trial_recap.csv")
-    trial_vs = _read_csv(tables_dir / "sla_trial_vs_baseline.csv")
-    cfg_frames = [d for f in sorted(glob.glob(str(tables_dir / "sla_trial_T*_K*.csv")))
-                  if (d := _read_csv(Path(f), index_col=0)) is not None]
     have_logs = bool(logs["baseline"]) and bool(logs["graphrag"])
     b, g = logs["baseline"] or [], logs["graphrag"] or []
 
@@ -233,7 +229,6 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
         ("Ablation stage 2 (few-shot k)", ablation is not None, tables_dir / "ablation_results.csv"),
         ("Model comparison (stage 3)", models is not None, tables_dir / "model_comparison.csv"),
         ("SLA trial (recap)", trial is not None, tables_dir / "sla_trial_recap.csv"),
-        ("SLA trial (per threshold pair)", bool(cfg_frames), tables_dir / "sla_trial_T*_K*.csv"),
     ]
     info.table(pd.DataFrame([{"Source": s, "Found": "Yes" if ok else "No", "Path": str(p)} for s, ok, p in sources]),
                "Data sources")
@@ -298,13 +293,20 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
 
     add("Ablation", "Ablation stage 2: few-shot k", rt.ablation_tables(ablation), f"{tables_dir}/ablation_results.csv")
     add("Models", "Ablation stage 3: LLM comparison", rt.model_tables(models), f"{tables_dir}/model_comparison.csv")
-    add("SLA Trial", "Schema-linking trial (SLA)", rt.sla_trial_tables(trial, cfg_frames, trial_vs),
-        f"{tables_dir}/sla_trial_recap.csv")
+    tt = rt.sla_trial_tables(trial)
+    # Kolom yang dibekukan = kolom yang mengenali baris saat digeser ke samping
+    # (Trial Thresholds: Pipeline, T, K, Stopwords, Value linking)
+    for name, title, key in (("Trial Preprocessing", "Schema-linking trial: preprocessing steps", "steps"),
+                             ("Trial Thresholds", "Schema-linking trial: threshold grid", "grid")):
+        add(name, title, [tt[key]] if tt[key] is not None else [], f"{tables_dir}/sla_trial_recap.csv", freeze_col="F")
 
     if skip_missing:
         for sh in sheets[1:]:
             if not sh.has_data:
                 wb.remove(sh.ws)
+        # Ekspor parsial (mis. hanya trial SLA): sheet Info ringkasan run tidak ada gunanya
+        if not (have_logs or metrics) and any(sh.has_data for sh in sheets[1:]):
+            wb.remove(sheets[0].ws)
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
     return out

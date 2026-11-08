@@ -33,6 +33,7 @@ CLAUSES = ["select", "from", "where", "group_by", "order_by", "having", "keyword
 CLAUSE_LABEL = {"select": "SELECT", "from": "FROM", "where": "WHERE", "group_by": "GROUP BY",
                 "order_by": "ORDER BY", "having": "HAVING", "keywords": "Keywords",
                 "union": "UNION", "union_all": "UNION ALL", "intersect": "INTERSECT", "except": "EXCEPT"}
+# Label tampilan pipeline: baseline = GraphRAG 1-Stage, graphrag = GraphRAG 2-Stage. Kode, raw_logs, dan CSV tetap memakai baseline/graphrag.
 CONDITIONS = (("baseline", "GraphRAG 1-Stage"), ("graphrag", "GraphRAG 2-Stage"))
 
 # kind -> (format Python untuk notebook, number_format Excel)
@@ -52,6 +53,10 @@ KINDS = {
     "text":  (None, None),
 }
 _DELTA_OF = {"pct": "pp", "int": "dint", "num1": "dnum1", "num3": "dnum3", "num4": "dnum4"}
+
+
+def pipeline_label(mode) -> str:
+    return dict(CONDITIONS).get(str(mode).lower(), mode)
 
 
 def with_formats(df: pd.DataFrame, formats: Optional[dict] = None, row_kind: Optional[dict] = None,
@@ -328,10 +333,10 @@ def token_reduction(baseline_logs: list, graphrag_logs: list, alpha: float) -> l
         return []
     summ = tr.reduction_summary(pairs, alpha)
     rows = [{"Quantity": v["label"], "GraphRAG 1-Stage (mean)": v["baseline_mean"], "GraphRAG 2-Stage (mean)": v["graphrag_mean"],
-             "Reduction (1 − ΣG/ΣB)": v["reduction"], "Median per-query reduction": v["median_reduction"],
+             "Reduction (1 − ΣGraphRAG 2-Stage/ΣGraphRAG 1-Stage)": v["reduction"], "Median per-query reduction": v["median_reduction"],
              "Queries": v["n"]} for v in summ.values()]
     main = with_formats(pd.DataFrame(rows), {"GraphRAG 1-Stage (mean)": "num1", "GraphRAG 2-Stage (mean)": "num1",
-                                             "Reduction (1 − ΣG/ΣB)": "rel", "Median per-query reduction": "rel",
+                                             "Reduction (1 − ΣGraphRAG 2-Stage/ΣGraphRAG 1-Stage)": "rel", "Median per-query reduction": "rel",
                                              "Queries": "int"},
                         title="Column & token reduction: GraphRAG 2-Stage vs GraphRAG 1-Stage (paired, same queries)")
 
@@ -608,7 +613,7 @@ def metric_tables(results: dict) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Latensi per tahap (lampiran, bukan salah satu dari 6 metrik; poin 36)
+# Latensi per tahap (lampiran, bukan salah satu dari 6 metrik; poin 37)
 # ---------------------------------------------------------------------------
 
 LATENCY_NOTE = ("Appendix, not one of the six metrics. Times are in seconds and depend on the GPU of the run. "
@@ -1037,7 +1042,7 @@ def ablation_tables(df: Optional[pd.DataFrame]) -> list:
         for k, rw in piv.iterrows():
             vb, vg = rw.get("baseline"), rw.get("graphrag")
             vals = [v for v in (vb, vg) if not is_missing(v)]
-            rows.append({"k": int(k), "EX GraphRAG 1-Stage": None if is_missing(vb) else vb / 100,
+            rows.append({"k": int(k), "Few-shot selection": sel, "EX GraphRAG 1-Stage": None if is_missing(vb) else vb / 100,
                          "EX GraphRAG 2-Stage": None if is_missing(vg) else vg / 100,
                          "Mean EX (both pipelines)": sum(vals) / len(vals) / 100 if len(vals) == 2 else None})
         out.append(with_formats(pd.DataFrame(rows), {"k": "int", "EX GraphRAG 1-Stage": "pct", "EX GraphRAG 2-Stage": "pct",
@@ -1049,7 +1054,8 @@ def ablation_tables(df: Optional[pd.DataFrame]) -> list:
             ("avg_recall", "Proxy recall", "pct", 0.01), ("avg_precision", "Proxy precision", "pct", 0.01),
             ("n_samples", "Queries", "int", None), ("tables_pct", "Tables pct", "num2", None),
             ("columns_pct", "Columns pct", "num2", None), ("llm_model", "LLM", None, None)]
-    out.append(_select(df.sort_values(["few_shot_selection", "mode", "k"]), spec, "Ablation stage 2 · detail per pipeline and k"))
+    detail = df.sort_values(["few_shot_selection", "mode", "k"]).assign(mode=lambda d: d["mode"].map(pipeline_label))
+    out.append(_select(detail, spec, "Ablation stage 2 · detail per pipeline and k"))
     return out
 
 
@@ -1075,50 +1081,98 @@ def model_tables(df: Optional[pd.DataFrame]) -> list:
             ("avg_t_out", "T_out", "num1", None), ("avg_token_consumption", "Token consumption", "num1", None),
             ("few_shot_k", "Few-shot k", "int", None), ("few_shot_selection", "Few-shot selection", None, None),
             ("tables_pct", "Tables pct", "num2", None), ("columns_pct", "Columns pct", "num2", None)]
-    return [summary, _select(df, spec, "Model comparison · detail")]
+    return [summary, _select(df.assign(mode=df["mode"].map(pipeline_label)), spec, "Model comparison · detail")]
 
 
-_TRIAL_SPEC = [("trial", "Trial", None, None), ("table_threshold", "Table threshold (T)", "num2", None),
-               ("column_threshold", "Column threshold (K)", "num2", None), ("stopword", "Stopword mode", None, None),
-               ("value_link", "Value linking", None, None), ("traversal", "Traversal", None, None),
-               ("no_pk", "Connect no-PK tables", None, None), ("nama_embed", "Embedded names", None, None),
-               ("max_ngram", "max_ngram", "int", None),
-               ("tbl_P", "Table P", "pct", None), ("tbl_R", "Table R", "pct", None), ("tbl_F1", "Table F1", "pct", None),
-               ("col_P", "Column P", "pct", None), ("col_R", "Column R", "pct", None), ("col_F1", "Column F1", "pct", None),
-               ("col_P_ne", "Column P (non-empty gold)", "pct", None), ("col_R_ne", "Column R (non-empty gold)", "pct", None),
-               ("cols_sent", "Columns in prompt", "num1", None), ("col_reduction", "Column reduction vs full DB", "pct", None),
-               ("cols_tables_full", "Columns of prompt tables (full)", "num1", None),
-               ("schema_tokens", "Schema tokens (DDL)", "num1", None),
-               ("prompt_tokens_k0", "Prompt tokens (zero-shot)", "num1", None),
-               ("n", "Queries", "int", None)]
-
-_TRIAL_VS_SPEC = [("table_threshold", "Table threshold (T)", "num2", None), ("column_threshold", "Column threshold (K)", "num2", None),
-                  ("tbl_R", "GraphRAG 2-Stage table R", "pct", None), ("col_P_ne", "GraphRAG 2-Stage column P (non-empty gold)", "pct", None),
-                  ("col_R_ne", "GraphRAG 2-Stage column R (non-empty gold)", "pct", None),
-                  ("col_R_ne_B", "GraphRAG 1-Stage column R (non-empty gold)", "pct", None),
-                  ("cols_G", "Columns GraphRAG 2-Stage", "num1", None), ("cols_B", "Columns GraphRAG 1-Stage", "num1", None),
-                  ("cols_red", "Column reduction", "rel", None),
-                  ("schema_tok_G", "Schema tokens GraphRAG 2-Stage", "num1", None), ("schema_tok_B", "Schema tokens GraphRAG 1-Stage", "num1", None),
-                  ("schema_tok_red", "Schema-token reduction", "rel", None),
-                  ("prompt_tok_G", "Prompt tokens GraphRAG 2-Stage (k=0)", "num1", None),
-                  ("prompt_tok_B", "Prompt tokens GraphRAG 1-Stage (k=0)", "num1", None),
-                  ("prompt_tok_red", "Prompt-token reduction (k=0)", "rel", None),
-                  ("table_effect", "Column reduction: table-selection effect", "rel", None),
-                  ("prune_effect", "Column reduction: column-pruning effect", "rel", None),
-                  ("n", "Queries", "int", None)]
+def _with_median(field: str, header: str, kind: str) -> list:
+    """Rata-rata, lalu median per query (median_summary() di token_reduction.py)."""
+    return [(field, f"Avg {header}", kind, None), (f"{field}_med", f"Median {header}", kind, None)]
 
 
-def sla_trial_tables(recap: Optional[pd.DataFrame], configs: Optional[list],
-                     vs_baseline: Optional[pd.DataFrame] = None) -> list:
-    out = []
-    if recap is not None and not recap.empty:
-        out.append(_select(recap, _TRIAL_SPEC, "SLA trial · recap (G1-G7)"))
-    if configs:
-        df = pd.concat(configs)
-        df.index.name = "pipeline"
-        df = df.reset_index().sort_values(["table_threshold", "column_threshold", "pipeline"])
-        out.append(_select(df, [("pipeline", "Pipeline", None, None)] + _TRIAL_SPEC[1:3] + _TRIAL_SPEC[8:],
-                           "SLA trial · per threshold pair"))
-    if vs_baseline is not None and not vs_baseline.empty:
-        out.append(_select(vs_baseline, _TRIAL_VS_SPEC, "SLA trial · GraphRAG 2-Stage (T, K) vs GraphRAG 1-Stage at the same T"))
-    return out
+_TRIAL_THRESHOLDS = [("table_threshold", "Table threshold (T)", "num2", None),
+                     ("column_threshold", "Column threshold (K)", "num2", None)]
+_TRIAL_SETTINGS = [("stopword", "Stopwords", None, None), ("value_link", "Value linking", None, None),
+                   ("traversal", "Traversal", None, None), ("no_pk", "No-PK tables", None, None),
+                   ("nama_embed", "Embedded names", None, None)]
+_TRIAL_MEASURES = [("max_ngram", "max_ngram", "int", None),
+                   ("ex", "EX (zero-shot)", "pct", None),
+                   ("tbl_P", "Table P", "pct", None), ("tbl_R", "Table R", "pct", None), ("tbl_F1", "Table F1", "pct", None),
+                   ("col_P", "Column P", "pct", None), ("col_R", "Column R", "pct", None), ("col_F1", "Column F1", "pct", None),
+                   ("col_P_ne", "Column P (non-empty gold)", "pct", None), ("col_R_ne", "Column R (non-empty gold)", "pct", None),
+                   *_with_median("tables_sent", "tables in prompt", "num1"), *_with_median("tables_db", "tables in DB", "num1"),
+                   *_with_median("tables_pct", "tables retrieved, % of DB", "pct"),
+                   *_with_median("cols_sent", "columns in prompt", "num1"),
+                   ("cols_tables_full", "Avg columns of prompt tables, if sent whole", "num1", None),
+                   *_with_median("cols_db", "columns in DB", "num1"), *_with_median("cols_pct", "columns retrieved, % of DB", "pct"),
+                   ("col_reduction", "Column reduction vs full DDL", "pct", None),
+                   *_with_median("schema_tokens", "schema tokens", "num1"), ("schema_tokens_db", "Avg schema tokens, full DDL", "num1", None),
+                   ("schema_red_db", "Schema-token reduction vs full DDL", "pct", None),
+                   *_with_median("prompt_tokens_k0", "prompt tokens (k=0)", "num1"),
+                   ("prompt_tokens_k0_db", "Avg prompt tokens, full DDL (k=0)", "num1", None),
+                   ("prompt_red_db", "Prompt-token reduction vs full DDL", "pct", None),
+                   ("n", "Queries", "int", None)]
+# Nilai pengaturan yang ditulis notebook trial -> teks Excel
+_TRIAL_SETTING_VALUES = {"value_link": {"mati": "off", "teks": "text", "teks+angka": "text + numbers"},
+                         "no_pk": {"lepas": "not connected", "sambung": "connected"},
+                         "nama_embed": {"asli": "original"}}
+
+# Tiap langkah preprocessing dibandingkan dengan langkah yang menjadi dasarnya: G5 dibangun dari G3, bukan G4 (angka tidak dipakai).
+_STEP_PARENT = {"G2": "G1", "G3": "G2", "G4": "G3", "G5": "G3", "G6": "G5", "G7": "G6", "G8": "G7"}   # G8 = alternatif dari G7
+_STEP_DELTAS = {"ex": "d_ex", "col_P_ne": "d_col_P_ne", "col_R_ne": "d_col_R_ne", "prompt_tokens_k0": "d_prompt_tokens"}
+_TRIAL_STEP_SPEC = [("trial", "Trial", None, None), *_TRIAL_THRESHOLDS, *_TRIAL_SETTINGS,
+    ("compared_to", "Compared with", None, None),
+    ("ex", "EX (zero-shot)", "pct", None), ("d_ex", "Δ EX", "pp", 100),
+    ("col_P_ne", "Column P (non-empty gold)", "pct", None), ("d_col_P_ne", "Δ Column P", "pp", 100),
+    ("col_R_ne", "Column R (non-empty gold)", "pct", None), ("d_col_R_ne", "Δ Column R", "pp", 100),
+    ("tables_pct", "Tables retrieved, % of DB", "pct", None), ("cols_pct", "Columns retrieved, % of DB", "pct", None),
+    ("cols_sent", "Avg columns in prompt", "num1", None), ("col_reduction", "Column reduction vs full DDL", "pct", None),
+    ("schema_tokens", "Avg schema tokens", "num1", None), ("schema_red_db", "Schema-token reduction vs full DDL", "pct", None),
+    ("prompt_tokens_k0", "Avg prompt tokens (k=0)", "num1", None), ("d_prompt_tokens", "Δ Prompt tokens", "dnum1", None),
+    ("prompt_red_db", "Prompt-token reduction vs full DDL", "pct", None),
+    ("n", "Queries", "int", None)]
+
+
+def _english_settings(df: pd.DataFrame) -> pd.DataFrame:
+    return df.assign(**{c: df[c].replace(m) for c, m in _TRIAL_SETTING_VALUES.items() if c in df.columns})
+
+
+def preprocessing_steps(recap: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """G1-G7 pada satu pasangan (T, K): apa yang berubah di tiap langkah preprocessing, untuk bab metodologi."""
+    step = recap["trial"].str.extract(r"^(G\d) ")[0]
+    first = recap[step == "G1"]
+    if first.empty:
+        return None
+    same_pair = (recap["table_threshold"] == first["table_threshold"].iloc[0]) & (
+        recap["column_threshold"] == first["column_threshold"].iloc[0])
+    df = recap[step.notna() & same_pair].copy()
+    df.index = step[df.index]
+    df = df.sort_index()
+    df["compared_to"] = df.index.map(_STEP_PARENT)
+    for src, delta in _STEP_DELTAS.items():
+        if src in df.columns:
+            df[delta] = df[src] - df["compared_to"].map(df[src])
+    return _select(df, _TRIAL_STEP_SPEC, f"SLA trial · preprocessing steps at T{first['table_threshold'].iloc[0]:.2f}"
+                                         f"/K{first['column_threshold'].iloc[0]:.2f}")
+
+
+def sla_trial_tables(recap: Optional[pd.DataFrame]) -> dict:
+    """Satu tabel per sheet Excel: riwayat preprocessing dan grid threshold; None kalau belum ada. Baris dikenali dari id trial di CSV."""
+    if recap is None or recap.empty:
+        return {"steps": None, "grid": None}
+    recap = _english_settings(recap)
+    # G7 (preprocessing akhir) dan G8 (alternatif) jalan di seluruh grid; di sheet preprocessing hanya pada pasangan
+    # (T, K) yang sama dengan langkah G1-G6.
+    ladder = recap["trial"].str.match(r"G[1-6] ")
+    final = recap["trial"].str.match(r"G[78] ")
+    same_pair = pd.MultiIndex.from_frame(recap[["table_threshold", "column_threshold"]]).isin(
+        pd.MultiIndex.from_frame(recap.loc[ladder, ["table_threshold", "column_threshold"]]))
+    steps = recap[ladder | (final & same_pair)]
+    # GraphRAG 1-Stage (tanpa K) di atas GraphRAG 2-Stage pada T yang sama; stable: G7 sebelum G8 di (T, K) yang sama
+    grid = recap[final | recap["trial"].str.match("Baseline")].sort_values(
+        ["table_threshold", "column_threshold"], na_position="first", kind="stable")
+    grid = grid.assign(pipeline=grid["trial"].map(lambda t: pipeline_label("baseline" if t.startswith("Baseline") else "graphrag")))
+    # Tanpa kolom Trial: baris preprocessing sudah dibedakan oleh kolom pengaturannya
+    step_spec = _TRIAL_SETTINGS + _TRIAL_THRESHOLDS + _TRIAL_MEASURES
+    grid_spec = [("pipeline", "Pipeline", None, None), *_TRIAL_THRESHOLDS, *_TRIAL_SETTINGS, *_TRIAL_MEASURES]
+    return {"steps": _select(steps, step_spec, "Threshold trial · preprocessing steps") if len(steps) else None,
+            "grid": _select(grid, grid_spec, "Threshold trial · threshold grid") if len(grid) else None}

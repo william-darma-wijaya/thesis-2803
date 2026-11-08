@@ -102,3 +102,46 @@ def full_schema_rate(logs: List[dict]) -> Optional[float]:
     """Fraksi query yang prompt-nya berisi SELURUH kolom DB (fallback / DB kecil)."""
     vals = [_n_columns(e) >= e["n_columns_db"] for e in logs if e.get("n_columns_db")]
     return sum(vals) / len(vals) if vals else None
+
+
+MEDIAN_FIELDS = ("tables_sent", "tables_db", "tables_pct", "cols_sent", "cols_db", "cols_pct", "schema_tokens", "prompt_tokens_k0")
+MEDIAN_COLUMNS = tuple(f"{f}_med" for f in MEDIAN_FIELDS)
+
+
+def median_summary(rows: List[dict]) -> Dict[str, float]:
+    """
+    Median per query, pelengkap rata-rata karena ukuran DB dan fallback seluruh DB membuat
+    distribusinya miring (poin 35). Rata-rata tetap dipakai untuk total, biaya, dan TEP.
+    """
+    values = {f: [r[f] for r in rows] for f in MEDIAN_FIELDS if not f.endswith("_pct")}
+    values["tables_pct"] = [r["tables_sent"] / r["tables_db"] for r in rows]
+    values["cols_pct"] = [r["cols_sent"] / r["cols_db"] for r in rows]
+    return {f"{field}_med": float(statistics.median(vals)) for field, vals in values.items()}
+
+
+def full_db_summary(rows: List[dict]) -> Dict[str, float]:
+    """
+    Satu konfigurasi dibanding DDL PENUH database-nya, untuk rekap trial threshold (poin 35).
+    Pembanding sama untuk GraphRAG dan Baseline, jadi angkanya bisa dibandingkan langsung.
+
+    Field per query: tables_sent, tables_db, cols_sent, cols_db, schema_tokens,
+    schema_tokens_db, prompt_tokens_k0, prompt_tokens_k0_db.
+
+    - tables_pct / cols_pct = rata-rata per query dari sent / db: setiap query berbobot
+      sama, berapa pun ukuran database-nya ("satu query melihat x% dari database-nya").
+    - schema_red_db / prompt_red_db = 1 - sum(sent) / sum(db): rasio total, sama seperti
+      reduksi terhadap Baseline. Karena itu 1 - cols_pct tidak harus sama dengan reduksi kolom.
+    """
+    def col(key):
+        return [r[key] for r in rows]
+
+    return {
+        "tables_sent": statistics.mean(col("tables_sent")),
+        "tables_db": statistics.mean(col("tables_db")),
+        "tables_pct": statistics.mean(r["tables_sent"] / r["tables_db"] for r in rows),
+        "cols_pct": statistics.mean(r["cols_sent"] / r["cols_db"] for r in rows),
+        "schema_tokens_db": statistics.mean(col("schema_tokens_db")),
+        "schema_red_db": total_reduction(col("schema_tokens"), col("schema_tokens_db")),
+        "prompt_tokens_k0_db": statistics.mean(col("prompt_tokens_k0_db")),
+        "prompt_red_db": total_reduction(col("prompt_tokens_k0"), col("prompt_tokens_k0_db")),
+    }
