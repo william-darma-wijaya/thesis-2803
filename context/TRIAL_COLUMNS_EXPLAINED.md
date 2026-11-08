@@ -1,19 +1,16 @@
 # Trial Columns Explained
 
-This file explains every column in the three trial sheets of the Excel workbook. Two notebooks write them:
+This file explains every column in the two trial sheets of the Excel workbook. Two notebooks write them:
 
 | Sheet | Written by | One row is | Use it for |
 |---|---|---|---|
-| `Trial Preprocessing` | `notebooks/trial_preprocessing.ipynb` (`trial_preprocessing_recap.csv`) | One combination of the five preprocessing steps, all at the same T and K (0.50 and 0.70 by default) | Showing what every preprocessing combination does |
-| `Trial Effects` | the same notebook | One value of one preprocessing step, averaged over every combination that uses it | Explaining in the thesis why each step is used or not |
+| `Trial Preprocessing` | `notebooks/trial_preprocessing.ipynb` (`trial_preprocessing_recap.csv`) | One combination of the five preprocessing steps, all at the same T and K (0.50 and 0.70 by default) | Showing what every preprocessing combination does, and explaining in the thesis why each step is used or not |
 | `Trial Thresholds` | `notebooks/trial_thresholds.ipynb` (`trial_thresholds_recap.csv`) | One pipeline at one threshold setting (for 2-stage, also one preprocessing) | Choosing the table and column thresholds |
 
-`Trial Preprocessing` and `Trial Thresholds` have the same columns, with two differences:
+Both sheets have the same columns, with two differences:
 
-- `Trial Thresholds` has `Pipeline` as its first column. Its 2-stage rows use the preprocessing set by the on/off switches in the notebook; if extra preprocessing was added (`EXTRA_PREPROC`), each (T, K) has one 2-stage row per preprocessing, and the frozen columns include `Stopwords` and `Value linking` so you can tell them apart.
+- `Trial Thresholds` has `Pipeline` as its first column. Its 2-stage rows use the preprocessing set by the on/off switches in the notebook; if extra preprocessing was added (`EXTRA_PREPROC`), each (T, K) has one 2-stage row per preprocessing, told apart by the settings columns. `Pipeline`, T and K stay visible as you scroll sideways.
 - `Trial Preprocessing` puts the settings columns first and freezes them, because they are what identifies each row.
-
-`Trial Effects` has its own columns, explained in [section 8](#8-trial-effects).
 
 All values come from the same stratified 20% sample of the Spider dev set, so rows can be compared directly.
 
@@ -55,7 +52,7 @@ On 1-stage rows, `Value linking`, `Traversal` and `No-PK tables` show `-` becaus
 
 ### The rows of `Trial Preprocessing`
 
-Every combination of the values listed in `PREPROC_OPTIONS` in the notebook, all at the same T and K. By default that is 2 stopword options x 3 value-linking options x 2 traversal options x 2 no-PK options x 2 name options = 48 rows. To see the effect of one step, compare two rows that differ only in that step, or read `Trial Effects`, which averages that comparison over all the other steps.
+Every combination of the values listed in `PREPROC_OPTIONS` in the notebook, all at the same T and K. By default that is 2 stopword options x 3 value-linking options x 2 traversal options x 2 no-PK options x 2 name options = 48 rows. To see the effect of one step, compare two rows that differ only in that step.
 
 ## 2. Accuracy
 
@@ -68,6 +65,8 @@ Zero-shot is used because the number of few-shot examples is chosen in a later s
 ## 3. Retrieval quality
 
 P is precision and R is recall. Each is calculated per question, then averaged.
+
+In both sheets, `Column P (non-empty gold)` and `Column R (non-empty gold)` come right after `EX (zero-shot)`, so EX and SLA can be read side by side; the other P and R columns follow.
 
 | Column | Meaning |
 |---|---|
@@ -185,17 +184,3 @@ These should not change between rows, because every row uses the same questions 
 - `Avg schema tokens, full DDL`
 - `Avg prompt tokens, full DDL (k=0)`
 
-## 8. Trial Effects
-
-One row per value of each preprocessing step. A step with only one value in `PREPROC_OPTIONS` has no rows.
-
-| Column | Meaning |
-|---|---|
-| `Step` | The preprocessing step, named as in the settings columns. |
-| `Value` | One value of that step. |
-| `Compared with` | The first value of that step in `PREPROC_OPTIONS`, the "off" reference. |
-| `Configurations` | How many combinations use this value. With every combination run, each value of a step has the same count. |
-| `Avg EX (zero-shot)`, `Avg Column R (non-empty gold)`, `Avg Column P (non-empty gold)`, `Avg prompt tokens (k=0)` | The average of that measure over those combinations. |
-| `Δ ...` | This value's average minus the reference value's average, in percentage points (pp) for percentages and in tokens for tokens. The reference row shows 0. |
-
-Because every combination is run, a `Δ` is the average effect of switching that one step while the other steps take all their values. It does not show interactions, for example whether value linking helps more with `fk_only` than with `full`; for that, compare the rows in `Trial Preprocessing`. With about 207 questions, one question is 0.48 pp of EX, so small EX differences can be noise.

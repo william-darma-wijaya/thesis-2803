@@ -145,13 +145,6 @@ def test_run_trials_and_tables():
         assert len(cache) == 4 and again.equals(recap)
 
         with_ex = recap.assign(ex=[0.2, 0.4, 0.6, 0.8])
-        effects = rt.preprocessing_effects(with_ex.reset_index())
-        vl = effects[effects["Step"] == "Value linking"].set_index("Value")
-        assert list(vl.index) == ["off", "text"] and (vl["Configurations"] == 2).all()
-        assert abs(vl.loc["text", "Δ EX (zero-shot)"] - 40.0) < 1e-9 and vl.loc["off", "Δ EX (zero-shot)"] == 0
-        assert effects.attrs["formats"]["Δ EX (zero-shot)"] == "pp"
-        assert "No-PK tables" not in set(effects["Step"])                          # satu nilai saja: tidak ada efek
-
         # Grid: 2-Stage di dua K dan 1-Stage, 1-Stage di atas pada T yang sama
         grid_trials = [ts.two_stage_trial(cfg, ts.settings_of(cfg), 0.1, k) for k in (0.1, 0.3)] + [ts.one_stage_trial(cfg, 0.1)]
         grid, grid_results = ts.run_trials(data, grid_trials, cache)
@@ -160,9 +153,13 @@ def test_run_trials_and_tables():
         assert (vs["cols_B"] == grid.loc["1-stage | T0.10", "cols_sent"]).all()
         assert len(ts.compare_trials(grid_results, grid_trials[0][0], grid_trials[1][0])) >= 0
 
-        tables = rt.trial_tables(with_ex.reset_index(), grid.reset_index())
+        tables = rt.trial_tables(with_ex.reset_index(), grid.assign(ex=[0.5, 0.4, 0.3]).reset_index())
         assert list(tables["grid"]["Pipeline"]) == ["1-stage", "2-stage", "2-stage"]
-        assert "Trial" not in tables["steps"].columns and len(tables["steps"]) == 4
+        assert "Trial" not in tables["steps"].columns and len(tables["steps"]) == 4 and set(tables) == {"steps", "grid"}
+        for t in (tables["steps"], tables["grid"]):      # SLA non-empty gold tepat di samping EX
+            cols = list(t.columns)
+            i = cols.index("EX (zero-shot)")
+            assert cols[i + 1:i + 3] == ["Column P (non-empty gold)", "Column R (non-empty gold)"], cols[i:i + 3]
         for t in tables.values():
             rt.formatted(t)
 
@@ -175,7 +172,8 @@ def test_run_trials_and_tables():
         ts.save_recap(with_ex, out, ts.PREPROCESSING_RECAP)
         ts.save_recap(grid, out, ts.THRESHOLDS_RECAP)
         wb = load_workbook(build_workbook(Path(d) / "none", out, out / "x.xlsx", skip_missing=True))
-        assert wb.sheetnames == ["Trial Preprocessing", "Trial Effects", "Trial Thresholds"], wb.sheetnames
+        assert wb.sheetnames == ["Trial Preprocessing", "Trial Thresholds"], wb.sheetnames
+        assert wb["Trial Preprocessing"].freeze_panes == "F2" and wb["Trial Thresholds"].freeze_panes == "D2"
         for ws in wb:
             assert next(iter(ws.tables.values())).ref.startswith("A1:")
         assert [c.value for c in wb["Trial Thresholds"]["A"][1:4]] == ["1-stage", "2-stage", "2-stage"]

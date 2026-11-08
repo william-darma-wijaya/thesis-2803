@@ -10,7 +10,7 @@ Membaca (sheet yang sumbernya tidak ada hanya berisi catatan "Source not found",
     outputs/tables/dimensions_results.json          -> Dimensions, D1..D6 (run_all_dimensions.py)
     outputs/tables/ablation_results.csv             -> Ablation (few-shot k, tahap 2)
     outputs/tables/model_comparison.csv             -> Models (tahap 3)
-    outputs/tables/trial_preprocessing_recap.csv    -> Trial Preprocessing, Trial Effects (trial_preprocessing.ipynb)
+    outputs/tables/trial_preprocessing_recap.csv    -> Trial Preprocessing (trial_preprocessing.ipynb)
     outputs/tables/trial_thresholds_recap.csv       -> Trial Thresholds (trial_thresholds.ipynb)
     outputs/tables/sla_trial_recap.csv              -> Trial Preprocessing, Trial Thresholds (rekap lama graphrag_sla_trial.ipynb,
                                                        hanya kalau dua file di atas belum ada)
@@ -243,12 +243,11 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
 
     add("Ablation", rt.ablation_tables(ablation), f"{tables_dir}/ablation_results.csv")
     add("Models", rt.model_tables(models), f"{tables_dir}/model_comparison.csv")
-    tt = rt.trial_tables(trial_prep, trial_thr) if trial_old is None else {**rt.sla_trial_tables(trial_old), "effects": None}
+    tt = rt.trial_tables(trial_prep, trial_thr) if trial_old is None else rt.sla_trial_tables(trial_old)
     # Kolom yang dibekukan = kolom yang mengenali baris saat digeser ke samping
-    # (Trial Thresholds: Pipeline, T, K, Stopwords, Value linking)
+    # (Trial Preprocessing: kelima pengaturan; Trial Thresholds: Pipeline, T, K)
     for name, key, source, freeze_col in (("Trial Preprocessing", "steps", "trial_preprocessing_recap.csv", "F"),
-                                          ("Trial Effects", "effects", "trial_preprocessing_recap.csv", "C"),
-                                          ("Trial Thresholds", "grid", "trial_thresholds_recap.csv", "F")):
+                                          ("Trial Thresholds", "grid", "trial_thresholds_recap.csv", "D")):
         add(name, [tt[key]] if tt[key] is not None else [], f"{tables_dir}/{source}", freeze_col=freeze_col)
 
     if skip_missing and any(sh.has_data for sh in sheets):     # workbook butuh minimal satu sheet

@@ -407,8 +407,8 @@ def score_ex(recap: pd.DataFrame, results: dict, cfg, tokenizer, cache_path: Pat
 # ---------------------------------------------------------------------------
 
 _VIEW = {"pipeline": None, "table_threshold": "{:.2f}", "column_threshold": "{:.2f}", "stopword": None,
-         "value_link": None, "traversal": None, "no_pk": None, "nama_embed": None, "ex": "{:.1%}", "tbl_R": "{:.1%}",
-         "col_P_ne": "{:.1%}", "col_R_ne": "{:.1%}", "cols_sent": "{:.1f}", "tables_pct": "{:.1%}", "cols_pct": "{:.1%}",
+         "value_link": None, "traversal": None, "no_pk": None, "nama_embed": None, "ex": "{:.1%}", "col_P_ne": "{:.1%}",
+         "col_R_ne": "{:.1%}", "tbl_R": "{:.1%}", "cols_sent": "{:.1f}", "tables_pct": "{:.1%}", "cols_pct": "{:.1%}",
          "schema_tokens": "{:.1f}", "prompt_tokens_k0": "{:.1f}", "prompt_red_db": "{:.1%}"}
 
 

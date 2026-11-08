@@ -856,6 +856,8 @@ Untuk sekarang `run_all_dimensions.py` menerima angkanya manual (`--ex-per-k` / 
 
 **Efek tiap langkah (`Trial Effects`):** untuk tiap nilai sebuah langkah, rata-rata EX, recall dan precision kolom (non-empty gold), dan token prompt atas semua kombinasi yang memakai nilai itu, ditambah selisih terhadap nilai pertama langkah itu di `PREPROC_OPTIONS` (acuan "mati"). Pada desain faktorial penuh, selisih ini sama dengan efek utama: rata-rata efek mengganti satu langkah sementara langkah lain bervariasi. Efek interaksi tidak dihitung; kombinasinya bisa dibaca langsung di `Trial Preprocessing`. Hanya angka, tidak memilih.
 
+**Pembaruan (keputusan peneliti, setelah merge PR #17):** sheet `Trial Effects`, `preprocessing_effects()`, dan bagian efek di notebook preprocessing dihapus; bagian 10 notebook kini hanya mengurutkan kombinasi menurut EX. Di kedua sheet trial, kolom P dan R kolom (non-empty gold) dipindah tepat setelah EX, supaya EX dan SLA mudah dibandingkan. `Trial Thresholds` hanya membekukan `Pipeline`, T, dan K.
+
 **Biaya:** 48 kombinasi x sampel 20% (sekitar 207 pertanyaan) = sampai sekitar 9.900 generasi untuk EX, dikurangi prompt yang sama. Belum diukur di Kaggle.
 
 **Tes:** `python tests/test_trial_steps.py` (skema sintetis dengan SQLite untuk value linking, embedder palsu; gold schema ditulis tangan karena parser Spider butuh data NLTK). Sel kedua notebook juga dijalankan di data sintetis yang sama. Belum dijalankan dengan Spider asli maupun GPU.

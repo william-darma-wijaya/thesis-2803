@@ -208,7 +208,7 @@ def test_workbook_sheets():
         assert wb.sheetnames == ["Trial Preprocessing", "Trial Thresholds"]      # tanpa sheet Info
         for ws in wb:
             assert len(ws.tables) == 1 and next(iter(ws.tables.values())).ref.startswith("A1:")   # tabel langsung di baris 1
-        assert wb["Trial Preprocessing"].freeze_panes == "F2" and wb["Trial Thresholds"].freeze_panes == "F2"
+        assert wb["Trial Preprocessing"].freeze_panes == "F2" and wb["Trial Thresholds"].freeze_panes == "D2"
         text = [c.value for ws in wb for row in ws.iter_rows() for c in row if isinstance(c.value, str)]
         assert not [t for t in text if re.search(r"\bG[1-7]\b|Baseline|GraphRAG|percentile", t)], text
         wb.close()
