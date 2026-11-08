@@ -65,7 +65,7 @@ def _diagnose_level(sla: SLAResult, ex_score: float) -> dict:
     }
 
 
-def run_dimension_5(logs: List[dict], condition_label: str = "GraphRAG") -> dict:
+def run_dimension_5(logs: List[dict], condition_label: str = "GraphRAG 2-Stage") -> dict:
     if not logs:
         raise ValueError(
             "logs kosong -- Dimensi 5 butuh minimal satu query untuk diagnosis bottleneck."

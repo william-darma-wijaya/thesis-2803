@@ -56,7 +56,7 @@ def compute_tep(
 
     if delta_t == 0:
         raise ValueError(
-            "delta_t (T_G - T_B) = 0 — Token Consumption baseline dan GraphRAG identik, "
+            "delta_t (T_G - T_B) = 0 — Token Consumption GraphRAG 1-Stage dan GraphRAG 2-Stage identik, "
             "TEP tidak terdefinisi (pembagian dengan nol)"
         )
     if t_baseline == 0:
@@ -69,7 +69,7 @@ def compute_tep(
     if -epsilon <= tep <= epsilon:
         interpretation = "Efisiensi token tercapai tanpa trade-off penurunan EX yang signifikan"
     elif tep < 0:
-        interpretation = "Skenario ideal: GraphRAG meningkatkan EX dan menurunkan Token Consumption dibanding baseline"
+        interpretation = "Skenario ideal: GraphRAG 2-Stage meningkatkan EX dan menurunkan Token Consumption dibanding GraphRAG 1-Stage"
     else:
         interpretation = "Ada trade-off: penurunan token disertai penurunan EX"
 

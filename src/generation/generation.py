@@ -8,6 +8,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import torch
 
 from src.core.config import PipelineConfig
+from src.utils import timing
 
 logger = logging.getLogger(__name__)
 
@@ -215,9 +216,10 @@ def generate_sql_with_token_count(
         later strips). This is the true T_out for token-consumption accounting —
         re-encoding the cleaned SQL would undercount the real generation cost.
     """
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    with timing.step("prompt_tokenize"):
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-    with torch.no_grad():
+    with timing.step("llm_generate"), torch.no_grad():
         outputs = model.generate(
             **inputs,
             max_new_tokens=cfg.max_new_tokens,
@@ -226,10 +228,11 @@ def generate_sql_with_token_count(
             pad_token_id=tokenizer.eos_token_id,
         )
 
-    generated_tokens = outputs[0][inputs.input_ids.shape[1] :]
-    n_generated = int(generated_tokens.shape[0])
-    generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-    return _clean_sql(generated_text), n_generated
+    with timing.step("sql_clean"):
+        generated_tokens = outputs[0][inputs.input_ids.shape[1] :]
+        n_generated = int(generated_tokens.shape[0])
+        generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        return _clean_sql(generated_text), n_generated
 
 
 def generate_sql(

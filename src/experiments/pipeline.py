@@ -1,5 +1,5 @@
 """
-Main entry point for the GraphRAG Text-to-SQL pipeline.
+Main entry point for the GraphRAG 2-Stage Text-to-SQL pipeline.
 
 Usage:
     python src/experiments/pipeline.py [--full-schema]
@@ -7,7 +7,7 @@ Usage:
 Flags:
                     
     "--full-schema", action="store_true",
-        help="Bypass GraphRAG and feed the full DB schema to the LLM (ablation mode).",
+        help="Bypass GraphRAG 2-Stage and feed the full DB schema to the LLM (ablation mode).",
     
     "--skip-sweep", action="store_true",
         help="Skip the precision sweep and use top_k values from config.py as-is.",
@@ -77,6 +77,8 @@ from src.utils.sql_normalize import normalize_sql_file_for_parsing
 from src.metrics.sla import extract_ground_truth_schema
 from src.utils.prompt_stats import columns_per_table, prompt_stats
 from src.utils.sampling import stratified_sample
+from src.retrieval.value_linking import get_value_index
+from src.utils import timing
 from src.utils.schema_utils import load_db_schema
 from src.utils.sql_execution import compare_execution_results, execute_sql
 
@@ -165,26 +167,32 @@ def run_single(
         schema_index = build_schema_index(graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
 
     # --- Schema retrieval (Stage 1 tables -> Stage 2 columns -> traversal) ---
-    column_nodes, _ = retrieve_graphrag_schema(graph, db_id, question, schema_index, embed_model, cfg)
+    with timing.step("retrieval_search"):
+        column_nodes, _ = retrieve_graphrag_schema(graph, db_id, question, schema_index, embed_model, cfg)
 
     if not column_nodes:
         return "SELECT 1", 0.0, 0.0, "", [], 0, 0
 
     # --- Schema linking evaluation ---
-    recall, precision = evaluate_schema_linking(gold_sql, column_nodes, graph, db_id)
+    with timing.step("proxy_eval"):
+        recall, precision = evaluate_schema_linking(gold_sql, column_nodes, graph, db_id)
 
     # --- Few-shot example retrieval (same helper + k as the baseline) ---
-    few_shot_block = build_few_shot_block(question, few_shot_index, embed_model, cfg)
+    with timing.step("few_shot"):
+        few_shot_block = build_few_shot_block(question, few_shot_index, embed_model, cfg)
 
     # --- Prompt construction & SQL generation ---
-    schema_context = build_schema_context(graph, column_nodes)
+    with timing.step("build_ddl"):
+        schema_context = build_schema_context(graph, column_nodes)
     extracted_values = {
         "strings": re.findall(r"'([^']*)'", question),
         "numbers": re.findall(r"\d+", question),
     }
-    prompt = build_prompt(question, schema_context, extracted_values, few_shot_block)
+    with timing.step("build_prompt"):
+        prompt = build_prompt(question, schema_context, extracted_values, few_shot_block)
     pred_sql, n_out = generate_sql_with_token_count(prompt, model, tokenizer, cfg)
-    n_in = len(tokenizer.encode(prompt))  # T_in -- same pattern as ablation.py's _run_k()
+    with timing.step("count_t_in"):
+        n_in = len(tokenizer.encode(prompt))  # T_in -- same pattern as ablation.py's _run_k()
 
     return pred_sql, recall, precision, schema_context, column_nodes, n_in, n_out
 
@@ -272,7 +280,7 @@ def print_schema_linking_summary(results: list[PipelineResult]) -> None:
     avg_precision = sum(r.precision for r in valid) / len(valid) * 100
 
     print("\n" + "=" * 60)
-    print("📈 SCHEMA LINKING SUMMARY (GraphRAG)")
+    print("📈 SCHEMA LINKING SUMMARY (GraphRAG 2-Stage)")
     print("=" * 60)
     print(f"  Recall    : {avg_recall:.2f}%  — how many gold elements were retrieved")
     print(f"  Precision : {avg_precision:.2f}%  — fraction of retrieved elements that were relevant")
@@ -422,19 +430,19 @@ def _format_confound_diag(diag: dict) -> str:
         "",
         "  Outer JOIN usage  (LEFT/RIGHT/FULL — normalized to JOIN for parsing, poin 11)",
         f"    gold queries with outer JOIN       : {diag['outer_join_gold']:>4}  ({diag['outer_join_gold']/n*100:.1f}%)",
-        f"    GraphRAG predictions               : {diag['outer_join_pred_graphrag']:>4}  "
+        f"    GraphRAG 2-Stage predictions       : {diag['outer_join_pred_graphrag']:>4}  "
         f"(ESM=1 & EX=0: {diag['outer_join_norm_masked_graphrag']})",
-        f"    Baseline predictions               : {diag['outer_join_pred_baseline']:>4}  "
+        f"    GraphRAG 1-Stage predictions       : {diag['outer_join_pred_baseline']:>4}  "
         f"(ESM=1 & EX=0: {diag['outer_join_norm_masked_baseline']})",
         "",
         "  EX order-sensitivity  (official EX=0 but order-insensitive row multiset matches gold)",
-        f"    GraphRAG : {diag['ex0_orderinsensitive_match_graphrag']:>4}   "
+        f"    GraphRAG 2-Stage : {diag['ex0_orderinsensitive_match_graphrag']:>4}   "
         f"(gold has ORDER BY: {diag['ex0_orderinsensitive_match_graphrag_gold_orderby']}, "
         f"gold without ORDER BY: {g_fn})",
-        f"    Baseline : {diag['ex0_orderinsensitive_match_baseline']:>4}   "
+        f"    GraphRAG 1-Stage : {diag['ex0_orderinsensitive_match_baseline']:>4}   "
         f"(gold has ORDER BY: {diag['ex0_orderinsensitive_match_baseline_gold_orderby']}, "
         f"gold without ORDER BY: {b_fn})",
-        f"    difference (GraphRAG - Baseline), gold without ORDER BY : {g_fn - b_fn:+d}",
+        f"    difference (GraphRAG 2-Stage - GraphRAG 1-Stage), gold without ORDER BY : {g_fn - b_fn:+d}",
         f"    gold SQL unexecutable (excluded)   : {diag['gold_unexecutable']}",
         "=" * 70,
         "",
@@ -481,7 +489,7 @@ def main(cfg: PipelineConfig) -> None:
 
     # --- 4. Pre-build schema indices for every database in the dev set ---
     # Done ONCE at startup so embeddings are never recomputed mid-loop.
-    mode_label = "FULL SCHEMA (bypass)" if cfg.use_full_schema_bypass else "GraphRAG"
+    mode_label = "FULL SCHEMA (bypass)" if cfg.use_full_schema_bypass else "GraphRAG 2-Stage"
     logger.info("Starting pipeline — mode: %s", mode_label)
 
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_data))
@@ -571,6 +579,74 @@ def main(cfg: PipelineConfig) -> None:
 # Dimension analysis (metrics -> 6 dimensions), fed by data/raw_logs/*.json
 # ---------------------------------------------------------------------------
 
+def run_metrics_analysis(
+    raw_logs_dir: Path,
+    out_dir: Path,
+    dev_json: Path,
+    full_dev: bool,
+    cfg: PipelineConfig,
+    sample_ratio: float,
+    qvt_dir: Path = Path("data/qvt_variations"),
+    save: bool = True,
+) -> dict:
+    """
+    Six metrics of one model from raw_logs_dir -> out_dir/metrics_results.json
+    (save=False: only return them; eval_pipeline.ipynb saves at the very end).
+    On a full run this also builds the QVT data, so run the dimensions afterwards
+    with build_qvt=False. Shared by run_comparison() and eval_pipeline.ipynb.
+    """
+    from src.experiments.build_qvt_variations import build_qvt_files
+    from src.experiments.metrics_summary import build_metrics_results, run_metadata, save_metrics_results
+
+    qvt_conditions = None
+    if full_dev:
+        with open(dev_json, "r", encoding="utf-8") as f:
+            dev_data = json.load(f)
+        with timing.run_step("qvt_build"):
+            qvt_conditions = set(build_qvt_files(dev_data, raw_logs_dir, qvt_dir))
+    with open(raw_logs_dir / "baseline_log.json", encoding="utf-8") as f:
+        baseline_logs = json.load(f)
+    with open(raw_logs_dir / "graphrag_log.json", encoding="utf-8") as f:
+        graphrag_logs = json.load(f)
+    with timing.run_step("metrics"):
+        results = build_metrics_results(
+            baseline_logs, graphrag_logs, cfg.token_output_weight,
+            qvt_dir=qvt_dir if full_dev else None, qvt_conditions=qvt_conditions,
+            meta=run_metadata(cfg, sample_ratio),
+        )
+    if save:
+        logger.info("Six metrics saved -> %s", save_metrics_results(results, out_dir))
+    return results
+
+
+def compute_dimension_analysis(
+    raw_logs_dir: Path,
+    dev_json: Path,
+    full_dev: bool,
+    ex_per_k: dict | None = None,
+    always_dim5: bool = False,
+    qvt_dir: Path = Path("data/qvt_variations"),
+    build_qvt: bool = True,
+) -> tuple[dict, str]:
+    """The 6 dimensions as (results, text report), without writing any result file."""
+    from src.experiments.build_qvt_variations import build_qvt_files
+    from src.experiments.run_all_dimensions import run_all
+
+    only = [1, 2, 3, 4, 5, 6] if full_dev else [1, 2, 3, 5, 6]
+    if full_dev and build_qvt:
+        with open(dev_json, "r", encoding="utf-8") as f:
+            dev_data = json.load(f)
+        build_qvt_files(dev_data, raw_logs_dir, qvt_dir)
+    elif not full_dev:
+        logger.info("Subsampled run -> QVT/Dimension 4 skipped (needs the full dev set).")
+
+    with timing.run_step("dimensions"):
+        return run_all(
+            raw_logs_dir=raw_logs_dir, qvt_dir=qvt_dir, only=only,
+            ex_per_k=ex_per_k, always_dim5=always_dim5,
+        )
+
+
 def run_dimension_analysis(
     raw_logs_dir: Path,
     out_dir: Path,
@@ -580,6 +656,7 @@ def run_dimension_analysis(
     always_dim5: bool = False,
     qvt_dir: Path = Path("data/qvt_variations"),
     verbose: bool = True,
+    build_qvt: bool = True,
 ) -> dict:
     """
     Run the thesis's 6 analysis dimensions over raw_logs_dir and write
@@ -602,21 +679,13 @@ def run_dimension_analysis(
                with an explanation.
     verbose  : False -> do not print the text report (eval_pipeline.ipynb shows
                the numbers as tables instead); files are written either way.
+    build_qvt: False -> run_metrics_analysis() already built the QVT data for this run.
     """
-    from src.experiments.build_qvt_variations import build_qvt_files
-    from src.experiments.run_all_dimensions import run_all, save_dimension_outputs
+    from src.experiments.run_all_dimensions import save_dimension_outputs
 
-    only = [1, 2, 3, 4, 5, 6] if full_dev else [1, 2, 3, 5, 6]
-    if full_dev:
-        with open(dev_json, "r", encoding="utf-8") as f:
-            dev_data = json.load(f)
-        build_qvt_files(dev_data, raw_logs_dir, qvt_dir)
-    else:
-        logger.info("Subsampled run -> QVT/Dimension 4 skipped (needs the full dev set).")
-
-    results, report = run_all(
-        raw_logs_dir=raw_logs_dir, qvt_dir=qvt_dir, only=only,
-        ex_per_k=ex_per_k, always_dim5=always_dim5,
+    results, report = compute_dimension_analysis(
+        raw_logs_dir, dev_json, full_dev, ex_per_k=ex_per_k, always_dim5=always_dim5,
+        qvt_dir=qvt_dir, build_qvt=build_qvt,
     )
     if verbose:
         print(report)
@@ -635,10 +704,16 @@ def model_run_dirs(llm_model: str, out_root: Path = Path("outputs")) -> tuple[Pa
     outputs/models/Qwen2.5-Coder-3B-Instruct/, data/raw_logs/Qwen2.5-Coder-3B-Instruct/,
     data/qvt_variations/Qwen2.5-Coder-3B-Instruct/. Keeps models from overwriting
     each other and from the default (single-model) run's paths.
+
+    Any other out_root (a quick trial, outputs/trial) keeps raw_logs and QVT data
+    inside its own model folder, so a trial never overwrites a full run's raw_logs.
     """
     slug = llm_model.rstrip("/").split("/")[-1]
+    out_dir = out_root / "models" / slug
+    if Path(out_root) != Path("outputs"):
+        return out_dir, out_dir / "raw_logs", out_dir / "qvt_variations"
     return (
-        out_root / "models" / slug,
+        out_dir,
         Path("data/raw_logs") / slug,
         Path("data/qvt_variations") / slug,
     )
@@ -671,15 +746,15 @@ def run_comparison(
     qvt_dir: Path = Path("data/qvt_variations"),
 ) -> dict:
     """
-    Run GraphRAG (column/node) AND Baseline (table/node) on the same
+    Run GraphRAG 2-Stage (column/node) AND GraphRAG 1-Stage (table/node) on the same
     dev-set sample, then print a side-by-side schema-linking + prediction
     comparison report. Both arms use the same LLM and the same few-shot k
     (cfg.few_shot_k); only the retrieval differs.
 
     Saved (paths relative to out_dir / raw_logs_dir; the defaults are the
     single-model run, model_run_dirs() gives the per-model ones):
-        predictions/predictions.txt          — GraphRAG
-        predictions/baseline_predictions.txt — Baseline
+        predictions/predictions.txt          — GraphRAG 2-Stage
+        predictions/baseline_predictions.txt — GraphRAG 1-Stage
         tables/comparison_report.txt         — side-by-side summary
         raw_logs_dir/*.json                  — per-query raw logs (input of the 6 dimensions)
         tables/dimensions_{results.json,report.txt}
@@ -700,6 +775,7 @@ def run_comparison(
     )
 
     set_seed(cfg.seed)
+    timing.reset_run()
     for sub in ("predictions", "tables", "logs"):
         (out_dir / sub).mkdir(parents=True, exist_ok=True)
     # run_official_evaluation() reads cfg.predictions_file (and writes its
@@ -723,15 +799,17 @@ def run_comparison(
         )
 
     logger.info("Loading embedding model: %s", cfg.embedding_model)
-    embed_model = SentenceTransformer(cfg.embedding_model)
+    with timing.run_step("load_embedding_model"):
+        embed_model = SentenceTransformer(cfg.embedding_model)
 
     logger.info("Loading LLM: %s (4-bit)", cfg.llm_model)
-    llm, tokenizer = load_model_and_tokenizer(cfg)
+    with timing.run_step("load_llm"):
+        llm, tokenizer = load_model_and_tokenizer(cfg)
 
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_data))
 
     # ── Build both graphs & indices ───────────────────────────────────────
-    logger.info("Building column graph (GraphRAG) …")
+    logger.info("Building column graph (GraphRAG 2-Stage) …")
     col_graph = build_schema_graph(schema_df)
     col_cache: dict[str, "SchemaIndex"] = {
         db_id: build_schema_index(col_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
@@ -741,18 +819,26 @@ def run_comparison(
     # Per-table column counts for the column/token reduction fields (poin 33).
     table_cols = columns_per_table(col_graph)
 
-    logger.info("Building table graph (Baseline) …")
+    logger.info("Building table graph (GraphRAG 1-Stage) …")
     tbl_graph = build_table_graph(schema_df)
     tbl_cache = {
-        db_id: build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
+        db_id: build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names,
+                                 include_columns=cfg.baseline_embed_columns)
         for db_id in tqdm(unique_db_ids, desc="Indexing tables")
     }
 
     # Few-shot index — shared by BOTH arms, same k (cfg.few_shot_k)
     few_shot_idx = None
     if cfg.few_shot_k > 0:
-        logger.info("Building few-shot index (k=%d, GraphRAG + Baseline) …", cfg.few_shot_k)
-        few_shot_idx = build_few_shot_index(cfg.train_json, embed_model, cfg)
+        logger.info("Building few-shot index (k=%d, GraphRAG 2-Stage + GraphRAG 1-Stage) …", cfg.few_shot_k)
+        with timing.run_step("few_shot_train_embedding"):
+            few_shot_idx = build_few_shot_index(cfg.train_json, embed_model, cfg)
+
+    # Built here so a per-question latency never includes building a database's value index.
+    if cfg.use_value_linking:
+        with timing.run_step("value_index_build"):
+            for db_id in unique_db_ids:
+                get_value_index(col_graph, db_id, cfg)
 
     # ── Raw-log evaluation setup (SLA/ESM/EX/CM per query -> data/raw_logs/) ──
     # This is what feeds src/dimensions/ later (see context/EVALUATION_ANALYSIS_GUIDE.md
@@ -787,29 +873,33 @@ def run_comparison(
 
             # GraphRAG
             try:
-                g_pred, g_recall, g_prec, g_schema, g_column_nodes, g_n_in, g_n_out = run_single(
-                    question, gold_sql, db_id,
-                    col_graph, embed_model, llm, tokenizer, cfg,
-                    schema_index=col_cache[db_id],
-                    few_shot_index=few_shot_idx,
-                )
+                with timing.collect() as g_steps:
+                    g_pred, g_recall, g_prec, g_schema, g_column_nodes, g_n_in, g_n_out = run_single(
+                        question, gold_sql, db_id,
+                        col_graph, embed_model, llm, tokenizer, cfg,
+                        schema_index=col_cache[db_id],
+                        few_shot_index=few_shot_idx,
+                    )
             except Exception:
-                logger.exception("GraphRAG error on sample %d", i)
+                logger.exception("GraphRAG 2-Stage error on sample %d", i)
                 g_pred, g_recall, g_prec, g_schema = "SELECT 1", 0.0, 0.0, ""
                 g_column_nodes, g_n_in, g_n_out = [], 0, 0
+                g_steps = None
 
             # Baseline
             try:
-                b_pred, b_recall, b_prec, b_table_nodes, b_n_in, b_n_out = run_single_baseline(
-                    question, gold_sql, db_id,
-                    tbl_graph, embed_model, llm, tokenizer, cfg,
-                    table_index=tbl_cache[db_id],
-                    few_shot_index=few_shot_idx,
-                )
+                with timing.collect() as b_steps:
+                    b_pred, b_recall, b_prec, b_table_nodes, b_n_in, b_n_out = run_single_baseline(
+                        question, gold_sql, db_id,
+                        tbl_graph, embed_model, llm, tokenizer, cfg,
+                        table_index=tbl_cache[db_id],
+                        few_shot_index=few_shot_idx,
+                    )
             except Exception:
-                logger.exception("Baseline error on sample %d", i)
+                logger.exception("GraphRAG 1-Stage error on sample %d", i)
                 b_pred, b_recall, b_prec = "SELECT 1", 0.0, 0.0
                 b_table_nodes, b_n_in, b_n_out = [], 0, 0
+                b_steps = None
 
             graphrag_results.append(PipelineResult(
                 index=i + 1, db_id=db_id, question=question,
@@ -836,8 +926,10 @@ def run_comparison(
 
                 gold_schema = sorted(extract_ground_truth_schema(gold_sql, db_id, db_schema))
 
-                g_eval = esm_ex_cm.evaluate_single_query(g_pred, gold_sql, db_id, db_path, spider_schema, kmap)
-                b_eval = esm_ex_cm.evaluate_single_query(b_pred, gold_sql, db_id, db_path, spider_schema, kmap)
+                with timing.collect() as g_eval_time, timing.step("evaluation"):
+                    g_eval = esm_ex_cm.evaluate_single_query(g_pred, gold_sql, db_id, db_path, spider_schema, kmap)
+                with timing.collect() as b_eval_time, timing.step("evaluation"):
+                    b_eval = esm_ex_cm.evaluate_single_query(b_pred, gold_sql, db_id, db_path, spider_schema, kmap)
 
                 # Read-only confound instrumentation (never mutates the values
                 # written to raw_logs below). Self-contained try/except inside.
@@ -859,6 +951,7 @@ def run_comparison(
                     "gold_schema": gold_schema,
                     "predicted_schema": g_schema_list,
                     "token_input": g_n_in, "token_output": g_n_out,
+                    "latency": {**timing.finish_query(g_steps), **g_eval_time} if g_n_in else None,
                     **prompt_stats(g_schema_list, db_id, table_cols, g_schema, tokenizer),
                     "esm_result": g_eval.esm, "ex_result": g_eval.ex,
                     "cm_per_clause": g_eval.cm_per_clause,
@@ -869,6 +962,7 @@ def run_comparison(
                     "gold_schema": gold_schema,
                     "predicted_schema": b_schema_list,
                     "token_input": b_n_in, "token_output": b_n_out,
+                    "latency": {**timing.finish_query(b_steps), **b_eval_time} if b_n_in else None,
                     **prompt_stats(b_schema_list, db_id, table_cols, b_context, tokenizer),
                     "esm_result": b_eval.esm, "ex_result": b_eval.ex,
                     "cm_per_clause": b_eval.cm_per_clause,
@@ -887,9 +981,9 @@ def run_comparison(
                 print(f"  Q              : {question}")
                 print(f"  GOLD           : {gold_sql}")
                 print("-" * W)
-                print(f"  [GraphRAG] pred: {g_pred}")
+                print(f"  [GraphRAG 2-Stage] pred: {g_pred}")
                 print(f"             R={g_recall*100:.1f}%  P={g_prec*100:.1f}%")
-                print(f"  [Baseline] pred: {b_pred}")
+                print(f"  [GraphRAG 1-Stage] pred: {b_pred}")
                 print(f"             R={b_recall*100:.1f}%  P={b_prec*100:.1f}%")
                 print("=" * W)
 
@@ -912,7 +1006,7 @@ def run_comparison(
 
     # ── Schema linking summaries ───────────────────────────────────────────
     print_schema_linking_summary(graphrag_results)
-    bl_print_summary(baseline_results, label="Baseline (table/node)")
+    bl_print_summary(baseline_results, label="GraphRAG 1-Stage (table/node)")
 
     # ── Side-by-side comparison report ────────────────────────────────────
     g_r = np.mean([r.recall    for r in graphrag_results]) * 100
@@ -923,16 +1017,16 @@ def run_comparison(
     report_lines = [
         "",
         "=" * 70,
-        "  COMPARISON REPORT — GraphRAG (column/node) vs Baseline (table/node)",
+        "  COMPARISON REPORT — GraphRAG 2-Stage (column/node) vs GraphRAG 1-Stage (table/node)",
         "=" * 70,
-        f"  {'Metric':<22} {'GraphRAG':>12}  {'Baseline':>12}  {'Delta (G-B)':>12}",
+        f"  {'Metric':<22} {'2S':>12}  {'1S':>12}  {'Delta (2S-1S)':>12}",
         "-" * 70,
         f"  {'Schema Recall':<22} {g_r:>11.2f}%  {b_r:>11.2f}%  {g_r-b_r:>+11.2f}%",
         f"  {'Schema Precision':<22} {g_p:>11.2f}%  {b_p:>11.2f}%  {g_p-b_p:>+11.2f}%",
         "-" * 70,
         "  Node granularity      column/node      table/node",
         "  Schema context        pruned cols      all cols in table",
-        "  Linking strategy      n-gram match     n-gram match (same as GraphRAG Stage 1)",
+        "  Linking strategy      n-gram match     n-gram match (same as GraphRAG 2-Stage Stage 1)",
         f"  Table threshold       {cfg.table_similarity_threshold:<16} {cfg.table_similarity_threshold}",
         f"  Top-k tables (pct)    {cfg.top_k_tables_pct:<16} {cfg.baseline_top_k_tables_pct}",
         f"  Top-k columns (pct)   {cfg.top_k_columns_pct:<16} -",
@@ -960,14 +1054,26 @@ def run_comparison(
 
     # ── Official Spider eval for both ──────────────────────────────────────
     print("\n" + "=" * 60)
-    print("  SPIDER EVAL — GraphRAG (column/node)")
+    print("  SPIDER EVAL — GraphRAG 2-Stage (column/node)")
     print("=" * 60)
     run_official_evaluation(cfg)
 
     print("\n" + "=" * 60)
-    print("  SPIDER EVAL — Baseline (table/node)")
+    print("  SPIDER EVAL — GraphRAG 1-Stage (table/node)")
     print("=" * 60)
     bl_spider_eval(b_pred_path, cfg)
+
+    # ── Six metrics, before the dimensions that analyse them ───────────────
+    # Non-fatal like the dimensions below: the generation results are already saved.
+    metrics_ok = False
+    try:
+        run_metrics_analysis(
+            raw_logs_dir=raw_logs_dir, out_dir=out_dir / "tables", dev_json=cfg.dev_json,
+            full_dev=sample_ratio >= 1.0, cfg=cfg, sample_ratio=sample_ratio, qvt_dir=qvt_dir,
+        )
+        metrics_ok = True
+    except Exception:
+        logger.exception("Six-metric summary failed (non-fatal, raw_logs are saved).")
 
     # ── 6-dimension analysis over the raw_logs just written ────────────────
     # Own try/except: hours of generation are already saved above, a failure
@@ -985,12 +1091,21 @@ def run_comparison(
                 ex_per_k=ex_per_k,
                 always_dim5=always_dim5,
                 qvt_dir=qvt_dir,
+                build_qvt=not metrics_ok,
             )
         except Exception:
             logger.exception(
                 "Dimension analysis failed (non-fatal, raw_logs are saved) -- "
                 "re-run: python src/experiments/run_all_dimensions.py"
             )
+
+    # ── Everything of this run in one workbook ─────────────────────────────
+    try:
+        timing.save_run(out_dir / "tables")
+        from src.experiments.export_excel import build_workbook
+        logger.info("Excel saved -> %s", build_workbook(raw_logs_dir, out_dir / "tables", out_dir / "tables" / "hasil_skripsi.xlsx", skip_missing=True))
+    except Exception:
+        logger.exception("Excel export failed (non-fatal) -- re-run: python src/experiments/export_excel.py")
 
     return {
         "graphrag": summarize_raw_logs(graphrag_raw_logs, cfg.token_output_weight),
@@ -1070,10 +1185,10 @@ def run_model_comparison(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="GraphRAG Text-to-SQL Pipeline")
+    parser = argparse.ArgumentParser(description="GraphRAG 2-Stage Text-to-SQL Pipeline")
     parser.add_argument(
         "--full-schema", action="store_true",
-        help="Bypass GraphRAG and feed the full DB schema to the LLM (ablation mode).",
+        help="Bypass GraphRAG 2-Stage and feed the full DB schema to the LLM (ablation mode).",
     )
     parser.add_argument(
         "--skip-sweep", action="store_true",
@@ -1111,7 +1226,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--models", nargs="+", default=None, metavar="MODEL",
         help="With --baseline: ablation stage 3, one comparison per model "
-             "('all' = config.py llm_model_frame). Outputs go to outputs/models/<model>/.",
+             "('all' = config.py llm_model_frame, or a short name such as 14B). Outputs go to outputs/models/<model>/.",
     )
     add_config_override_args(parser)
     args, unknown = parser.parse_known_args()
@@ -1147,7 +1262,7 @@ if __name__ == "__main__":
         except ValueError as exc:
             parser.error(str(exc))
         if args.models:
-            models = config.llm_model_frame if args.models == ["all"] else args.models
+            models = config.llm_model_frame if args.models == ["all"] else [config.resolve_llm_model(m) for m in args.models]
             run_model_comparison(
                 config, models, sample_ratio=args.sample,
                 run_dimensions=not args.no_dimensions,

@@ -29,6 +29,7 @@ from sentence_transformers import SentenceTransformer, util
 from src.core.config import PipelineConfig
 from src.core.schema import normalize_identifier
 from src.retrieval.value_linking import extract_question_numbers, get_value_index, link_values
+from src.utils import timing
 
 logger = logging.getLogger(__name__)
 
@@ -485,27 +486,31 @@ def retrieve_graphrag_schema(
     if cfg.use_full_schema_bypass:
         return _all_column_nodes(graph, db_name), index.tables
 
-    candidate_tables = retrieve_candidate_tables(question, index, embed_model, cfg)
-    detected = retrieve_candidate_columns(question, index, candidate_tables, embed_model, cfg)
+    with timing.step("stage1_tables"):
+        candidate_tables = retrieve_candidate_tables(question, index, embed_model, cfg)
+    with timing.step("stage2_columns"):
+        detected = retrieve_candidate_columns(question, index, candidate_tables, embed_model, cfg)
     if cfg.use_value_linking:
         # Value-matched columns join the anchors even if their table missed Stage 1.
-        linked = value_linked_columns(graph, db_name, question, cfg)
+        with timing.step("value_linking"):
+            linked = value_linked_columns(graph, db_name, question, cfg)
         detected = list(dict.fromkeys(detected + linked))
         candidate_tables = list(dict.fromkeys(
             candidate_tables + [graph.nodes[n]["table"] for n in linked]))
     if not detected:
         return _all_column_nodes(graph, db_name), candidate_tables
 
-    c_nodes, paths, relations = trace_schema_paths(traversal_graph(graph, cfg), db_name, detected)
-    if cfg.traversal_mode == "fk_only":
-        # Only the JOIN columns of the paths: a PK reached through belongs_to_pk
-        # edges stays out unless it is itself an FK endpoint (or an anchor).
-        path_nodes = [n for r in relations if r["relation"] == "foreign_key" for n in (r["from"], r["to"])]
-    else:
-        path_nodes = [n for path in paths for n in path]
-    # dict.fromkeys, not set(): set order follows string hashing, which changes
-    # between Python processes and would reorder the CREATE TABLE blocks.
-    column_nodes = list(dict.fromkeys(c_nodes + path_nodes))
+    with timing.step("traversal"):
+        c_nodes, paths, relations = trace_schema_paths(traversal_graph(graph, cfg), db_name, detected)
+        if cfg.traversal_mode == "fk_only":
+            # Only the JOIN columns of the paths: a PK reached through belongs_to_pk
+            # edges stays out unless it is itself an FK endpoint (or an anchor).
+            path_nodes = [n for r in relations if r["relation"] == "foreign_key" for n in (r["from"], r["to"])]
+        else:
+            path_nodes = [n for path in paths for n in path]
+        # dict.fromkeys, not set(): set order follows string hashing, which changes
+        # between Python processes and would reorder the CREATE TABLE blocks.
+        column_nodes = list(dict.fromkeys(c_nodes + path_nodes))
     return column_nodes, candidate_tables
 
 

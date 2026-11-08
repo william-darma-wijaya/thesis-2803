@@ -266,6 +266,8 @@ Penerapan beda per jalur, karena constraint arsitektur beda:
 
 ## 18. Definisi Baseline: table-level retrieval (FINAL)
 
+> **Pembaruan (2026-11-07, poin 38):** yang didefinisikan di sini sekarang disebut **GraphRAG 1-Stage**, salah satu varian metode peneliti. Definisi teknisnya tetap, tetapi varian ini bukan lagi baseline skripsi. Baseline skripsi = DAIL-SQL. Teks di bawah dibiarkan sebagai riwayat.
+
 **Konflik/ambiguitas:** `CLAUDE.md` + `RESEARCHER_TODO.md` lama mencatat baseline "saat ini table-level retrieval, mungkin diubah ke full-schema bypass — diskusikan dulu". Selama belum diputuskan, tiap run raw_logs/ablation berisiko harus diulang kalau definisi berubah.
 
 **Keputusan (2026-09-06):** Baseline skripsi = **table-level retrieval** (`src/retrieval/baseline.py`: top-k table selection + FK-path expansion + semua kolom tabel terpilih, tanpa pruning). Full-schema bypass (`use_full_schema_bypass` / `--full-schema`) tetap ada sebagai **mode ablation**, BUKAN baseline.
@@ -674,11 +676,106 @@ Dua argumen terakhir HANYA untuk silang-ESM langkah 6. Kalau tidak dioper, `esm_
 
 **Output:** kolom baru di `sla_trial_recap.csv`; `ex_G` / `ex_B` / `ex_delta` di `sla_trial_vs_baseline.csv`; sheet Excel trial threshold ada dua: `Trial Preprocessing` (riwayat preprocessing G1-G7 di satu pasangan `THRESHOLDS`, default `(0.50, 0.70)`, tanpa kolom Trial karena barisnya dibedakan oleh kolom pengaturan; baris G7 pada pasangan itu sengaja ada di kedua sheet supaya langkah nama natural ikut terdokumentasi) dan `Trial Thresholds` (G7 di tiap `(T, K)`, Baseline di tiap `T`, dengan kolom `Pipeline`). Perbandingan GraphRAG vs Baseline di T yang sama dan tabel Δ per langkah preprocessing (`preprocessing_steps()`, G5 dibanding G3 karena angka G4 tidak dipakai) tetap ditampilkan di notebook (bagian 9b dan 9a) dan `sla_trial_vs_baseline.csv`, tetapi tidak diekspor ke Excel, atas permintaan peneliti.
 
-**Tampilan workbook (keputusan peneliti, berlaku untuk semua sheet):** tabel `result_tables.py` memberi label pipeline `1-stage` (Baseline) dan `2-stage` (GraphRAG), jadi `eval_pipeline.ipynb` ikut berubah. Excel tidak menulis label G1-G7, seluruh teksnya berbahasa Inggris, tidak punya sheet `Info`, dan tiap sheet langsung dimulai dari tabel di baris 1 tanpa judul atau catatan. Akibatnya definisi metrik, nilai α, dan daftar sumber data tidak lagi ada di workbook, dan kolom alasan skip di sheet `Dimensions` dibuang karena teksnya berbahasa Indonesia (tetap ada di `dimensions_report.txt`). Kode, `raw_logs`, CSV, dan notebook trial tetap memakai baseline/graphrag dan id G1-G7.
+**Tampilan workbook (keputusan peneliti, berlaku untuk semua sheet; sebagian digantikan poin 40, label pipeline, sheet Info, dan judul sheet):** tabel `result_tables.py` memberi label pipeline `1-stage` (Baseline) dan `2-stage` (GraphRAG), jadi `eval_pipeline.ipynb` ikut berubah. Excel tidak menulis label G1-G7, seluruh teksnya berbahasa Inggris, tidak punya sheet `Info`, dan tiap sheet langsung dimulai dari tabel di baris 1 tanpa judul atau catatan. Akibatnya definisi metrik, nilai α, dan daftar sumber data tidak lagi ada di workbook, dan kolom alasan skip di sheet `Dimensions` dibuang karena teksnya berbahasa Indonesia (tetap ada di `dimensions_report.txt`). Kode, `raw_logs`, CSV, dan notebook trial tetap memakai baseline/graphrag dan id G1-G7.
 
 **Tes:** `python tests/test_trial_tracing.py` (angka dihitung tangan, cache EX, tabel Excel, CSV lama tanpa kolom baru). Sel notebook belum dijalankan dengan Spider asli.
 
 ---
+
+## 36. Alur tiga model: 1-Stage dan 2-Stage, metrik lalu dimensi, lalu simpan (2026-11-05)
+
+**Keputusan peneliti:** eksperimen memakai tiga model Qwen2.5-Coder (3B, 7B, 14B), dijalankan oleh tiga orang yang hanya mengganti model di `eval_pipeline.ipynb`. Output harus berurutan: 6 metrik, lalu dimensi, lalu semua disimpan ke JSON dan Excel, per model dan gabungan.
+
+**Penamaan:** menurut peneliti, `baseline` di kode adalah GraphRAG **1-Stage** dan `graphrag` adalah GraphRAG **2-Stage**. Nama file dan kunci data sengaja tetap (`baseline_log.json`, `graphrag_log.json`, kunci dimensi), karena dipakai di banyak modul. Tabel metrik baru memakai label 1-Stage dan 2-Stage. DAIL-SQL akan menjadi baseline baru dan belum diimplementasikan; saat itu definisi di poin 18 dan nama `baseline` di kode perlu ditinjau ulang.
+
+**Enam metrik** mengikuti subbab `EVALUATION_ANALYSIS_GUIDE.md` Bagian 1: SLA, ESM, EX, CM, Token Consumption + TEP (subbab 1.5), QVT.
+
+**Yang berubah:**
+- `cfg.resolve_llm_model("14B")` mengubah nama pendek menjadi nama lengkap.
+- `src/experiments/metrics_summary.py` (baru) menulis `metrics_results.json` dari raw_logs. Tidak ada formula baru. TEP dihitung dengan `compute_tep()` yang sama dengan Dimensi 1. QVT hanya dibaca kalau datanya dibangun dari raw_logs run itu, supaya file lama tidak terbaca.
+- `run_metrics_analysis()` di `pipeline.py` membangun data QVT dan menulis metrik; `run_dimension_analysis(build_qvt=False)` memakai data QVT yang sama. `run_comparison()` kini juga menulis `hasil_skripsi.xlsx`.
+- `eval_pipeline.ipynb`: semua model memakai folder `outputs/models/<model>/` (trial: `outputs/trial/models/<model>/`), **termasuk 7B yang sebelumnya menulis ke `outputs/` dan `data/raw_logs/`**. Sel kode dipendekkan dan diberi komentar per baris; logikanya dipindah ke `src/experiments/notebook_steps.py`, dan loop utama barunya terbukti menghasilkan raw_logs yang sama dengan sel lama (data uji kecil, LLM di-stub).
+- Urutan notebook: tampilkan 6 metrik dalam satu tabel (`rt.metrics_summary_table()`, CM tetap per klausa) beserta rinciannya, tampilkan dimensi, baru simpan di sel terakhir. Hanya prediksi dan raw_logs yang disimpan lebih awal (Bagian 12), karena metrik dan dimensi membacanya dan hasil generate tidak boleh hilang kalau langkah berikutnya gagal. `run_metrics_analysis(save=False)` dan `compute_dimension_analysis()` menghitung tanpa menulis file hasil.
+- Bug lama diperbaiki: `dim2_tables()` crash kalau ada tingkat kesulitan tanpa query (bisa terjadi pada sampel kecil).
+- `export_excel.py`: sheet `M1`-`M6`, urutan sheet metrik -> dimensi -> rincian pendukung.
+- `src/experiments/combine_models.py` (baru) menulis `hasil_gabungan.{json,xlsx}` dan memberi peringatan untuk model yang belum ada, run percobaan, dan commit/konfigurasi yang berbeda. Model yang sama muncul dua kali ditolak.
+
+**Yang tetap:** format prompt, greedy decoding, formula metrik, skema raw_logs, dan `pipeline.py --baseline` tanpa `--models` (masih menulis ke `outputs/` dan `data/raw_logs/`, jadi tidak ikut digabung).
+
+**Gabungan dengan poin 33-34:** `notebook_steps.py` memakai `stratified_sample()` dan menulis field `prompt_stats()` yang sama dengan `run_comparison()`; tabel reduksi kolom/token tampil di Bagian 13.7, sheet `Token Reduction` per model, dan `hasil_gabungan.xlsx`. Perbandingan tiga model dijalankan terakhir, dengan best config dari ablation (poin 33).
+
+**Keterbatasan:**
+- Dimensi 6 memakai EX per k dari `ablation.py`, yang dijalankan dengan satu model. Angkanya sama di ketiga model, dan sheet D6 diberi catatan tentang hal ini.
+- Risiko hasil `ablation.py` tertimpa belum diperbaiki: run dengan sebagian `--k-values` menghapus baris k lain, dan nama file tidak memuat sample atau model.
+- Alur ini baru diuji dengan raw_logs sintetis dan library ML yang di-mock, belum dengan GPU. Memori 14B di T4 belum diukur.
+
+## 37. Latensi per tahap sebagai lampiran (2026-11-07)
+
+**Keputusan peneliti:** semua tahap yang bisa diukur dicatat dan masuk Excel sebagai lampiran; yang dilaporkan di skripsi dipilih nanti. Latensi **bukan** salah satu dari enam metrik di `EVALUATION_ANALYSIS_GUIDE.md`, dan formula metrik yang ada tidak berubah. Ini kode custom skripsi, bukan bagian SPIDER.
+
+**Yang dicatat:**
+- **Per pertanyaan** (field `latency` di raw_logs, detik): 2-Stage `stage1_tables`, `stage2_columns`, `value_linking`, `traversal`; 1-Stage `table_linking`, `path_tracing`; keduanya `retrieval_search`, `build_ddl`, `few_shot`, `build_prompt`, `prompt_tokenize`, `llm_generate`, `sql_clean`, `count_t_in`, `proxy_eval`, `evaluation`, ditambah `retrieval_total` dan `end_to_end`.
+- **Sekali per run** (`tables/latency_run.json`): baca data, graph, muat model, embedding schema (total dan per database), embedding training set, indeks value linking, evaluator, loop utama, evaluator resmi per varian, pembuatan data QVT, metrik, dimensi, simpan JSON/laporan, total waktu, GPU, dan puncak VRAM.
+- **Turunan:** token output per detik, token input per detik generation, porsi retrieval dan generation terhadap end-to-end. Mean, median, dan P95 per tahap, keseluruhan dan per tingkat kesulitan.
+
+**Definisi:** `end_to_end` = pencarian schema + DDL + few-shot + prompt + tokenisasi input + generation + pembersihan SQL. Evaluasi proxy, penghitungan T_in, dan evaluasi SQL tidak ikut, karena bukan bagian dari menjawab pertanyaan.
+
+**Agar tidak bias:** statistik membuang pertanyaan pertama (pemanasan model) dan pertanyaan tanpa generate (`token_input = 0`), tetapi sheet per pertanyaan tetap menampilkan pertanyaan pertama. Indeks value linking dibuat saat setup, supaya tidak masuk latensi pertanyaan pertama tiap database; isi indeks dan hasil retrieval tidak berubah. `torch.cuda.synchronize()` dipanggil di batas tiap tahap saat pencatatan aktif. 2-Stage tetap selalu berjalan lebih dulu per pertanyaan. `gpu` masuk metadata, dan `combine_models.py` memberi peringatan kalau GPU antarmodel berbeda.
+
+**Implementasi:** `src/utils/timing.py`. `timing.step()` tidak melakukan apa pun tanpa `collect()` aktif, jadi `ablation.py`, `sweep.py`, dan signature `run_single()` tidak berubah. Tampilan di `result_tables.latency_tables()` dan `latency_per_query()`, sheet `Latency` dan `Latency Per Query`, serta sheet `Latency` di `hasil_gabungan.xlsx`.
+
+**Keterbatasan:** tahap yang sangat singkat tetap berderau; angka yang paling bisa diandalkan adalah total retrieval, generation, dan end-to-end. Waktu menulis Excel dan zip hanya dicetak di notebook, karena tidak bisa dicatat di dalam file itu sendiri. Masking skeleton berjalan lokal sebelum run, jadi tidak terukur. Jalur CLI `run_comparison()` mencatat latensi per pertanyaan, tetapi hanya sebagian tahap sekali-jalan. Belum diuji dengan GPU.
+
+## 38. Nama tampilan: GraphRAG 1-Stage dan GraphRAG 2-Stage (2026-11-07)
+
+**Keputusan peneliti:**
+- **GraphRAG 1-Stage** (`baseline` di kode) dan **GraphRAG 2-Stage** (`graphrag` di kode) adalah **dua varian metode peneliti**, bukan baseline dan metode.
+- **Baseline skripsi adalah DAIL-SQL (state of the art)**, yang dikerjakan nanti dan belum diimplementasikan.
+- Nama "Baseline" dan "GraphRAG" di semua output diganti menjadi GraphRAG 1-Stage dan GraphRAG 2-Stage. Ini melanjutkan poin 36, yang baru mengganti label di tabel metrik baru.
+
+**Yang berubah:** tabel notebook dan Excel, CSV evaluator resmi, teks interpretasi dan laporan dimensi, pesan konsol, serta teks ketiga notebook. Tabel konsol yang lebarnya tetap memakai singkatan `1S` dan `2S`.
+
+**Yang sengaja tetap:** identifier dan kontrak kode, yaitu `baseline.py`, `run_single_baseline()`, `--baseline`, `--mode baseline`, `baseline_log.json`, kunci JSON `baseline` dan `graphrag`, kolom CSV `mode`, serta nama file `graphrag_sla_trial.ipynb`. Dokumen `context/` dan komentar kode juga tidak ditulis ulang. Mengganti semua itu tidak mengubah hasil, tetapi berisiko merusak pembacaan file antarmodul.
+
+**Yang tidak berubah:** definisi teknis di poin 18, retrieval, prompt, dan semua formula. Di dokumen lama, "Baseline" berarti GraphRAG 1-Stage dan "GraphRAG" berarti GraphRAG 2-Stage.
+
+**Status hasil saat ini:** semua metrik, dimensi, dan TEP yang dihasilkan kode membandingkan dua varian metode peneliti (2-Stage terhadap 1-Stage). Hasil ini belum merupakan perbandingan dengan baseline skripsi, jadi perbandingan terhadap DAIL-SQL tetap perlu ditambahkan (open item F).
+
+## 39. Stage 1 GraphRAG 1-Stage disamakan dengan 2-Stage: head-to-head, varian sebagai ablation (2026-11-08)
+
+**Temuan:** teks embed tabel berbeda antar varian. 2-Stage meng-embed nama tabel saja (`retrieval.build_schema_index`), sedangkan 1-Stage meng-embed `"table <nama> columns <kolom...>"` (`baseline.build_table_index`), dengan threshold tabel yang sama (0.60). Skor cosine n-gram pendek terhadap teks panjang lebih rendah, jadi threshold yang dituning untuk nama tabel terlalu ketat untuk 1-Stage dan banyak tabel gold jatuh ke fallback 1 tabel. Dugaan ini (belum terbukti, `raw_logs` belum ada) menjelaskan recall kolom 1-Stage 69.5% di bawah 2-Stage 89.5% pada trial awal, padahal 1-Stage mengirim semua kolom tabel terpilih. Poin 32 sudah mencatat risiko ini.
+
+**Keputusan peneliti:** perbandingan utama harus head-to-head, jadi Stage 1 harus identik di kedua varian. Varian lain dijalankan sebagai ablation terpisah.
+
+**Perubahan:**
+- Field baru `baseline_embed_columns` di `PipelineConfig`, default `False`: 1-Stage meng-embed **nama tabel saja**, persis seperti Stage 1 2-Stage (nama natural Spider tetap dipakai di keduanya). `build_table_index(..., include_columns=...)` dipanggil dari `baseline.py`, `pipeline.py`, `ablation.py`, `sweep.py`, dan `notebook_steps.py`.
+- `True` = varian **1-Stage+** (`"table <nama> columns <kolom...>"`), baseline tabel yang lebih kuat. Skornya terencerkan, jadi threshold tabelnya harus dituning sendiri.
+- Flag CLI baru (berlaku di `pipeline.py` dan `ablation.py`): `--baseline-embed-columns true|false` dan `--value-linking true|false`.
+
+**Ablation yang perlu dijalankan (satu faktor per run, semua tanpa mengubah faktor lain):**
+
+| Run | `baseline_embed_columns` | `use_value_linking` | Menjawab |
+|---|---|---|---|
+| Utama (default) | False | True (2-Stage) | Perbandingan sesuai desain peneliti |
+| Head-to-head murni | False | False | Selisih murni dari tahap kolom |
+| 1-Stage+ | True (threshold dituning sendiri) | True | Baseline tabel yang lebih kuat |
+
+**Catatan:** value linking tetap hanya ada di 2-Stage (poin 30), jadi run utama masih mengandung perbedaan itu. Run "head-to-head murni" yang mematikan value linking adalah pembandingnya. Semua varian menulis ke folder output yang sama kalau dijalankan tanpa memisahkan hasil, jadi simpan atau ganti nama `outputs/` dan `data/raw_logs/` antar run.
+
+**Dampak ke hasil lama:** run yang dibuat sebelum perubahan ini memakai teks embed tabel dengan kolom, jadi tidak sebanding dengan run sesudahnya (SLA tabel dan kolom 1-Stage akan berubah).
+
+## 40. Penggabungan `feat/three-model-eval` dengan `main` (2026-11-08)
+
+**Konteks:** `main` (poin 35: trial threshold melacak EX, tabel Excel trial, label `1-stage`/`2-stage`) dan branch `feat/three-model-eval` (poin 36-39) mengubah `result_tables.py`, `export_excel.py`, `eval_pipeline.ipynb`, dan dokumen yang sama. Nomor poin 35 dipakai dua kali.
+
+**Keputusan peneliti:**
+- Penamaan pipeline di semua keluaran, termasuk Excel dan tes: **GraphRAG 1-Stage** dan **GraphRAG 2-Stage** (poin 38). Label `1-stage`/`2-stage` dari `main` tidak dipakai.
+- Excel memakai susunan branch: sheet `Info` (sumber data, parameter, definisi), `Summary`, `M1`-`M6`, judul dan catatan per sheet. Sheet `Trial Preprocessing` dan `Trial Thresholds` dari `main` ditambahkan. Ekspor parsial tanpa `raw_logs` dan metrik (mis. hanya trial) tidak memuat sheet `Info`.
+- Nomor poin 35 tetap milik `main` (dirujuk dari `token_reduction.py`, `trial_ex.py`, dan notebook trial). Poin branch digeser menjadi 36-39.
+
+**Yang berubah di kode:** `export_excel.py` versi branch + dua sheet trial dan pembacaan `sla_trial_recap.csv` saja (pembacaan `sla_trial_T*_K*.csv` dan `sla_trial_vs_baseline.csv` dihapus, mengikuti `main`). `result_tables.py` memakai label branch dan isi `main` (kolom `Few-shot selection`, tabel trial dengan median dan EX, header reduksi). `tests/test_trial_tracing.py` disesuaikan: label, tabel tidak lagi harus di sel A1, dan workbook kosong hanya memuat `Info`.
+
+**Belum diverifikasi:** `tests/test_few_shot_selection.py` gagal di mesin ini pada `test_question_mode_is_unchanged`. File yang menyentuh jalur itu tidak diubah oleh merge, tetapi belum dicek di HEAD sebelum merge karena data Spider tidak ikut ter-checkout. Notebook trial belum dijalankan setelah penggantian nama.
 
 ## Belum diputuskan / open items
 
@@ -731,6 +828,41 @@ Efek nyata: dijalankan lokal apa adanya sekarang, `run_all_dimensions.py` melapo
 Untuk sekarang `run_all_dimensions.py` menerima angkanya manual (`--ex-per-k` / `--ex-per-k-file`) dan men-skip Dimensi 6 dengan penjelasan kalau tidak diberikan (poin 24c).
 
 **Belum diputuskan:** (1) tambahkan kolom `ex`/`esm` ke `ablation_results.csv` dengan cara meng-capture + parse stdout `evaluation.py` di `_run_ablation_evals()`; atau (2) pindahkan evaluasi ablation ke `esm_ex_cm.evaluate_single_query()` in-process (seperti yang sudah dilakukan `run_comparison()` di `pipeline.py`) supaya EX per k langsung tersedia sebagai angka, sekaligus menutup gap "`ablation.py` belum memproduksi raw_logs" yang sudah tercatat di CLAUDE.md; atau (3) biarkan manual — peneliti copy angka dari output Spider eval sekali saja setelah run ablation. Opsi 2 paling menyelesaikan akar masalah tapi menyentuh `ablation.py` yang jalan di Kaggle, jadi butuh konfirmasi peneliti dulu.
+
+## 41. Review PR #17: tiga bug dan tampilan Excel `main` (2026-11-08)
+
+**Tampilan workbook (keputusan peneliti, menggantikan bagian tampilan di poin 40):** susunan `main` dipakai lagi. Tidak ada sheet `Info`, tiap sheet langsung dimulai dari tabel di baris 1 tanpa judul atau catatan, dan label pipeline di semua tabel `result_tables.py` adalah `1-stage` (GraphRAG 1-Stage) dan `2-stage` (GraphRAG 2-Stage). Urutan sheet branch (`Summary`, `M1`-`M6`, dimensi, lalu rincian, latensi) tetap. Akibatnya catatan D6 (EX per k dari satu model) dan catatan latensi tidak ada lagi di workbook per model. Di `hasil_gabungan.xlsx` peringatan dan daftar run pindah ke sheet `Warnings`, dan catatan D6 ikut sebagai satu baris peringatan. Pesan konsol, teks notebook, dan teks dimensi tetap memakai nama poin 38.
+
+**Bug yang diperbaiki:**
+- **Trial notebook mengabaikan saklar teks tabel 1-Stage.** Bagian 7 dan 9 kini memakai `baseline_embed_columns` (`BASELINE_EMBED_COLUMNS` di bagian 3). `BASELINE_TEXTS` di bagian 9 bisa menjalankan nama saja (`GraphRAG 1-Stage | T..`) dan nama + kolom (`GraphRAG 1-Stage+ | T..`) di rekap yang sama; bagian 9b membandingkan dengan varian `BASELINE_EMBED_COLUMNS`.
+- **Baris 1-Stage hilang dari sheet `Trial Thresholds`.** Branch mengganti id trial menjadi `GraphRAG 1-Stage | T..`, tetapi `sla_trial_tables()` hanya mengenali `Baseline | T..`. Kini keduanya dikenali. Rekap lama `Baseline | T..` ditampilkan sebagai `1-stage+`, karena sebelum poin 39 1-Stage selalu meng-embed nama + kolom.
+- **Run percobaan menimpa raw_logs run penuh.** `model_run_dirs()` dengan `out_root` selain `outputs/` (percobaan, `outputs/trial/`) kini menaruh raw_logs dan data QVT di dalam folder model itu sendiri.
+- **Gabungan model tidak memeriksa saklar varian.** `run_metadata()` mencatat `baseline_embed_columns`, `use_value_linking`, dan knob preprocessing lain (`VARIANT_KEYS`), dan `combine_models.py` memperingatkan kalau nilainya berbeda antar model. Hasil lama tanpa field ini terbaca `None`.
+
+**Belum ditangani dari review:** latensi pertanyaan pemanasan bisa ikut statistik kalau pertanyaan pertama gagal, `torch.cuda.synchronize()` di tiap tahap, akhir baris campuran di `CLAUDE.md`, dan `tests/test_few_shot_selection.py` yang dilaporkan gagal (butuh data Spider).
+
+## 42. Notebook trial dipecah: semua kombinasi preprocessing, dan grid threshold dengan saklar (2026-11-08)
+
+**Keputusan peneliti:**
+- `graphrag_sla_trial.ipynb` dipecah jadi dua notebook dan dihapus:
+  - `notebooks/trial_preprocessing.ipynb`: **semua kombinasi** lima langkah preprocessing 2-Stage (stopword, value linking, traversal, tabel tanpa PK, nama embed) di satu pasangan (T, K), default T 0.50 / K 0.70. Default 2 x 3 x 2 x 2 x 2 = 48 kombinasi (`PREPROC_OPTIONS`; `remove` untuk stopword bisa ditambahkan). Menggantikan tangga G1-G8. EDA, walk-through, error analysis, statistik value linking, dan oracle traversal ikut di notebook ini.
+  - `notebooks/trial_thresholds.ipynb`: grid T x K 2-Stage dengan **saklar on/off** preprocessing (`STOPWORD_FILTER`, `VALUE_LINKING`, `VALUE_NUMBERS`, `FK_ONLY`, `CONNECT_NO_PK`, `NATURAL_NAMES`; default = `config.py`), opsional `EXTRA_PREPROC` untuk preprocessing tambahan di grid yang sama, dan 1-Stage di tiap T. `BEST_T` / `BEST_K` / `BEST_PREPROC` tetap dipilih peneliti.
+- **1-Stage di trial = nama tabel saja** (poin 39). Varian 1-Stage+ (nama + kolom) tidak dijalankan di trial; `BASELINE_TEXTS` dari poin 41 ikut hilang bersama notebook lama.
+- Peneliti setuju 1-Stage di trial threshold dijalankan ulang, karena angka `hasil_trial.xlsx` lama memakai teks tabel nama + kolom.
+
+**Implementasi:** kode bersama di `src/experiments/trial_steps.py` (kode custom skripsi): sampel stratified, gold schema (`extract_ground_truth_schema()`), satu baris per pertanyaan (SLA, kolom, token, DDL penuh; sama dengan `_row()` notebook lama), rangkuman per konfigurasi (`summarize()`, sama dengan `_summarize()`), run dengan cache, EX zero-shot (`ExScorer`, cache `sla_trial_ex_cache.jsonl` dipakai bersama kedua notebook), dan perbandingan 2-Stage vs 1-Stage di T yang sama. Tidak ada formula baru.
+
+**Output:** `outputs/tables/trial_preprocessing_recap.csv` -> sheet `Trial Preprocessing` (semua kombinasi) dan `Trial Effects` (`preprocessing_effects()`); `outputs/tables/trial_thresholds_recap.csv` -> sheet `Trial Thresholds`; `trial_thresholds_vs_1stage.csv` (pengganti `sla_trial_vs_baseline.csv`). Rekap punya kolom `pipeline` (`graphrag`/`baseline`), jadi baris tidak lagi dikenali dari nama trial. `sla_trial_recap.csv` lama masih dibaca kalau dua file baru belum ada.
+
+**Efek tiap langkah (`Trial Effects`):** untuk tiap nilai sebuah langkah, rata-rata EX, recall dan precision kolom (non-empty gold), dan token prompt atas semua kombinasi yang memakai nilai itu, ditambah selisih terhadap nilai pertama langkah itu di `PREPROC_OPTIONS` (acuan "mati"). Pada desain faktorial penuh, selisih ini sama dengan efek utama: rata-rata efek mengganti satu langkah sementara langkah lain bervariasi. Efek interaksi tidak dihitung; kombinasinya bisa dibaca langsung di `Trial Preprocessing`. Hanya angka, tidak memilih.
+
+**Biaya:** 48 kombinasi x sampel 20% (sekitar 207 pertanyaan) = sampai sekitar 9.900 generasi untuk EX, dikurangi prompt yang sama. Belum diukur di Kaggle.
+
+**Tes:** `python tests/test_trial_steps.py` (skema sintetis dengan SQLite untuk value linking, embedder palsu; gold schema ditulis tangan karena parser Spider butuh data NLTK). Sel kedua notebook juga dijalankan di data sintetis yang sama. Belum dijalankan dengan Spider asli maupun GPU.
+
+### F. Baseline DAIL-SQL belum diimplementasikan
+
+**Dicatat (2026-11-07, poin 38).** Baseline skripsi adalah DAIL-SQL, dikerjakan nanti. Belum diputuskan: cara DAIL-SQL dijalankan, model dan few-shot yang dipakai supaya sebanding, metrik apa saja yang dibandingkan, dan pembanding TEP (saat ini `B` di rumus = GraphRAG 1-Stage). `combine_models.py` dan kode lain belum punya tempat untuk kondisi ketiga.
 
 ### E. Ablation (threshold + few-shot k) di dev atau di train?
 

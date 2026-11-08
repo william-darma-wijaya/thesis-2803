@@ -47,7 +47,7 @@ DELTA_QVT_THRESHOLD = 0.02
 _INTERPRETATIONS = {
     "meningkat": (
         "delta_QVT >= +2%",
-        "GraphRAG meningkatkan konsistensi query secara meaningful",
+        "GraphRAG 2-Stage meningkatkan konsistensi query secara meaningful",
     ),
     "stabil": (
         "-2% <= delta_QVT < +2%",
@@ -55,7 +55,7 @@ _INTERPRETATIONS = {
     ),
     "menurun": (
         "delta_QVT < -2%",
-        "GraphRAG menurunkan konsistensi -- indikasi pemangkasan berlebih",
+        "GraphRAG 2-Stage menurunkan konsistensi -- indikasi pemangkasan berlebih",
     ),
 }
 
@@ -268,7 +268,7 @@ def print_dimension_4(result: dict) -> None:
     print("Dimensi 4 -- Robustness & Konsistensi Query (QVT)")
     print("=" * 78)
     print(f"{'':10} {'QVT':>10} {'M (lolos)':>12} {'dibuang':>10} {'total':>8}")
-    for label, key in [("Baseline", "baseline"), ("GraphRAG", "graphrag")]:
+    for label, key in [("GraphRAG 1-Stage", "baseline"), ("GraphRAG 2-Stage", "graphrag")]:
         s = qvt[key]
         print(f"{label:10} {s['qvt']:>10.4f} {s['m_included']:>12} "
               f"{s['n_excluded']:>10} {s['n_total']:>8}")
@@ -290,7 +290,7 @@ def print_dimension_4(result: dict) -> None:
         print("    Oper baseline_logs= dan graphrag_logs= untuk menjalankan langkah ini.")
         return
 
-    for label, key in [("Baseline", "baseline"), ("GraphRAG", "graphrag")]:
+    for label, key in [("GraphRAG 1-Stage", "baseline"), ("GraphRAG 2-Stage", "graphrag")]:
         c = result["esm_cross"][key]
         print(f"\n-- {label} --")
         print(f"{'':18} {'ESM bersih':>12} {'ESM bermasalah':>16}")

@@ -3,18 +3,23 @@ export_excel.py — rangkum seluruh hasil run jadi SATU workbook Excel untuk dok
 
 Membaca (sheet yang sumbernya tidak ada hanya berisi catatan "Source not found", atau dibuang dengan --skip-missing):
     data/raw_logs/{baseline,graphrag}_log.json      -> Overall, By Difficulty, Retrieval, SQL Diagnostics, Per Query
+    outputs/tables/metrics_results.json             -> M1..M6, satu sheet per metrik (metrics_summary.py)
+    outputs/tables/latency_run.json                 -> Latency (src/utils/timing.py)
     outputs/tables/confound_diagnostics.json        -> SQL Diagnostics (pipeline.py --baseline / eval_pipeline.ipynb)
     outputs/tables/spider_official_eval.csv         -> Spider Official (eval_pipeline.ipynb bagian 14)
     outputs/tables/dimensions_results.json          -> Dimensions, D1..D6 (run_all_dimensions.py)
     outputs/tables/ablation_results.csv             -> Ablation (few-shot k, tahap 2)
     outputs/tables/model_comparison.csv             -> Models (tahap 3)
-    outputs/tables/sla_trial_recap.csv              -> Trial Preprocessing, Trial Thresholds (graphrag_sla_trial.ipynb)
+    outputs/tables/trial_preprocessing_recap.csv    -> Trial Preprocessing, Trial Effects (trial_preprocessing.ipynb)
+    outputs/tables/trial_thresholds_recap.csv       -> Trial Thresholds (trial_thresholds.ipynb)
+    outputs/tables/sla_trial_recap.csv              -> Trial Preprocessing, Trial Thresholds (rekap lama graphrag_sla_trial.ipynb,
+                                                       hanya kalau dua file di atas belum ada)
 
 Tabelnya dibangun oleh src/experiments/result_tables.py, modul yang SAMA dengan yang ditampilkan
 eval_pipeline.ipynb, jadi angka notebook dan workbook identik. Isinya hanya angka faktual:
 teks interpretasi/kesimpulan dari dimensions_results.json tidak ikut diekspor.
 
-Setiap sheet langsung berisi tabel mulai baris 1, tanpa judul, dan seluruh teksnya berbahasa Inggris.
+Setiap sheet langsung berisi tabel mulai baris 1, tanpa sheet Info, judul, atau catatan (poin 41).
 Setiap tabel adalah Excel Table (filter + baris berselang), persentase disimpan sebagai pecahan
 dengan format %, selisih persentase dalam poin persen (pp).
 
@@ -46,6 +51,8 @@ from src.experiments import result_tables as rt  # noqa: E402
 # Style
 # ---------------------------------------------------------------------------
 
+D6_NOTE = ("EX per k comes from ablation.py, which runs on one model. "
+           "The values do not describe the model of this workbook unless that model ran the ablation.")
 FONT = "Arial"
 GREY = "595959"
 TABLE_STYLE = "TableStyleMedium2"
@@ -175,12 +182,16 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
     alpha = _alpha_default()
 
     logs = {c: _read_json(raw_logs_dir / f"{c}_log.json") for c in ("baseline", "graphrag")}
+    metrics = _read_json(tables_dir / "metrics_results.json")
     dims = _read_json(tables_dir / "dimensions_results.json")
+    latency_run = _read_json(tables_dir / "latency_run.json")
     confound = _read_json(tables_dir / "confound_diagnostics.json")
     spider = _read_csv(tables_dir / "spider_official_eval.csv")
     ablation = _read_csv(tables_dir / "ablation_results.csv")
     models = _read_csv(tables_dir / "model_comparison.csv")
-    trial = _read_csv(tables_dir / "sla_trial_recap.csv")
+    trial_prep = _read_csv(tables_dir / "trial_preprocessing_recap.csv")
+    trial_thr = _read_csv(tables_dir / "trial_thresholds_recap.csv")
+    trial_old = _read_csv(tables_dir / "sla_trial_recap.csv") if trial_prep is None and trial_thr is None else None
     have_logs = bool(logs["baseline"]) and bool(logs["graphrag"])
     b, g = logs["baseline"] or [], logs["graphrag"] or []
 
@@ -197,6 +208,19 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
         sh.finish(freeze_col)
         sheets.append(sh)
 
+    # Urutan sheet: ringkasan 6 metrik -> rincian metrik -> dimensi -> rincian pendukung.
+    add("Summary", [rt.metrics_summary_table(metrics)] if metrics else [], f"{tables_dir}/metrics_results.json")
+    metric_groups = rt.metric_tables(metrics) if metrics else []
+    for name, _title, tables in metric_groups:
+        add(name, tables, f"{tables_dir}/metrics_results.json")
+    if not metric_groups:
+        add("Metrics", [], f"{tables_dir}/metrics_results.json")
+
+    # Alasan skip ditulis dalam bahasa Indonesia oleh run_all_dimensions.py, jadi tidak ikut ke Excel (ada di dimensions_report.txt)
+    add("Dimensions", [rt.dim_status(dims).drop(columns="Reason")] if dims else [], f"{tables_dir}/dimensions_results.json")
+    for n in rt.DIM_NAMES:
+        add(f"D{n}", rt.DIM_TABLES[n](dims), f"dimension_{n} with status 'ok' in dimensions_results.json")
+
     raw_missing = f"{raw_logs_dir}/baseline_log.json and graphrag_log.json"
     add("Overall", [rt.overall_comparison(b, g, alpha)] if have_logs else [], raw_missing)
     add("By Difficulty", [rt.by_difficulty(b, g, alpha)] if have_logs else [], raw_missing)
@@ -206,26 +230,26 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
              rt.cm_from_logs(b, g)] if have_logs else []) + ([rt.confound_table(confound)] if confound else [])
     add("SQL Diagnostics", diag, raw_missing)
     if spider is not None:
-        spider = spider.assign(Pipeline=spider["Pipeline"].map(rt.pipeline_label))     # CSV lama masih Baseline/GraphRAG
+        spider = spider.assign(Pipeline=spider["Pipeline"].map(rt.pipeline_label))     # CSV memakai nama lama
         parsed = {lab: sub.drop(columns="Pipeline") for lab, sub in spider.groupby("Pipeline", sort=False)}
         long = rt.with_formats(spider.copy(), {c: "num3" for c in spider.columns if c not in ("Pipeline", "Section", "Metric")})
         add("Spider Official", [rt.spider_summary(parsed), long], "")
     elif not skip_missing:
         add("Spider Official", [], f"{tables_dir}/spider_official_eval.csv (written by eval_pipeline.ipynb section 14)")
     add("Per Query", [rt.per_query(b, g, alpha)] if have_logs else [], raw_missing, freeze_col="D")
-
-    # Alasan skip ditulis dalam bahasa Indonesia oleh run_all_dimensions.py, jadi tidak ikut ke Excel (ada di dimensions_report.txt)
-    add("Dimensions", [rt.dim_status(dims).drop(columns="Reason")] if dims else [], f"{tables_dir}/dimensions_results.json")
-    for n in rt.DIM_NAMES:
-        add(f"D{n}", rt.DIM_TABLES[n](dims), f"dimension_{n} with status 'ok' in dimensions_results.json")
+    add("Latency", rt.latency_tables(b, g, latency_run), raw_missing)
+    latency_rows = rt.latency_per_query(b, g)
+    add("Latency Per Query", [latency_rows] if latency_rows is not None else [], raw_missing, freeze_col="D")
 
     add("Ablation", rt.ablation_tables(ablation), f"{tables_dir}/ablation_results.csv")
     add("Models", rt.model_tables(models), f"{tables_dir}/model_comparison.csv")
-    tt = rt.sla_trial_tables(trial)
+    tt = rt.trial_tables(trial_prep, trial_thr) if trial_old is None else {**rt.sla_trial_tables(trial_old), "effects": None}
     # Kolom yang dibekukan = kolom yang mengenali baris saat digeser ke samping
-    # Trial Thresholds: Pipeline, T, K, Stopwords, Value linking (dua yang terakhir membedakan kedua preprocessing 2-stage)
-    for name, key, freeze_col in (("Trial Preprocessing", "steps", "F"), ("Trial Thresholds", "grid", "F")):
-        add(name, [tt[key]] if tt[key] is not None else [], f"{tables_dir}/sla_trial_recap.csv", freeze_col=freeze_col)
+    # (Trial Thresholds: Pipeline, T, K, Stopwords, Value linking)
+    for name, key, source, freeze_col in (("Trial Preprocessing", "steps", "trial_preprocessing_recap.csv", "F"),
+                                          ("Trial Effects", "effects", "trial_preprocessing_recap.csv", "C"),
+                                          ("Trial Thresholds", "grid", "trial_thresholds_recap.csv", "F")):
+        add(name, [tt[key]] if tt[key] is not None else [], f"{tables_dir}/{source}", freeze_col=freeze_col)
 
     if skip_missing and any(sh.has_data for sh in sheets):     # workbook butuh minimal satu sheet
         for sh in sheets:

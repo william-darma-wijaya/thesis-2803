@@ -9,7 +9,7 @@ src/metrics/esm_ex_cm.py — the same evaluator that fills pipeline.py's
 raw_logs), so EX per k is stored as a number instead of only being printed
 by the Spider CLI (closes open item D, IMPLEMENTATION_DECISIONS.md poin 28).
 
-Baseline and GraphRAG get the SAME k (the baseline is no longer zero-shot).
+GraphRAG 1-Stage and GraphRAG 2-Stage get the SAME k (the baseline is no longer zero-shot).
 Best k = highest EX; once ablation_results.csv holds both modes, the shared
 recommendation is the k with the highest mean EX of the two (ties -> smaller k).
 Run the two modes as separate processes (Kaggle time/memory):
@@ -455,7 +455,7 @@ def main(
     else:
         logger.info("Table selection (stage 1): threshold=%.2f baseline_tables_pct=%.2f (0 = no cap)",
                     cfg.table_similarity_threshold, cfg.baseline_top_k_tables_pct)
-    logger.info("Make sure the thresholds are the winners of graphrag_sla_trial.ipynb (config.py or --threshold).")
+    logger.info("Make sure the thresholds are the winners of trial_thresholds.ipynb (config.py or --threshold).")
 
     logger.info("Loading schema …")
     schema_df = load_spider_schema(cfg.tables_json)
@@ -464,7 +464,7 @@ def main(
     with open(cfg.dev_json, "r", encoding="utf-8") as f:
         dev_data = json.load(f)
 
-    # Stratified per difficulty; same subset as graphrag_sla_trial.ipynb / sweep.py at equal ratio (poin 34).
+    # Stratified per difficulty; same subset as the trial notebooks / sweep.py at equal ratio (poin 34).
     dev_subset = stratified_sample(dev_data, sample_ratio, cfg.seed)
     logger.info("Ablation subset: %d / %d questions (%.0f%% per difficulty)",
                 len(dev_subset), len(dev_data), sample_ratio * 100)
@@ -478,17 +478,18 @@ def main(
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item in dev_subset))
 
     if mode == "graphrag":
-        logger.info("Building column-level graph (GraphRAG) …")
+        logger.info("Building column-level graph (GraphRAG 2-Stage) …")
         graph = build_schema_graph(schema_df)
         cache = {
             db_id: build_schema_index(graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
             for db_id in tqdm(unique_db_ids, desc="Indexing columns")
         }
     else:  # baseline
-        logger.info("Building table-level graph (Baseline) …")
+        logger.info("Building table-level graph (GraphRAG 1-Stage) …")
         graph = build_table_graph(schema_df)
         cache = {
-            db_id: build_table_index(graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
+            db_id: build_table_index(graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names,
+                                     include_columns=cfg.baseline_embed_columns)
             for db_id in tqdm(unique_db_ids, desc="Indexing tables")
         }
     table_cols = columns_per_table(graph if mode == "graphrag" else build_schema_graph(schema_df))

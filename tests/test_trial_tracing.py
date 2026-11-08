@@ -101,7 +101,7 @@ def test_tables():
         recap_row("G7 + nama natural | T0.50/K0.70", 0.5, 0.7, 0.55),
         recap_row("G8 tanpa stopword + angka | T0.50/K0.70", 0.5, 0.7, 0.58),
         recap_row("G8 tanpa stopword + angka | T0.50/K0.75", 0.5, 0.75, 0.53),
-        recap_row("Baseline | T0.50", 0.5, None, 0.50),
+        recap_row("GraphRAG 1-Stage | T0.50", 0.5, None, 0.50),
     ])
     tables = rt.sla_trial_tables(recap)
     assert list(tables) == ["steps", "grid"]
@@ -143,7 +143,22 @@ def test_tables():
     old = rt.sla_trial_tables(recap.drop(columns=["tables_pct", "ex"]))
     assert "EX (zero-shot)" not in old["grid"].columns and "Avg tables retrieved, % of DB" not in old["grid"].columns
     assert rt.sla_trial_tables(None) == {"steps": None, "grid": None}
-    assert rt.sla_trial_tables(recap[recap["trial"].str.startswith("Baseline")])["steps"] is None
+    assert rt.sla_trial_tables(recap[recap["trial"].str.startswith("GraphRAG 1-Stage")])["steps"] is None
+
+
+def test_one_stage_trial_names():
+    # Rekap baru (poin 39) menamai baris 1-Stage "GraphRAG 1-Stage | T.." dan "GraphRAG 1-Stage+ | T..";
+    # rekap lama "Baseline | T.." dulu selalu meng-embed nama + kolom, jadi dibaca sebagai 1-stage+
+    recap = pd.DataFrame([
+        recap_row("G7 + nama natural | T0.50/K0.70", 0.5, 0.7, 0.55),
+        recap_row("GraphRAG 1-Stage | T0.50", 0.5, None, 0.50),
+        recap_row("GraphRAG 1-Stage+ | T0.50", 0.5, None, 0.48),
+        recap_row("Baseline | T0.55", 0.55, None, 0.47),
+    ])
+    grid = rt.sla_trial_tables(recap)["grid"]
+    assert list(grid["Pipeline"]) == ["1-stage", "1-stage+", "2-stage", "1-stage+"]
+    assert list(grid["EX (zero-shot)"]) == [0.50, 0.48, 0.55, 0.47]
+    assert rt.pipeline_label("GraphRAG 2-Stage") == "2-stage" and rt.pipeline_label("Baseline") == "1-stage"
 
 
 def test_preprocessing_steps():
@@ -182,7 +197,7 @@ def test_workbook_sheets():
     recap = pd.DataFrame([
         recap_row("G1 threshold saja | T0.50/K0.70", 0.5, 0.7, 0.50),
         recap_row("G7 + nama natural | T0.50/K0.70", 0.5, 0.7, 0.55),
-        recap_row("Baseline | T0.50", 0.5, None, 0.50),
+        recap_row("GraphRAG 1-Stage | T0.50", 0.5, None, 0.50),
     ])
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
@@ -202,7 +217,7 @@ def test_workbook_sheets():
         empty = d / "empty"
         empty.mkdir()
         wb = load_workbook(build_workbook(empty, empty, d / "y.xlsx", skip_missing=True))
-        assert "Info" not in wb.sheetnames and wb["Overall"]["A1"].value.startswith("Source not found")
+        assert "Info" not in wb.sheetnames and wb["Summary"]["A1"].value.startswith("Source not found")
         wb.close()
 
 
@@ -211,6 +226,7 @@ def main():
     test_median_summary()
     test_ex_scorer()
     test_tables()
+    test_one_stage_trial_names()
     test_preprocessing_steps()
     test_workbook_sheets()
     print("OK: threshold trial tracing tests passed")

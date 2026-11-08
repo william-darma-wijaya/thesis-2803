@@ -33,7 +33,8 @@ CLAUSES = ["select", "from", "where", "group_by", "order_by", "having", "keyword
 CLAUSE_LABEL = {"select": "SELECT", "from": "FROM", "where": "WHERE", "group_by": "GROUP BY",
                 "order_by": "ORDER BY", "having": "HAVING", "keywords": "Keywords",
                 "union": "UNION", "union_all": "UNION ALL", "intersect": "INTERSECT", "except": "EXCEPT"}
-# Label tampilan pipeline: Baseline = 1-stage, GraphRAG = 2-stage. Kode, raw_logs, dan CSV tetap memakai baseline/graphrag.
+# Label tampilan pipeline (keputusan peneliti, poin 41): baseline = 1-stage (GraphRAG 1-Stage), graphrag = 2-stage
+# (GraphRAG 2-Stage). Kode, raw_logs, dan CSV tetap memakai baseline/graphrag.
 CONDITIONS = (("baseline", "1-stage"), ("graphrag", "2-stage"))
 
 # kind -> (format Python untuk notebook, number_format Excel)
@@ -55,8 +56,14 @@ KINDS = {
 _DELTA_OF = {"pct": "pp", "int": "dint", "num1": "dnum1", "num3": "dnum3", "num4": "dnum4"}
 
 
+# Nama pipeline yang mungkin ada di file lama (CSV evaluator resmi, rekap trial) -> kunci kode
+_PIPELINE_ALIASES = {"baseline": "baseline", "graphrag": "graphrag", "1-stage": "baseline", "2-stage": "graphrag",
+                     "graphrag 1-stage": "baseline", "graphrag 2-stage": "graphrag"}
+
+
 def pipeline_label(mode) -> str:
-    return dict(CONDITIONS).get(str(mode).lower(), mode)
+    key = _PIPELINE_ALIASES.get(str(mode).lower())
+    return dict(CONDITIONS)[key] if key else mode
 
 
 def with_formats(df: pd.DataFrame, formats: Optional[dict] = None, row_kind: Optional[dict] = None,
@@ -232,7 +239,7 @@ _MAIN_ROWS = [
 
 def overall_comparison(baseline_logs: list, graphrag_logs: list, alpha: float,
                        stats: Optional[dict] = None) -> pd.DataFrame:
-    """Baseline vs GraphRAG, satu baris per metrik. Δ = GraphRAG − Baseline (pp untuk persentase)."""
+    """GraphRAG 1-Stage vs GraphRAG 2-Stage, satu baris per metrik. Δ = GraphRAG 2-Stage − GraphRAG 1-Stage (pp untuk persentase)."""
     stats = stats or {"baseline": condition_stats(baseline_logs, alpha), "graphrag": condition_stats(graphrag_logs, alpha)}
     b, g = stats["baseline"], stats["graphrag"]
     rows = []
@@ -321,9 +328,9 @@ def retrieval_by_difficulty(baseline_logs: list, graphrag_logs: list) -> pd.Data
 
 def token_reduction(baseline_logs: list, graphrag_logs: list, alpha: float) -> list:
     """
-    Column reduction vs token reduction vs EX, GraphRAG terhadap Baseline di query yang sama
+    Column reduction vs token reduction vs EX, GraphRAG 2-Stage terhadap GraphRAG 1-Stage di query yang sama
     (src/metrics/token_reduction.py, IMPLEMENTATION_DECISIONS.md poin 33). Reduction = 1 − ΣG/ΣB,
-    positif = GraphRAG lebih hemat. Baris token schema/non-schema butuh raw_logs dengan field
+    positif = GraphRAG 2-Stage lebih hemat. Baris token schema/non-schema butuh raw_logs dengan field
     `schema_tokens` (run sesudah 2026-11-03); log lama hanya mengisi baris kolom dan T_in.
     """
     from src.metrics import token_reduction as tr
@@ -469,6 +476,255 @@ def prediction_checks(baseline_logs: list, graphrag_logs: list) -> pd.DataFrame:
         })
     df = pd.DataFrame(rows)
     return with_formats(df, {c: "int" for c in df.columns if c != "Pipeline"}, title="Prediction checks")
+
+
+# ---------------------------------------------------------------------------
+# metrics_results.json -> tabel per metrik (1-Stage = "baseline", 2-Stage = "graphrag" di kode)
+# ---------------------------------------------------------------------------
+
+_STAGES = (("baseline", "1-stage"), ("graphrag", "2-stage"))
+
+
+def _diff_rows(values: dict, kind_key: str = "by_difficulty") -> list:
+    """Baris per difficulty + All untuk metrik berbentuk {overall, by_difficulty} per kondisi."""
+    rows = []
+    for d in DIFFICULTIES + ["all"]:
+        vb, vg = (values[c]["overall"] if d == "all" else values[c][kind_key].get(d) for c, _ in _STAGES)
+        if vb is None and vg is None:
+            continue
+        rows.append({"Difficulty": DIFF_LABEL[d], "1-stage": vb, "2-stage": vg,
+                     "Δ (2-stage − 1-stage)": None if vb is None or vg is None else (vg - vb) * 100})
+    return rows
+
+
+def _accuracy_table(values: dict, title: str) -> pd.DataFrame:
+    return with_formats(pd.DataFrame(_diff_rows(values)),
+                        {"1-stage": "pct", "2-stage": "pct", "Δ (2-stage − 1-stage)": "pp"}, title=title)
+
+
+def _sla_tables(sla: dict) -> list:
+    rows, diff_rows = [], []
+    for key, level, population in (("table", "Table", "All queries"), ("column", "Column", "All queries"),
+                                   ("column_non_empty_gold", "Column", "Non-empty gold schema")):
+        for c, label in _STAGES:
+            r = sla[c][key]
+            if r:
+                rows.append({"Variant": label, "Level": level, "Population": population,
+                             "Precision": r["precision"], "Recall": r["recall"], "F1": r["f1"]})
+    for d in DIFFICULTIES:
+        row = {"Difficulty": DIFF_LABEL[d]}
+        for c, label in _STAGES:
+            r = sla[c]["column_by_difficulty"].get(d) or {}
+            for m in ("precision", "recall", "f1"):
+                row[f"{m.capitalize()} {label}"] = r.get(m)
+        if any(not is_missing(v) for k, v in row.items() if k != "Difficulty"):
+            diff_rows.append(row)
+    pct = {"Precision": "pct", "Recall": "pct", "F1": "pct"}
+    diff_formats = {k: "pct" for row in diff_rows for k in row if k != "Difficulty"}
+    return [with_formats(pd.DataFrame(rows), pct, title="SLA: precision, recall, F1"),
+            with_formats(pd.DataFrame(diff_rows), diff_formats, title="SLA column level by difficulty")]
+
+
+def _cm_table(cm: dict) -> pd.DataFrame:
+    rows = []
+    for clause in CLAUSES:
+        vb, vg = cm["baseline"].get(clause), cm["graphrag"].get(clause)
+        rows.append({"Clause": CLAUSE_LABEL[clause], "1-stage": vb, "2-stage": vg,
+                     "Δ (2-stage − 1-stage)": None if vb is None or vg is None else (vg - vb) * 100})
+    return with_formats(pd.DataFrame(rows), {"1-stage": "pct", "2-stage": "pct", "Δ (2-stage − 1-stage)": "pp"},
+                        title="CM per clause")
+
+
+def _token_tep_tables(block: dict) -> list:
+    rows = []
+    for key, label in (("t_in", "Mean input tokens (T_in)"), ("t_out", "Mean output tokens (T_out)"),
+                       ("t_mean", "Mean token consumption (T)"), ("t_median", "Median token consumption (T)")):
+        vb, vg = block["token"]["baseline"].get(key), block["token"]["graphrag"].get(key)
+        rows.append({"Measure": label, "1-stage": vb, "2-stage": vg,
+                     "Δ (2-stage − 1-stage)": None if is_missing(vb) or is_missing(vg) else vg - vb,
+                     "Relative change": (vg - vb) / vb if not is_missing(vb) and not is_missing(vg) and vb else None})
+    diff_rows = []
+    for d in DIFFICULTIES:
+        vb = block["token"]["baseline"]["t_mean_by_difficulty"].get(d)
+        vg = block["token"]["graphrag"]["t_mean_by_difficulty"].get(d)
+        if vb is not None or vg is not None:
+            diff_rows.append({"Difficulty": DIFF_LABEL[d], "T 1-stage": vb, "T 2-stage": vg,
+                              "Δ T": None if vb is None or vg is None else vg - vb})
+    tep = block["tep"]
+    tep_row = {"Status": tep["status"], "ΔEX (pp)": tep["delta_ex"] * 100 if "delta_ex" in tep else None,
+               "ΔT": tep.get("delta_t"), "TEP": tep.get("tep"), "Reason": tep.get("reason", "")}
+    return [with_formats(pd.DataFrame(rows), {"1-stage": "num1", "2-stage": "num1", "Δ (2-stage − 1-stage)": "dnum1",
+                                              "Relative change": "rel"}, title="Token consumption"),
+            with_formats(pd.DataFrame(diff_rows), {"T 1-stage": "num1", "T 2-stage": "num1", "Δ T": "dnum1"},
+                         title="Mean token consumption by difficulty"),
+            with_formats(pd.DataFrame([tep_row]), {"ΔEX (pp)": "pp", "ΔT": "dnum1", "TEP": "num4"},
+                         title="TEP (2-stage vs 1-stage)")]
+
+
+def _qvt_table(qvt: dict) -> pd.DataFrame:
+    rows = [{"Variant": label, "Status": qvt[c]["status"], "QVT": qvt[c].get("qvt"),
+             "Queries included": qvt[c].get("queries_included"), "Queries total": qvt[c].get("queries_total"),
+             "Reason": qvt[c].get("reason", "")} for c, label in _STAGES]
+    return with_formats(pd.DataFrame(rows), {"QVT": "pct", "Queries included": "int", "Queries total": "int"}, title="QVT")
+
+
+def metrics_summary_table(results: dict) -> pd.DataFrame:
+    """Satu tabel berisi keenam metrik. CM tetap satu baris per klausa, tidak dirata-ratakan (guide 1.4)."""
+    m = results["metrics"]
+    rows = []
+
+    def add(label, vb, vg, kind, note=""):
+        delta = None
+        if not (is_missing(vb) or is_missing(vg)):
+            delta = (vg - vb) * (100 if kind == "pct" else 1)
+        rows.append({"Metric": label, "1-stage": vb, "2-stage": vg, "Difference (2-stage − 1-stage)": delta,
+                     "Note": note, "_kind": kind})
+
+    for key, label in (("table", "SLA table F1"), ("column", "SLA column F1")):
+        b, g = m["sla"]["baseline"][key] or {}, m["sla"]["graphrag"][key] or {}
+        add(label, b.get("f1"), g.get("f1"), "pct")
+    b, g = m["sla"]["baseline"]["column"] or {}, m["sla"]["graphrag"]["column"] or {}
+    add("SLA column precision", b.get("precision"), g.get("precision"), "pct")
+    add("SLA column recall", b.get("recall"), g.get("recall"), "pct")
+    add("ESM", m["esm"]["baseline"]["overall"], m["esm"]["graphrag"]["overall"], "pct")
+    add("EX", m["ex"]["baseline"]["overall"], m["ex"]["graphrag"]["overall"], "pct")
+    for clause in CLAUSES:
+        vb, vg = m["cm"]["baseline"].get(clause), m["cm"]["graphrag"].get(clause)
+        if vb is not None or vg is not None:
+            add(f"CM {CLAUSE_LABEL[clause]}", vb, vg, "pct")
+    token = m["token_tep"]["token"]
+    add("Mean input tokens (T_in)", token["baseline"].get("t_in"), token["graphrag"].get("t_in"), "num1")
+    add("Mean output tokens (T_out)", token["baseline"].get("t_out"), token["graphrag"].get("t_out"), "num1")
+    add("Mean token consumption (T)", token["baseline"].get("t_mean"), token["graphrag"].get("t_mean"), "num1")
+    tep = m["token_tep"]["tep"]
+    add("TEP (2-stage vs 1-stage)", None, tep.get("tep"), "num4", tep.get("reason", ""))
+    qvt_b, qvt_g = m["qvt"]["baseline"], m["qvt"]["graphrag"]
+    add("QVT", qvt_b.get("qvt"), qvt_g.get("qvt"), "pct", qvt_g.get("reason", ""))
+    return with_formats(pd.DataFrame(rows), {},
+                        {"cols": ["1-stage", "2-stage", "Difference (2-stage − 1-stage)"],
+                         "delta": ["Difference (2-stage − 1-stage)"]},
+                        "Six metrics: 1-stage vs 2-stage")
+
+
+def metric_tables(results: dict) -> list:
+    """[(nama sheet, judul, [tabel])] untuk keenam metrik, berurutan, dipakai notebook DAN Excel."""
+    m = results["metrics"]
+    return [
+        ("M1 SLA", "Metric 1: Schema Linking Accuracy (SLA)", _sla_tables(m["sla"])),
+        ("M2 ESM", "Metric 2: Exact Set Match (ESM)", [_accuracy_table(m["esm"], "ESM by difficulty")]),
+        ("M3 EX", "Metric 3: Execution Accuracy (EX)", [_accuracy_table(m["ex"], "EX by difficulty")]),
+        ("M4 CM", "Metric 4: Component Match (CM)", [_cm_table(m["cm"])]),
+        ("M5 Token TEP", "Metric 5: Token Consumption and TEP", _token_tep_tables(m["token_tep"])),
+        ("M6 QVT", "Metric 6: Query Variance Testing (QVT)", [_qvt_table(m["qvt"])]),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Latensi per tahap (lampiran, bukan salah satu dari 6 metrik; poin 37)
+# ---------------------------------------------------------------------------
+
+LATENCY_NOTE = ("Appendix, not one of the six metrics. Times are in seconds and depend on the GPU of the run. "
+                "The first question of a run is left out of the statistics (model warm-up); failed generations are left out too. "
+                "End-to-end excludes proxy evaluation, T_in counting, and SQL evaluation.")
+LATENCY_STEPS = {
+    "stage1_tables": "Stage 1: select tables", "stage2_columns": "Stage 2: select columns",
+    "value_linking": "Value linking", "traversal": "Graph traversal",
+    "table_linking": "Select tables", "path_tracing": "Table path tracing",
+    "retrieval_search": "Schema search (sum of the steps above)", "build_ddl": "Build DDL",
+    "retrieval_total": "Total retrieval (search + DDL)", "few_shot": "Few-shot retrieval", "build_prompt": "Build prompt",
+    "prompt_tokenize": "Tokenize prompt for the LLM", "llm_generate": "LLM generation", "sql_clean": "Decode and clean SQL",
+    "end_to_end": "End-to-end", "count_t_in": "Count T_in (not in end-to-end)",
+    "proxy_eval": "Proxy evaluation (not in end-to-end)", "evaluation": "ESM, EX, CM evaluation (not in end-to-end)",
+}
+_LATENCY_FORMATS = {"Queries": "int", "Mean (s)": "num3", "Median (s)": "num3", "P95 (s)": "num3"}
+
+
+def _latency_entries(logs: list) -> list:
+    return [e for e in (logs[1:] if len(logs) > 1 else logs) if e.get("latency")]
+
+
+def _latency_row(values: list) -> dict:
+    s = pd.Series(values, dtype=float)
+    return {"Queries": len(s), "Mean (s)": s.mean(), "Median (s)": s.median(), "P95 (s)": s.quantile(0.95)}
+
+
+def _latency_by_step(logs_by_stage: dict) -> pd.DataFrame:
+    rows = []
+    for c, label in _STAGES:
+        entries = _latency_entries(logs_by_stage[c])
+        for key, name in LATENCY_STEPS.items():
+            values = [e["latency"][key] for e in entries if key in e["latency"]]
+            if values:
+                rows.append({"Variant": label, "Step": name, **_latency_row(values)})
+    return with_formats(pd.DataFrame(rows), _LATENCY_FORMATS, title="Per-question latency by step")
+
+
+def _latency_by_difficulty(logs_by_stage: dict) -> pd.DataFrame:
+    rows = []
+    for c, label in _STAGES:
+        entries = _latency_entries(logs_by_stage[c])
+        for d in DIFFICULTIES:
+            subset = [e for e in entries if e["difficulty"] == d]
+            for key, name in LATENCY_STEPS.items():
+                values = [e["latency"][key] for e in subset if key in e["latency"]]
+                if values:
+                    rows.append({"Variant": label, "Difficulty": DIFF_LABEL[d], "Step": name, **_latency_row(values)})
+    return with_formats(pd.DataFrame(rows), _LATENCY_FORMATS, title="Per-question latency by difficulty")
+
+
+def _latency_derived(logs_by_stage: dict) -> pd.DataFrame:
+    rows = []
+    for c, label in _STAGES:
+        entries = _latency_entries(logs_by_stage[c])
+        if not entries:
+            continue
+
+        def total(key):
+            return sum(e["latency"].get(key, 0.0) for e in entries)
+
+        generate, end_to_end = total("llm_generate"), total("end_to_end")
+        rows.append({
+            "Variant": label,
+            "Output tokens per second": sum(e["token_output"] for e in entries) / generate if generate else None,
+            "Input tokens per generation second": sum(e["token_input"] for e in entries) / generate if generate else None,
+            "Retrieval share of end-to-end": total("retrieval_total") / end_to_end if end_to_end else None,
+            "Generation share of end-to-end": generate / end_to_end if end_to_end else None,
+        })
+    return with_formats(pd.DataFrame(rows), {"Output tokens per second": "num1", "Input tokens per generation second": "num1",
+                                             "Retrieval share of end-to-end": "pct", "Generation share of end-to-end": "pct"},
+                        title="Derived latency measures")
+
+
+def _latency_run_table(run: dict) -> pd.DataFrame:
+    rows = [{"Item": name, "Value": f"{seconds:,.3f} s"} for name, seconds in run.get("steps", {}).items()]
+    if run.get("elapsed_s") is not None:
+        rows.append({"Item": "Elapsed, first timed step to saving this file", "Value": f"{run['elapsed_s']:,.1f} s"})
+    rows.append({"Item": "GPU", "Value": str(run.get("gpu"))})
+    if run.get("peak_vram_gb") is not None:
+        rows.append({"Item": "Peak VRAM allocated", "Value": f"{run['peak_vram_gb']:.2f} GB"})
+    return with_formats(pd.DataFrame(rows), title="One-time steps, GPU, and peak VRAM")
+
+
+def latency_tables(baseline_logs: list, graphrag_logs: list, run: Optional[dict] = None) -> list:
+    """Tabel ringkasan latensi. raw_logs lama tanpa field latency -> tabel per pertanyaan dilewati."""
+    tables = [_latency_run_table(run)] if run else []
+    logs = {"baseline": baseline_logs, "graphrag": graphrag_logs}
+    if _latency_entries(baseline_logs) or _latency_entries(graphrag_logs):
+        tables += [_latency_by_step(logs), _latency_derived(logs), _latency_by_difficulty(logs)]
+    return tables
+
+
+def latency_per_query(baseline_logs: list, graphrag_logs: list) -> Optional[pd.DataFrame]:
+    """Satu baris per pertanyaan dan varian, semua tahap dalam detik. Pertanyaan pertama tetap ditampilkan."""
+    rows = []
+    for (_, label), logs in zip(_STAGES, (baseline_logs, graphrag_logs)):
+        for e in logs:
+            if e.get("latency"):
+                rows.append({"Query ID": e["query_id"], "DB": e["db_id"], "Variant": label, "Difficulty": DIFF_LABEL[e["difficulty"]],
+                             **{name: e["latency"].get(key) for key, name in LATENCY_STEPS.items()}})
+    if not rows:
+        return None
+    return with_formats(pd.DataFrame(rows), {name: "num3" for name in LATENCY_STEPS.values()}, title="Latency per question")
 
 
 def cm_from_logs(baseline_logs: list, graphrag_logs: list) -> pd.DataFrame:
@@ -665,7 +921,8 @@ def dim2_tables(dims: Optional[dict]) -> list:
     for d in ["overall"] + DIFFICULTIES:
         get = (lambda c: e[c]["overall"]) if d == "overall" else (lambda c, d=d: e[c]["by_difficulty"].get(d))
         b, g = get("baseline"), get("graphrag")
-        if not b or not g:
+        # Tingkat kesulitan tanpa query (mis. pada sampel kecil) bernilai None.
+        if not b or not g or b["esm"] is None or g["esm"] is None:
             continue
         rows.append({"Difficulty": "All" if d == "overall" else DIFF_LABEL[d],
                      "ESM 1-stage": b["esm"] / 100, "ESM 2-stage": g["esm"] / 100, "Δ ESM": g["esm"] - b["esm"],
@@ -905,6 +1162,12 @@ def preprocessing_steps(recap: pd.DataFrame) -> Optional[pd.DataFrame]:
                                          f"/K{first['column_threshold'].iloc[0]:.2f}")
 
 
+def _trial_pipeline(trial: str) -> str:
+    if trial.startswith("GraphRAG 1-Stage+ ") or trial.startswith("Baseline "):
+        return pipeline_label("baseline") + "+"
+    return pipeline_label("baseline" if trial.startswith("GraphRAG 1-Stage ") else "graphrag")
+
+
 def sla_trial_tables(recap: Optional[pd.DataFrame]) -> dict:
     """Satu tabel per sheet Excel: riwayat preprocessing dan grid threshold; None kalau belum ada. Baris dikenali dari id trial di CSV."""
     if recap is None or recap.empty:
@@ -917,12 +1180,70 @@ def sla_trial_tables(recap: Optional[pd.DataFrame]) -> dict:
     same_pair = pd.MultiIndex.from_frame(recap[["table_threshold", "column_threshold"]]).isin(
         pd.MultiIndex.from_frame(recap.loc[ladder, ["table_threshold", "column_threshold"]]))
     steps = recap[ladder | (final & same_pair)]
+    # Baris 1-Stage: "GraphRAG 1-Stage | T.." (nama tabel saja, poin 39) dan "GraphRAG 1-Stage+ | T.." (nama + kolom).
+    # Rekap lama menulis "Baseline | T..", yang dulu selalu meng-embed nama + kolom, jadi dibaca sebagai 1-Stage+.
+    one_stage = recap["trial"].str.match(r"GraphRAG 1-Stage\+? \||Baseline \|")
     # 1-stage (tanpa K) di atas 2-stage pada T yang sama; stable: G7 sebelum G8 di (T, K) yang sama
-    grid = recap[final | recap["trial"].str.match("Baseline")].sort_values(
+    grid = recap[final | one_stage].sort_values(
         ["table_threshold", "column_threshold"], na_position="first", kind="stable")
-    grid = grid.assign(pipeline=grid["trial"].map(lambda t: pipeline_label("baseline" if t.startswith("Baseline") else "graphrag")))
+    grid = grid.assign(pipeline=grid["trial"].map(_trial_pipeline))
     # Tanpa kolom Trial: baris preprocessing sudah dibedakan oleh kolom pengaturannya
     step_spec = _TRIAL_SETTINGS + _TRIAL_THRESHOLDS + _TRIAL_MEASURES
     grid_spec = [("pipeline", "Pipeline", None, None), *_TRIAL_THRESHOLDS, *_TRIAL_SETTINGS, *_TRIAL_MEASURES]
     return {"steps": _select(steps, step_spec, "Threshold trial · preprocessing steps") if len(steps) else None,
             "grid": _select(grid, grid_spec, "Threshold trial · threshold grid") if len(grid) else None}
+
+
+# ---------------------------------------------------------------------------
+# Trial dua notebook (poin 42): trial_preprocessing.ipynb dan trial_thresholds.ipynb
+# ---------------------------------------------------------------------------
+
+# Ukuran yang dirangkum per nilai langkah: (kolom rekap, nama, kind rata-rata, kind selisih, skala selisih)
+_EFFECT_MEASURES = [("ex", "EX (zero-shot)", "pct", "pp", 100), ("col_R_ne", "Column R (non-empty gold)", "pct", "pp", 100),
+                    ("col_P_ne", "Column P (non-empty gold)", "pct", "pp", 100),
+                    ("prompt_tokens_k0", "prompt tokens (k=0)", "num1", "dnum1", 1)]
+
+
+def preprocessing_effects(recap: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """
+    Efek utama tiap langkah preprocessing atas semua kombinasi: rata-rata ukuran untuk setiap nilai langkah,
+    dan selisihnya terhadap nilai pertama langkah itu (acuan "mati", urutan nilai di notebook). Pada desain
+    faktorial penuh, selisih ini = rata-rata efek mengganti satu langkah dengan langkah lain tetap sama.
+    Hanya angka; tidak memilih kombinasi.
+    """
+    if recap is None or recap.empty:
+        return None
+    df = _english_settings(recap)
+    measures = [m for m in _EFFECT_MEASURES if m[0] in df.columns]
+    rows, fmts = [], {"Configurations": "int"}
+    for field, header, _, _ in _TRIAL_SETTINGS:
+        values = list(dict.fromkeys(df[field])) if field in df.columns else []
+        if len(values) < 2:
+            continue
+        ref = df[df[field] == values[0]]
+        for v in values:
+            sub = df[df[field] == v]
+            r = {"Step": header, "Value": v, "Compared with": values[0], "Configurations": len(sub)}
+            for col, name, kind, dkind, scale in measures:
+                avg = sub[col].mean()
+                r[f"Avg {name}"], fmts[f"Avg {name}"] = avg, kind
+                r[f"Δ {name}"], fmts[f"Δ {name}"] = (avg - ref[col].mean()) * scale, dkind
+            rows.append(r)
+    return with_formats(pd.DataFrame(rows), fmts, title="Preprocessing trial · effect of each step") if rows else None
+
+
+def trial_tables(preprocessing: Optional[pd.DataFrame], thresholds: Optional[pd.DataFrame]) -> dict:
+    """Tabel sheet Trial Preprocessing, Trial Effects, dan Trial Thresholds dari rekap kedua notebook trial."""
+    out = dict.fromkeys(("steps", "effects", "grid"))
+    if preprocessing is not None and not preprocessing.empty:
+        out["steps"] = _select(_english_settings(preprocessing), _TRIAL_SETTINGS + _TRIAL_THRESHOLDS + _TRIAL_MEASURES,
+                               "Preprocessing trial · all combinations")
+        out["effects"] = preprocessing_effects(preprocessing)
+    if thresholds is not None and not thresholds.empty:
+        # 1-stage (tanpa K) di atas 2-stage pada T yang sama; stable: urutan preprocessing notebook tetap
+        grid = _english_settings(thresholds).sort_values(["table_threshold", "column_threshold"], na_position="first",
+                                                         kind="stable")
+        grid = grid.assign(pipeline=grid["pipeline"].map(pipeline_label))
+        out["grid"] = _select(grid, [("pipeline", "Pipeline", None, None), *_TRIAL_THRESHOLDS, *_TRIAL_SETTINGS,
+                                     *_TRIAL_MEASURES], "Threshold trial · threshold grid")
+    return out

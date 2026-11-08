@@ -55,9 +55,9 @@ class PipelineConfig:
     # --- Schema Linking ---
     # GraphRAG: the two thresholds below are the ONLY retrieval choices. Every other
     # GraphRAG schema-linking field in this section is fixed PREPROCESSING (researcher
-    # decision 2026-10-19, picked by SLA in notebooks/graphrag_sla_trial.ipynb, trial
-    # G7). Their flags exist only so that notebook can reproduce trials G1-G7; do not
-    # change them for experiments.
+    # decision 2026-10-19, picked by SLA in the SLA trial, trial
+    # G7). Their flags exist only so notebooks/trial_preprocessing.ipynb can run every combination and
+    # notebooks/trial_thresholds.ipynb can switch them; do not change them for experiments.
     #
     # Minimum cosine similarity (best n-gram match) for a column to be kept (Stage 2).
     semantic_similarity_threshold: float = 0.70
@@ -105,6 +105,11 @@ class PipelineConfig:
     # ORIGINAL names ("stuid"); True = Spider's annotated natural names from
     # tables.json ("student id"). SQL, DDL and node ids always use the original names.
     embed_natural_names: bool = True             # preprocessing (fixed)
+    # Baseline (1-Stage) Stage-1 table text. False (default, head-to-head) = the table
+    # NAME only, exactly what GraphRAG Stage 1 embeds, so both arms pick tables with the
+    # same scores and the same threshold. True = "table <name> columns <c1> <c2> ..."
+    # ("1-Stage+", a stronger baseline; its scores are diluted, so tune its own threshold).
+    baseline_embed_columns: bool = False
 
     # --- Value linking (GraphRAG, exact match; src/retrieval/value_linking.py) ---
     # Question n-grams that exactly equal a cell value ("asia") add that column
@@ -117,7 +122,7 @@ class PipelineConfig:
     value_max_columns_per_value: int = 3     # value in more columns than this = too common, ignored
     value_max_linked_columns: int = 5        # max columns added per question
     # Numbers ("played in 2013" -> matches.year). Off (fixed): in the SLA trial they
-    # added more false positives than recall (graphrag_sla_trial.ipynb, G4).
+    # added more false positives than recall (SLA trial, G4; see notebooks/trial_preprocessing.ipynb).
     value_link_numbers: bool = False
     value_max_columns_per_number: int = 2    # stricter than text: small numbers sit in many columns
     value_number_skip_after: list[str] = field(default_factory=lambda: [
@@ -182,6 +187,15 @@ class PipelineConfig:
     def __post_init__(self) -> None:
         self.validate()
 
+    def resolve_llm_model(self, name: str) -> str:
+        """Short name -> full model id: "14B" -> "Qwen/Qwen2.5-Coder-14B-Instruct". A full id is returned as is."""
+        if "/" in name:
+            return name
+        matches = [m for m in self.llm_model_frame if f"-{name.upper()}-" in m]
+        if len(matches) != 1:
+            raise ValueError(f"Unknown model {name!r}; choose from llm_model_frame: {self.llm_model_frame}")
+        return matches[0]
+
     def validate(self) -> None:
         """Catch old absolute top-k values (e.g. 3) left in the pct fields."""
         for name in ("top_k_tables_pct", "top_k_columns_pct", "baseline_top_k_tables_pct"):
@@ -200,6 +214,14 @@ class PipelineConfig:
             raise ValueError(f"few_shot_selection must be 'question' or 'skeleton', got {self.few_shot_selection!r}")
 
 
+def _str2bool(value: str) -> bool:
+    if value.lower() in ("true", "1", "yes"):
+        return True
+    if value.lower() in ("false", "0", "no"):
+        return False
+    raise ValueError(f"expected true|false, got {value!r}")
+
+
 # CLI overrides shared by pipeline.py and ablation.py, so a Kaggle run can use
 # the stage 1/2 winners before they are committed to the defaults above.
 _CLI_OVERRIDES = (
@@ -213,6 +235,8 @@ _CLI_OVERRIDES = (
     ("--few-shot-k", "few_shot_k", int),
     ("--few-shot-selection", "few_shot_selection", str),
     ("--llm-model", "llm_model", str),
+    ("--baseline-embed-columns", "baseline_embed_columns", _str2bool),
+    ("--value-linking", "use_value_linking", _str2bool),
 )
 
 

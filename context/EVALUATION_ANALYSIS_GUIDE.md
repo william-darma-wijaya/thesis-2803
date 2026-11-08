@@ -6,6 +6,8 @@
 
 ## 0. Konteks Riset
 
+> **Status penamaan (poin 38):** di dokumen ini, "Baseline"/B berarti **GraphRAG 1-Stage** dan "GraphRAG"/G berarti **GraphRAG 2-Stage**. Keduanya metode peneliti. Baseline skripsi yang sebenarnya adalah **DAIL-SQL**, yang belum diimplementasikan.
+
 - **Perbandingan:** Baseline RAG (vector-only retrieval) vs Graph-Based RAG (GraphRAG dengan schema-to-graph + graph traversal)
 - **Dataset:** SPIDER dev set (SQLite), stratifikasi difficulty: Easy, Medium, Hard, Extra Hard
 - **Model:** Qwen2.5-Coder-7B-Instruct (via Ollama)

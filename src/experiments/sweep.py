@@ -2,14 +2,14 @@
 Top-k fraction sweep, ranked by SLA (no LLM). REFERENCE ONLY since poin 30/32:
 both pipelines now select tables by threshold with no top-k cap, so nothing is
 written back to cfg (best_config() == {}). The thresholds are tuned in
-notebooks/graphrag_sla_trial.ipynb.
+notebooks/trial_thresholds.ipynb.
 
 Grid (both from config.py's top_k_frame, see IMPLEMENTATION_DECISIONS.md poin 28):
-    GraphRAG : top_k_tables_pct x top_k_columns_pct   (cross product, 16 configs)
-    Baseline : baseline_top_k_tables_pct              (a cap on top of the table
+    GraphRAG 2-Stage : top_k_tables_pct x top_k_columns_pct   (cross product, 16 configs)
+    GraphRAG 1-Stage : baseline_top_k_tables_pct              (a cap on top of the table
                                                        threshold, 4 configs)
 semantic_similarity_threshold stays at the config value unless --thresholds is
-given (GraphRAG only).
+given (GraphRAG 2-Stage only).
 
 Every config is scored with the reportable Schema Linking Accuracy
 (src/metrics/sla.py, NOT the name-matching proxy of retrieval.py): the exact
@@ -94,7 +94,7 @@ class SweepResult:
     col_f1:             float
     avg_tables_sent:    float
     avg_cols_sent:      float          # columns in the prompt ("table.column" count)
-    avg_cols_candidate: float | None   # GraphRAG: columns of the Stage-1 tables
+    avg_cols_candidate: float | None   # GraphRAG 2-Stage: columns of the Stage-1 tables
     avg_cols_db:        float          # columns in the whole database
     n_samples:          int
 
@@ -189,10 +189,10 @@ def best_config(results: list[SweepResult], rank_by: str) -> dict:
     Winners as {PipelineConfig field: value}, ready for setattr(cfg, ...).
 
     Always empty: both pipelines select tables by threshold with no top-k cap
-    (fixed preprocessing, config.py "Schema Linking"; the Baseline follows
-    GraphRAG Stage 1, poin 32), so the top-k grid rows are printed for reference
+    (fixed preprocessing, config.py "Schema Linking"; the GraphRAG 1-Stage follows
+    GraphRAG 2-Stage Stage 1, poin 32), so the top-k grid rows are printed for reference
     but never written back to cfg. The table/column thresholds are tuned in
-    notebooks/graphrag_sla_trial.ipynb.
+    notebooks/trial_thresholds.ipynb.
     """
     return {}
 
@@ -276,23 +276,24 @@ def run_sweep(
     unique_db_ids = list(dict.fromkeys(item["db_id"] for item, _ in samples))
     col_cache = {db_id: build_schema_index(col_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
                  for db_id in tqdm(unique_db_ids, desc="Indexing columns")}
-    tbl_cache = {db_id: build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names)
+    tbl_cache = {db_id: build_table_index(tbl_graph, db_id, embed_model, use_natural_names=cfg.embed_natural_names,
+                                          include_columns=cfg.baseline_embed_columns)
                  for db_id in tqdm(unique_db_ids, desc="Indexing tables")}
     n_cols_db = {db_id: len(table_nodes_to_schema(tbl_graph, _all_table_nodes(tbl_graph, db_id)))
                  for db_id in unique_db_ids}
 
     frame = cfg.top_k_frame
     g_combos = list(product(frame, frame, thresholds))
-    logger.info("Running %d GraphRAG + %d Baseline configs …", len(g_combos), len(frame))
+    logger.info("Running %d GraphRAG 2-Stage + %d GraphRAG 1-Stage configs …", len(g_combos), len(frame))
 
     results: list[SweepResult] = []
-    for tables_pct, columns_pct, thr in tqdm(g_combos, desc="Sweep GraphRAG"):
+    for tables_pct, columns_pct, thr in tqdm(g_combos, desc="Sweep GraphRAG 2-Stage"):
         r = _run_graphrag(tables_pct, columns_pct, thr, samples, col_graph, col_cache,
                           n_cols_db, embed_model, cfg)
         results.append(r)
         logger.info("  graphrag %s -> col F1=%.2f%% R=%.2f%% | cols sent=%.1f",
                     r.label, r.col_f1 * 100, r.col_recall * 100, r.avg_cols_sent)
-    for tables_pct in tqdm(frame, desc="Sweep Baseline"):
+    for tables_pct in tqdm(frame, desc="Sweep GraphRAG 1-Stage"):
         r = _run_baseline(tables_pct, samples, tbl_graph, tbl_cache, n_cols_db, embed_model, cfg)
         results.append(r)
         logger.info("  baseline %s -> col F1=%.2f%% R=%.2f%% | cols sent=%.1f",
@@ -307,7 +308,7 @@ def run_sweep(
         print(f"  {attr} = {value}")
     print("-> Nothing to write back: both pipelines select tables by threshold with no top-k cap\n"
           "   (fixed preprocessing, poin 30/32), so these rows are for reference only.\n"
-          "   Tune the thresholds in notebooks/graphrag_sla_trial.ipynb.\n")
+          "   Tune the thresholds in notebooks/trial_thresholds.ipynb.\n")
     return results, best
 
 
@@ -331,7 +332,7 @@ if __name__ == "__main__":
     parser.add_argument("--rank-by", choices=RANK_METRICS, default="col_f1",
                         help="SLA metric that picks the winner (default: col_f1).")
     parser.add_argument("--thresholds", type=float, nargs="+", default=None,
-                        help="Also sweep semantic_similarity_threshold (GraphRAG). "
+                        help="Also sweep semantic_similarity_threshold (GraphRAG 2-Stage). "
                              "Default: only the config.py value.")
     args, unknown = parser.parse_known_args()
     run_sweep(args.sample, PipelineConfig(), args.rank_by, args.thresholds)
