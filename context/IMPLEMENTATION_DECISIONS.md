@@ -829,6 +829,18 @@ Untuk sekarang `run_all_dimensions.py` menerima angkanya manual (`--ex-per-k` / 
 
 **Belum diputuskan:** (1) tambahkan kolom `ex`/`esm` ke `ablation_results.csv` dengan cara meng-capture + parse stdout `evaluation.py` di `_run_ablation_evals()`; atau (2) pindahkan evaluasi ablation ke `esm_ex_cm.evaluate_single_query()` in-process (seperti yang sudah dilakukan `run_comparison()` di `pipeline.py`) supaya EX per k langsung tersedia sebagai angka, sekaligus menutup gap "`ablation.py` belum memproduksi raw_logs" yang sudah tercatat di CLAUDE.md; atau (3) biarkan manual — peneliti copy angka dari output Spider eval sekali saja setelah run ablation. Opsi 2 paling menyelesaikan akar masalah tapi menyentuh `ablation.py` yang jalan di Kaggle, jadi butuh konfirmasi peneliti dulu.
 
+## 41. Review PR #17: tiga bug dan tampilan Excel `main` (2026-11-08)
+
+**Tampilan workbook (keputusan peneliti, menggantikan bagian tampilan di poin 40):** susunan `main` dipakai lagi. Tidak ada sheet `Info`, tiap sheet langsung dimulai dari tabel di baris 1 tanpa judul atau catatan, dan label pipeline di semua tabel `result_tables.py` adalah `1-stage` (GraphRAG 1-Stage) dan `2-stage` (GraphRAG 2-Stage). Urutan sheet branch (`Summary`, `M1`-`M6`, dimensi, lalu rincian, latensi) tetap. Akibatnya catatan D6 (EX per k dari satu model) dan catatan latensi tidak ada lagi di workbook per model. Di `hasil_gabungan.xlsx` peringatan dan daftar run pindah ke sheet `Warnings`, dan catatan D6 ikut sebagai satu baris peringatan. Pesan konsol, teks notebook, dan teks dimensi tetap memakai nama poin 38.
+
+**Bug yang diperbaiki:**
+- **Trial notebook mengabaikan saklar teks tabel 1-Stage.** Bagian 7 dan 9 kini memakai `baseline_embed_columns` (`BASELINE_EMBED_COLUMNS` di bagian 3). `BASELINE_TEXTS` di bagian 9 bisa menjalankan nama saja (`GraphRAG 1-Stage | T..`) dan nama + kolom (`GraphRAG 1-Stage+ | T..`) di rekap yang sama; bagian 9b membandingkan dengan varian `BASELINE_EMBED_COLUMNS`.
+- **Baris 1-Stage hilang dari sheet `Trial Thresholds`.** Branch mengganti id trial menjadi `GraphRAG 1-Stage | T..`, tetapi `sla_trial_tables()` hanya mengenali `Baseline | T..`. Kini keduanya dikenali. Rekap lama `Baseline | T..` ditampilkan sebagai `1-stage+`, karena sebelum poin 39 1-Stage selalu meng-embed nama + kolom.
+- **Run percobaan menimpa raw_logs run penuh.** `model_run_dirs()` dengan `out_root` selain `outputs/` (percobaan, `outputs/trial/`) kini menaruh raw_logs dan data QVT di dalam folder model itu sendiri.
+- **Gabungan model tidak memeriksa saklar varian.** `run_metadata()` mencatat `baseline_embed_columns`, `use_value_linking`, dan knob preprocessing lain (`VARIANT_KEYS`), dan `combine_models.py` memperingatkan kalau nilainya berbeda antar model. Hasil lama tanpa field ini terbaca `None`.
+
+**Belum ditangani dari review:** latensi pertanyaan pemanasan bisa ikut statistik kalau pertanyaan pertama gagal, `torch.cuda.synchronize()` di tiap tahap, akhir baris campuran di `CLAUDE.md`, dan `tests/test_few_shot_selection.py` yang dilaporkan gagal (butuh data Spider).
+
 ### F. Baseline DAIL-SQL belum diimplementasikan
 
 **Dicatat (2026-11-07, poin 38).** Baseline skripsi adalah DAIL-SQL, dikerjakan nanti. Belum diputuskan: cara DAIL-SQL dijalankan, model dan few-shot yang dipakai supaya sebanding, metrik apa saja yang dibandingkan, dan pembanding TEP (saat ini `B` di rumus = GraphRAG 1-Stage). `combine_models.py` dan kode lain belum punya tempat untuk kondisi ketiga.

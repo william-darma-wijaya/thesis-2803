@@ -28,12 +28,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.experiments import result_tables as rt  # noqa: E402
 from src.experiments.export_excel import D6_NOTE, Sheet, _read_csv  # noqa: E402
-from src.experiments.metrics_summary import CONDITION_LABELS, CONDITIONS, RESULTS_FILENAME  # noqa: E402
+from src.experiments.metrics_summary import CONDITION_LABELS, CONDITIONS, RESULTS_FILENAME, VARIANT_KEYS  # noqa: E402
 from src.utils.timing import RUN_FILENAME  # noqa: E402
 
 # Harus sama di semua model supaya perbandingannya adil.
 COMPARABLE_KEYS = ("commit", "sample_ratio", "seed", "few_shot_k", "few_shot_selection",
-                   "table_threshold", "column_threshold", "alpha", "queries", "gpu")
+                   "table_threshold", "column_threshold", "alpha", "queries", "gpu", *VARIANT_KEYS)
 
 
 def _slug(model: str) -> str:
@@ -106,11 +106,11 @@ def summary_table(runs: dict) -> pd.DataFrame:
                 "Model": slug, "Variant": CONDITION_LABELS[c], "Queries": q[c],
                 "SLA column F1": sla.get("f1"), "ESM": m["esm"][c]["overall"], "EX": m["ex"][c]["overall"],
                 "T mean": m["token_tep"]["token"][c]["t_mean"],
-                "TEP (GraphRAG 2-Stage vs 1-Stage)": tep.get("tep") if c == "graphrag" else None,
+                "TEP (2-stage vs 1-stage)": tep.get("tep") if c == "graphrag" else None,
                 "QVT": qvt.get("qvt"),
             })
     return rt.with_formats(pd.DataFrame(rows), {"Queries": "int", "SLA column F1": "pct", "ESM": "pct", "EX": "pct",
-                                                "T mean": "num1", "TEP (GraphRAG 2-Stage vs 1-Stage)": "num4", "QVT": "pct"},
+                                                "T mean": "num1", "TEP (2-stage vs 1-stage)": "num4", "QVT": "pct"},
                            title="All models: six metrics")
 
 
@@ -141,25 +141,28 @@ def write_outputs(runs: dict, warnings: list, out_dir: Path, shared_tables_dir: 
 
     Sheet._n_tables = 0
     wb = Workbook()
-    info = Sheet(wb, "Info", "Combined results: Qwen2.5-Coder models", first=True)
-    info.table(pd.DataFrame([{"Model": s, "Full run": "Yes" if r["metrics"]["meta"].get("is_full_run") else "No",
-                              "Commit": r["metrics"]["meta"].get("commit"), "Source": str(r["path"])}
-                             for s, r in runs.items()]), "Runs")
-    info.table(pd.DataFrame({"Warning": warnings or ["None"]}), "Warnings")
-    info.finish()
+    wb.remove(wb.active)
+    # Tanpa sheet Info dan judul (poin 41): peringatan dan daftar run tetap ada, di sheet sendiri
+    notes = list(warnings) + ([D6_NOTE] if any(r["dimensions"] for r in runs.values()) else [])
+    checks = Sheet(wb, "Warnings")
+    checks.table(pd.DataFrame({"Warning": notes or ["None"]}))
+    checks.table(pd.DataFrame([{"Model": s, "Full run": "Yes" if r["metrics"]["meta"].get("is_full_run") else "No",
+                                "Commit": r["metrics"]["meta"].get("commit"), "Source": str(r["path"])}
+                               for s, r in runs.items()]))
+    checks.finish()
 
-    summary = Sheet(wb, "Summary", "Six metrics per model and variant")
+    summary = Sheet(wb, "Summary")
     summary.table(summary_table(runs))
     summary.finish()
 
-    all_metrics = Sheet(wb, "All Metrics", "Six metrics per model, one row per metric")
+    all_metrics = Sheet(wb, "All Metrics")
     for table in _concat_by_title([(s, [rt.metrics_summary_table(r["metrics"])]) for s, r in runs.items()]):
         all_metrics.table(table)
     all_metrics.finish()
 
     per_metric = [(s, rt.metric_tables(r["metrics"])) for s, r in runs.items()]
-    for idx, (sheet_name, title, _) in enumerate(per_metric[0][1]):
-        sheet = Sheet(wb, sheet_name, title)
+    for idx, (sheet_name, _title, _) in enumerate(per_metric[0][1]):
+        sheet = Sheet(wb, sheet_name)
         for table in _concat_by_title([(s, groups[idx][2]) for s, groups in per_metric]):
             sheet.table(table)
         sheet.finish()
@@ -168,7 +171,7 @@ def write_outputs(runs: dict, warnings: list, out_dir: Path, shared_tables_dir: 
         tables = [(s, rt.DIM_TABLES[n](r["dimensions"])) for s, r in runs.items() if r["dimensions"]]
         tables = _concat_by_title(tables)
         if tables:
-            sheet = Sheet(wb, f"D{n}", f"Dimension {n}: {name}", D6_NOTE if n == 6 else None)
+            sheet = Sheet(wb, f"D{n}")
             for table in tables:
                 sheet.table(table)
             sheet.finish()
@@ -176,7 +179,7 @@ def write_outputs(runs: dict, warnings: list, out_dir: Path, shared_tables_dir: 
     reduction = [(s, rt.token_reduction(*r["logs"], r["metrics"]["meta"]["alpha"]) + [rt.token_reduction_by_difficulty(*r["logs"])])
                  for s, r in runs.items() if r["logs"]]
     if reduction:
-        sheet = Sheet(wb, "Token Reduction", "Column and token reduction: GraphRAG 2-Stage vs 1-Stage")
+        sheet = Sheet(wb, "Token Reduction")
         for table in _concat_by_title(reduction):
             sheet.table(table)
         sheet.finish()
@@ -184,14 +187,14 @@ def write_outputs(runs: dict, warnings: list, out_dir: Path, shared_tables_dir: 
     latency = [(s, rt.latency_tables(*(r["logs"] or ([], [])), r["latency_run"])) for s, r in runs.items()]
     latency = _concat_by_title(latency)
     if latency:
-        sheet = Sheet(wb, "Latency", "Latency per step (appendix)", rt.LATENCY_NOTE)
+        sheet = Sheet(wb, "Latency")
         for table in latency:
             sheet.table(table)
         sheet.finish()
 
     ablation = rt.ablation_tables(_read_csv(Path(shared_tables_dir) / "ablation_results.csv"))
     if ablation:
-        sheet = Sheet(wb, "Ablation", "Ablation stage 2: few-shot k")
+        sheet = Sheet(wb, "Ablation")
         for table in ablation:
             sheet.table(table)
         sheet.finish()

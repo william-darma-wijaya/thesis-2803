@@ -704,10 +704,16 @@ def model_run_dirs(llm_model: str, out_root: Path = Path("outputs")) -> tuple[Pa
     outputs/models/Qwen2.5-Coder-3B-Instruct/, data/raw_logs/Qwen2.5-Coder-3B-Instruct/,
     data/qvt_variations/Qwen2.5-Coder-3B-Instruct/. Keeps models from overwriting
     each other and from the default (single-model) run's paths.
+
+    Any other out_root (a quick trial, outputs/trial) keeps raw_logs and QVT data
+    inside its own model folder, so a trial never overwrites a full run's raw_logs.
     """
     slug = llm_model.rstrip("/").split("/")[-1]
+    out_dir = out_root / "models" / slug
+    if Path(out_root) != Path("outputs"):
+        return out_dir, out_dir / "raw_logs", out_dir / "qvt_variations"
     return (
-        out_root / "models" / slug,
+        out_dir,
         Path("data/raw_logs") / slug,
         Path("data/qvt_variations") / slug,
     )

@@ -33,8 +33,10 @@ from src.metrics.tep import compute_tep  # noqa: E402
 from src.utils import timing  # noqa: E402
 
 CONDITIONS = ("baseline", "graphrag")
-CONDITION_LABELS = {"baseline": "GraphRAG 1-Stage", "graphrag": "GraphRAG 2-Stage"}
+CONDITION_LABELS = {"baseline": "1-stage", "graphrag": "2-stage"}
 RESULTS_FILENAME = "metrics_results.json"
+VARIANT_KEYS = ("baseline_embed_columns", "use_value_linking", "value_link_numbers", "query_stopword_mode",
+                "traversal_mode", "connect_no_pk_tables", "embed_natural_names", "max_ngram")
 
 
 def _mean(values: list) -> Optional[float]:
@@ -162,6 +164,8 @@ def run_metadata(cfg, sample_ratio: float) -> dict:
         "few_shot_selection": cfg.few_shot_selection,
         "table_threshold": cfg.table_similarity_threshold,
         "column_threshold": cfg.semantic_similarity_threshold,
+        # Saklar varian dan preprocessing (poin 30, 39): beda nilai = hasil antar model tidak sebanding
+        **{key: getattr(cfg, key, None) for key in VARIANT_KEYS},
         "gpu": timing.gpu_name(),
         "generated_at": f"{datetime.now():%Y-%m-%d %H:%M}",
     }

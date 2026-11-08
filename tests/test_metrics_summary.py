@@ -69,12 +69,12 @@ def test_summary_table_has_all_six_metrics_in_one_table():
     with tempfile.TemporaryDirectory() as d:
         table = rt.metrics_summary_table(build_metrics_results(BASELINE, GRAPHRAG, 3.0, qvt_dir=_qvt_dir(Path(d))))
     rows = table.set_index("Metric")
-    for metric in ("SLA column F1", "ESM", "EX", "CM SELECT", "CM WHERE", "Mean token consumption (T)", "TEP (GraphRAG 2-Stage vs 1-Stage)", "QVT"):
+    for metric in ("SLA column F1", "ESM", "EX", "CM SELECT", "CM WHERE", "Mean token consumption (T)", "TEP (2-stage vs 1-stage)", "QVT"):
         assert metric in rows.index, metric
     assert "CM HAVING" not in rows.index  # klausa tanpa nilai tidak ditampilkan
-    assert abs(rows.loc["EX", "Difference (GraphRAG 2-Stage − GraphRAG 1-Stage)"] - 50.0) < 1e-9
-    assert rows.loc["Mean token consumption (T)", "Difference (GraphRAG 2-Stage − GraphRAG 1-Stage)"] == -50
-    assert abs(rows.loc["TEP (GraphRAG 2-Stage vs 1-Stage)", "GraphRAG 2-Stage"] - (-2.6)) < 1e-9
+    assert abs(rows.loc["EX", "Difference (2-stage − 1-stage)"] - 50.0) < 1e-9
+    assert rows.loc["Mean token consumption (T)", "Difference (2-stage − 1-stage)"] == -50
+    assert abs(rows.loc["TEP (2-stage vs 1-stage)", "2-stage"] - (-2.6)) < 1e-9
     trial = rt.metrics_summary_table(build_metrics_results(BASELINE, GRAPHRAG, 3.0)).set_index("Metric")
     assert "run penuh" in trial.loc["QVT", "Note"]
 
@@ -89,14 +89,14 @@ def test_qvt_and_tep_not_available():
     assert stale["metrics"]["qvt"]["graphrag"]["status"] == "not_available"
 
 
-def _write_run(root: Path, model: str, sample_ratio=1.0, k=3, with_tep=True) -> None:
+def _write_run(root: Path, model: str, sample_ratio=1.0, k=3, with_tep=True, variants=None) -> None:
     slug = model.split("/")[-1]
     tables = root / slug / "tables"
     logs = root / slug / "raw_logs"
     logs.mkdir(parents=True)
     g = GRAPHRAG if with_tep else BASELINE
     meta = {"llm_model": model, "sample_ratio": sample_ratio, "is_full_run": sample_ratio >= 1.0, "commit": "abc",
-            "seed": 42, "few_shot_k": k, "few_shot_selection": "skeleton", "table_threshold": 0.6, "column_threshold": 0.7}
+            "seed": 42, "few_shot_k": k, "few_shot_selection": "skeleton", "table_threshold": 0.6, "column_threshold": 0.7, **(variants or {})}
     save_metrics_results(build_metrics_results(BASELINE, g, 3.0, meta=meta), tables)
     (logs / "baseline_log.json").write_text(json.dumps(BASELINE), encoding="utf-8")
     (logs / "graphrag_log.json").write_text(json.dumps(g), encoding="utf-8")
@@ -110,7 +110,8 @@ def test_excel_has_metric_sheets_in_order():
         out = build_workbook(run / "raw_logs", run / "tables", run / "tables" / "hasil.xlsx")
         wb = load_workbook(out)
         names = wb.sheetnames
-        assert names[:8] == ["Info", "Summary", "M1 SLA", "M2 ESM", "M3 EX", "M4 CM", "M5 Token TEP", "M6 QVT"]
+        assert names[:7] == ["Summary", "M1 SLA", "M2 ESM", "M3 EX", "M4 CM", "M5 Token TEP", "M6 QVT"]   # tanpa Info
+        assert all(any(t.ref.startswith("A1:") for t in wb[n].tables.values()) for n in names if wb[n].tables)
         assert names.index("M6 QVT") < names.index("Dimensions") < names.index("Overall")
         assert any("TEP" in str(c.value) for row in wb["M5 Token TEP"].iter_rows() for c in row)
         wb.close()
@@ -146,7 +147,7 @@ def test_latency_tables_skip_first_and_failed_question():
     tables = rt.latency_tables(logs, _with_latency(GRAPHRAG + GRAPHRAG, 2), run)
     assert len(tables) == 4
     by_step = tables[1]
-    row = by_step[(by_step["Variant"] == "GraphRAG 1-Stage") & (by_step["Step"] == "LLM generation")].iloc[0]
+    row = by_step[(by_step["Variant"] == "1-stage") & (by_step["Step"] == "LLM generation")].iloc[0]
     assert row["Queries"] == 2 and row["Mean (s)"] == 2.5   # pertanyaan ke-1 dan ke-4 tidak dihitung
     assert rt.latency_tables(BASELINE, GRAPHRAG) == []      # raw_logs lama tetap terbaca
     assert rt.latency_per_query(BASELINE, GRAPHRAG) is None
@@ -183,11 +184,11 @@ def test_combine_three_models():
         assert all("dimensions_results.json" in w for w in warnings), warnings
         table = cm.summary_table(runs)
         assert len(table) == 6
-        assert table["TEP (GraphRAG 2-Stage vs 1-Stage)"].notna().sum() == 3
+        assert table["TEP (2-stage vs 1-stage)"].notna().sum() == 3
         json_path, xlsx_path = cm.write_outputs(runs, warnings, Path(d) / "out", Path(d) / "none")
         assert set(json.loads(json_path.read_text(encoding="utf-8"))["models"]) == set(runs)
         wb = load_workbook(xlsx_path)
-        assert wb.sheetnames[:4] == ["Info", "Summary", "All Metrics", "M1 SLA"]
+        assert wb.sheetnames[:4] == ["Warnings", "Summary", "All Metrics", "M1 SLA"]
         assert "Token Reduction" in wb.sheetnames
         wb.close()
 
@@ -200,6 +201,12 @@ def test_combine_flags_incomparable_and_duplicate_runs():
         warnings = cm.find_warnings(cm.load_runs(root), ["Qwen/Qwen2.5-Coder-7B-Instruct"])
         text = "\n".join(warnings)
         assert "7B" in text and "run percobaan" in text and "few_shot_k" in text and "sample_ratio" in text
+
+        # Saklar varian yang berbeda antar model harus diperingatkan (poin 39)
+        other = Path(d) / "variants"
+        _write_run(other, "Qwen/Qwen2.5-Coder-3B-Instruct", variants={"use_value_linking": True})
+        _write_run(other, "Qwen/Qwen2.5-Coder-7B-Instruct", variants={"use_value_linking": False})
+        assert any("use_value_linking" in w for w in cm.find_warnings(cm.load_runs(other)))
 
         _write_run(root / "copy", "Qwen/Qwen2.5-Coder-3B-Instruct")
         try:

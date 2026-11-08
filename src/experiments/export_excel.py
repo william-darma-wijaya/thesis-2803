@@ -1,7 +1,7 @@
 """
 export_excel.py — rangkum seluruh hasil run jadi SATU workbook Excel untuk dokumentasi.
 
-Membaca (yang tidak ada dilewati; statusnya ditulis di sheet "Info"):
+Membaca (sheet yang sumbernya tidak ada hanya berisi catatan "Source not found", atau dibuang dengan --skip-missing):
     data/raw_logs/{baseline,graphrag}_log.json      -> Overall, By Difficulty, Retrieval, SQL Diagnostics, Per Query
     outputs/tables/metrics_results.json             -> M1..M6, satu sheet per metrik (metrics_summary.py)
     outputs/tables/latency_run.json                 -> Latency (src/utils/timing.py)
@@ -16,6 +16,7 @@ Tabelnya dibangun oleh src/experiments/result_tables.py, modul yang SAMA dengan 
 eval_pipeline.ipynb, jadi angka notebook dan workbook identik. Isinya hanya angka faktual:
 teks interpretasi/kesimpulan dari dimensions_results.json tidak ikut diekspor.
 
+Setiap sheet langsung berisi tabel mulai baris 1, tanpa sheet Info, judul, atau catatan (poin 41).
 Setiap tabel adalah Excel Table (filter + baris berselang), persentase disimpan sebagai pecahan
 dengan format %, selisih persentase dalam poin persen (pp).
 
@@ -31,7 +32,6 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -51,7 +51,7 @@ from src.experiments import result_tables as rt  # noqa: E402
 D6_NOTE = ("EX per k comes from ablation.py, which runs on one model. "
            "The values do not describe the model of this workbook unless that model ran the ablation.")
 FONT = "Arial"
-NAVY, GREY = "1F3864", "595959"
+GREY = "595959"
 TABLE_STYLE = "TableStyleMedium2"
 TEXT_WIDTH_CAP = 60      # kolom teks panjang (SQL) dipotong lebarnya, tidak di-wrap
 NUM_WIDTH = 12
@@ -70,13 +70,12 @@ def _cell_value(v):
 
 
 class Sheet:
-    """Satu worksheet: judul, catatan, lalu satu atau lebih tabel (masing-masing Excel Table)."""
+    """Satu worksheet: satu atau lebih tabel (masing-masing Excel Table), dimulai dari baris 1."""
 
     _n_tables = 0   # nama Excel Table harus unik di seluruh workbook
 
-    def __init__(self, wb: Workbook, name: str, title: str, note: str | None = None, first: bool = False):
-        self.ws = wb.active if first else wb.create_sheet()
-        self.ws.title = name
+    def __init__(self, wb: Workbook, name: str):
+        self.ws = wb.create_sheet(name)
         self.ws.sheet_view.showGridLines = False
         self.ws.page_setup.orientation = "landscape"
         self.ws.page_setup.fitToWidth = 1
@@ -86,11 +85,6 @@ class Sheet:
         self.header_rows: list[int] = []
         self.has_data = False
         self.r = 1
-        self.ws.cell(self.r, 1, title).font = _font(bold=True, size=14, color=NAVY)
-        self.r += 1
-        if note:
-            self.note(note)
-        self.r += 1
 
     def note(self, text: str):
         self.ws.cell(self.r, 1, text).font = _font(italic=True, color=GREY)
@@ -99,11 +93,7 @@ class Sheet:
     def _fit(self, col: int, width: float):
         self.widths[col] = max(self.widths.get(col, 8), min(width, TEXT_WIDTH_CAP))
 
-    def table(self, df: pd.DataFrame, caption: str | None = None):
-        caption = caption or df.attrs.get("title")
-        if caption:
-            self.ws.cell(self.r, 1, caption).font = _font(bold=True, size=11, color=NAVY)
-            self.r += 1
+    def table(self, df: pd.DataFrame):
         cols = rt.visible_columns(df)
         if df.empty or not cols:
             self.note("No rows.")
@@ -178,21 +168,6 @@ def _alpha_default() -> float:
         return 3.0
 
 
-DEFINITIONS = [
-    ("EX", "Execution Accuracy: share of queries whose predicted SQL returns the same result as the gold SQL "
-           "(official Spider eval_exec_match, order-sensitive)."),
-    ("ESM", "Exact Set Match: share of queries whose parsed SQL structure matches the gold SQL."),
-    ("CM", "Component Match: per-clause match rate; UNION ALL is not distinguishable by the Spider parser and stays empty."),
-    ("SLA", "Schema Linking Accuracy: precision/recall/F1 of the schema sent to the LLM against the schema used by the "
-            "gold SQL, macro-averaged per query (src/metrics/sla.py). Queries with an empty gold schema score 0."),
-    ("T", "Token consumption per query: T = T_in + α × T_out."),
-    ("TEP", "Token Elasticity of Performance: (ΔEX / EX of GraphRAG 1-Stage) / (ΔT / T of GraphRAG 1-Stage)."),
-    ("QVT", "Query Variance Testing over natural paraphrase pairs in dev.json; groups with every variant wrong are excluded."),
-    ("Δ", "GraphRAG 2-Stage − GraphRAG 1-Stage. For percentages the difference is in percentage points (pp)."),
-    ("Relative change", "(GraphRAG 2-Stage − GraphRAG 1-Stage) / GraphRAG 1-Stage."),
-]
-
-
 # ---------------------------------------------------------------------------
 # Workbook
 # ---------------------------------------------------------------------------
@@ -216,32 +191,11 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
     b, g = logs["baseline"] or [], logs["graphrag"] or []
 
     wb = Workbook()
-    info = Sheet(wb, "Info", "Text-to-SQL evaluation results: GraphRAG 2-Stage vs GraphRAG 1-Stage (Spider dev)",
-                 f"Generated by src/experiments/export_excel.py on {datetime.now():%Y-%m-%d %H:%M}. "
-                 "All values are read from run output files.", first=True)
-    sources = [
-        ("Six metrics", metrics is not None, tables_dir / "metrics_results.json"),
-        ("raw_logs GraphRAG 1-Stage", logs["baseline"] is not None, raw_logs_dir / "baseline_log.json"),
-        ("raw_logs GraphRAG 2-Stage", logs["graphrag"] is not None, raw_logs_dir / "graphrag_log.json"),
-        ("Confound diagnostics", confound is not None, tables_dir / "confound_diagnostics.json"),
-        ("Official Spider evaluation", spider is not None, tables_dir / "spider_official_eval.csv"),
-        ("Dimensions 1-6", dims is not None, tables_dir / "dimensions_results.json"),
-        ("Ablation stage 2 (few-shot k)", ablation is not None, tables_dir / "ablation_results.csv"),
-        ("Model comparison (stage 3)", models is not None, tables_dir / "model_comparison.csv"),
-        ("SLA trial (recap)", trial is not None, tables_dir / "sla_trial_recap.csv"),
-    ]
-    info.table(pd.DataFrame([{"Source": s, "Found": "Yes" if ok else "No", "Path": str(p)} for s, ok, p in sources]),
-               "Data sources")
-    info.table(rt.with_formats(pd.DataFrame([{"Parameter": "α (output-token weight in T)", "Value": alpha},
-                                              {"Parameter": "Queries in raw_logs (GraphRAG 1-Stage)", "Value": len(b)},
-                                              {"Parameter": "Queries in raw_logs (GraphRAG 2-Stage)", "Value": len(g)}]),
-                                {"Value": "num1"}), "Run parameters")
-    info.table(pd.DataFrame(DEFINITIONS, columns=["Term", "Definition"]), "Definitions")
-    info.ws.column_dimensions["B"].width = TEXT_WIDTH_CAP
-    sheets = [info]
+    wb.remove(wb.active)
+    sheets = []
 
-    def add(name: str, title: str, tables: list, missing: str, note: str | None = None, freeze_col: str = "A"):
-        sh = Sheet(wb, name, title, note)
+    def add(name: str, tables: list, missing: str, freeze_col: str = "A"):
+        sh = Sheet(wb, name)
         for t in tables:
             sh.table(t)
         if not sh.has_data:
@@ -250,63 +204,50 @@ def build_workbook(raw_logs_dir: Path, tables_dir: Path, out: Path, skip_missing
         sheets.append(sh)
 
     # Urutan sheet: ringkasan 6 metrik -> rincian metrik -> dimensi -> rincian pendukung.
-    add("Summary", "Six metrics: summary", [rt.metrics_summary_table(metrics)] if metrics else [],
-        f"{tables_dir}/metrics_results.json", "GraphRAG 1-Stage = baseline in code and file names; GraphRAG 2-Stage = graphrag.")
+    add("Summary", [rt.metrics_summary_table(metrics)] if metrics else [], f"{tables_dir}/metrics_results.json")
     metric_groups = rt.metric_tables(metrics) if metrics else []
-    for name, title, tables in metric_groups:
-        add(name, title, tables, f"{tables_dir}/metrics_results.json", "GraphRAG 1-Stage = baseline in code and file names; GraphRAG 2-Stage = graphrag.")
+    for name, _title, tables in metric_groups:
+        add(name, tables, f"{tables_dir}/metrics_results.json")
     if not metric_groups:
-        add("Metrics", "Six metrics", [], f"{tables_dir}/metrics_results.json")
+        add("Metrics", [], f"{tables_dir}/metrics_results.json")
 
-    add("Dimensions", "Analysis dimensions: status", [rt.dim_status(dims)] if dims else [], f"{tables_dir}/dimensions_results.json")
-    for n, name in rt.DIM_NAMES.items():
-        add(f"D{n}", f"Dimension {n}: {name}", rt.DIM_TABLES[n](dims), f"dimension_{n} with status 'ok' in dimensions_results.json",
-            D6_NOTE if n == 6 else None)
+    # Alasan skip ditulis dalam bahasa Indonesia oleh run_all_dimensions.py, jadi tidak ikut ke Excel (ada di dimensions_report.txt)
+    add("Dimensions", [rt.dim_status(dims).drop(columns="Reason")] if dims else [], f"{tables_dir}/dimensions_results.json")
+    for n in rt.DIM_NAMES:
+        add(f"D{n}", rt.DIM_TABLES[n](dims), f"dimension_{n} with status 'ok' in dimensions_results.json")
 
     raw_missing = f"{raw_logs_dir}/baseline_log.json and graphrag_log.json"
-    add("Overall", "Overall comparison", [rt.overall_comparison(b, g, alpha)] if have_logs else [], raw_missing,
-        f"Computed from raw_logs. T = T_in + {alpha:g} × T_out.")
-    add("By Difficulty", "Metrics by difficulty", [rt.by_difficulty(b, g, alpha)] if have_logs else [], raw_missing)
-    add("Token Reduction", "Column & token reduction vs GraphRAG 1-Stage",
-        (rt.token_reduction(b, g, alpha) + [rt.token_reduction_by_difficulty(b, g)]) if have_logs else [], raw_missing,
-        "Paired per query (same questions, same few-shot examples). Reduction = 1 − ΣGraphRAG 2-Stage / ΣGraphRAG 1-Stage; "
-        "positive = GraphRAG 2-Stage uses less. See IMPLEMENTATION_DECISIONS.md poin 33.")
-    add("Retrieval", "Schema linking accuracy (SLA)",
-        [rt.retrieval_metrics(b, g), rt.retrieval_by_difficulty(b, g)] if have_logs else [], raw_missing)
+    add("Overall", [rt.overall_comparison(b, g, alpha)] if have_logs else [], raw_missing)
+    add("By Difficulty", [rt.by_difficulty(b, g, alpha)] if have_logs else [], raw_missing)
+    add("Token Reduction", (rt.token_reduction(b, g, alpha) + [rt.token_reduction_by_difficulty(b, g)]) if have_logs else [], raw_missing)
+    add("Retrieval", [rt.retrieval_metrics(b, g), rt.retrieval_by_difficulty(b, g)] if have_logs else [], raw_missing)
     diag = ([rt.prediction_checks(b, g), rt.outcome_matrix(b, g), rt.paired_ex(b, g), rt.sql_feature_usage(b, g),
              rt.cm_from_logs(b, g)] if have_logs else []) + ([rt.confound_table(confound)] if confound else [])
-    add("SQL Diagnostics", "SQL diagnostics", diag, raw_missing,
-        "SQL feature usage uses keyword matching on the SQL text. Confound counters are read-only and do not change any metric.")
+    add("SQL Diagnostics", diag, raw_missing)
     if spider is not None:
+        spider = spider.assign(Pipeline=spider["Pipeline"].map(rt.pipeline_label))     # CSV memakai nama lama
         parsed = {lab: sub.drop(columns="Pipeline") for lab, sub in spider.groupby("Pipeline", sort=False)}
-        long = rt.with_formats(spider.copy(), {c: "num3" for c in spider.columns if c not in ("Pipeline", "Section", "Metric")},
-                                title="Official Spider evaluation · all reported scores")
-        add("Spider Official", "Official Spider evaluation (cross-check)", [rt.spider_summary(parsed), long], "")
+        long = rt.with_formats(spider.copy(), {c: "num3" for c in spider.columns if c not in ("Pipeline", "Section", "Metric")})
+        add("Spider Official", [rt.spider_summary(parsed), long], "")
     elif not skip_missing:
-        add("Spider Official", "Official Spider evaluation (cross-check)", [],
-            f"{tables_dir}/spider_official_eval.csv (written by eval_pipeline.ipynb section 14)")
-    add("Per Query", "Per-query results", [rt.per_query(b, g, alpha)] if have_logs else [], raw_missing, freeze_col="D")
-    add("Latency", "Latency per step (appendix)", rt.latency_tables(b, g, latency_run), raw_missing, rt.LATENCY_NOTE)
+        add("Spider Official", [], f"{tables_dir}/spider_official_eval.csv (written by eval_pipeline.ipynb section 14)")
+    add("Per Query", [rt.per_query(b, g, alpha)] if have_logs else [], raw_missing, freeze_col="D")
+    add("Latency", rt.latency_tables(b, g, latency_run), raw_missing)
     latency_rows = rt.latency_per_query(b, g)
-    add("Latency Per Query", "Latency per question and step, in seconds (appendix)",
-        [latency_rows] if latency_rows is not None else [], raw_missing, freeze_col="D")
+    add("Latency Per Query", [latency_rows] if latency_rows is not None else [], raw_missing, freeze_col="D")
 
-    add("Ablation", "Ablation stage 2: few-shot k", rt.ablation_tables(ablation), f"{tables_dir}/ablation_results.csv")
-    add("Models", "Ablation stage 3: LLM comparison", rt.model_tables(models), f"{tables_dir}/model_comparison.csv")
+    add("Ablation", rt.ablation_tables(ablation), f"{tables_dir}/ablation_results.csv")
+    add("Models", rt.model_tables(models), f"{tables_dir}/model_comparison.csv")
     tt = rt.sla_trial_tables(trial)
     # Kolom yang dibekukan = kolom yang mengenali baris saat digeser ke samping
     # (Trial Thresholds: Pipeline, T, K, Stopwords, Value linking)
-    for name, title, key in (("Trial Preprocessing", "Schema-linking trial: preprocessing steps", "steps"),
-                             ("Trial Thresholds", "Schema-linking trial: threshold grid", "grid")):
-        add(name, title, [tt[key]] if tt[key] is not None else [], f"{tables_dir}/sla_trial_recap.csv", freeze_col="F")
+    for name, key in (("Trial Preprocessing", "steps"), ("Trial Thresholds", "grid")):
+        add(name, [tt[key]] if tt[key] is not None else [], f"{tables_dir}/sla_trial_recap.csv", freeze_col="F")
 
-    if skip_missing:
-        for sh in sheets[1:]:
+    if skip_missing and any(sh.has_data for sh in sheets):     # workbook butuh minimal satu sheet
+        for sh in sheets:
             if not sh.has_data:
                 wb.remove(sh.ws)
-        # Ekspor parsial (mis. hanya trial SLA): sheet Info ringkasan run tidak ada gunanya
-        if not (have_logs or metrics) and any(sh.has_data for sh in sheets[1:]):
-            wb.remove(sheets[0].ws)
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
     return out

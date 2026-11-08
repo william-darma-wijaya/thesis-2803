@@ -101,7 +101,7 @@ def test_tables():
         recap_row("G7 + nama natural | T0.50/K0.70", 0.5, 0.7, 0.55),
         recap_row("G8 tanpa stopword + angka | T0.50/K0.70", 0.5, 0.7, 0.58),
         recap_row("G8 tanpa stopword + angka | T0.50/K0.75", 0.5, 0.75, 0.53),
-        recap_row("Baseline | T0.50", 0.5, None, 0.50),
+        recap_row("GraphRAG 1-Stage | T0.50", 0.5, None, 0.50),
     ])
     tables = rt.sla_trial_tables(recap)
     assert list(tables) == ["steps", "grid"]
@@ -116,7 +116,7 @@ def test_tables():
     # Grid: G7 dan G8 di tiap (T, K), G7 lebih dulu pada (T, K) yang sama
     assert list(tables["grid"]["EX (zero-shot)"]) == [0.50, 0.55, 0.58, 0.52, 0.53]
     assert rt.sla_trial_tables(recap[recap["trial"].str.startswith("G7")])["steps"] is None   # tanpa langkah lain, bukan riwayat
-    assert list(tables["grid"]["Pipeline"]) == ["GraphRAG 1-Stage"] + ["GraphRAG 2-Stage"] * 4
+    assert list(tables["grid"]["Pipeline"]) == ["1-stage"] + ["2-stage"] * 4
     assert list(tables["grid"]["Column threshold (K)"].iloc[1:]) == [0.7, 0.7, 0.75, 0.75]
     assert list(tables["grid"].columns[:3]) == ["Pipeline", "Table threshold (T)", "Column threshold (K)"]
     for t in tables.values():
@@ -143,7 +143,22 @@ def test_tables():
     old = rt.sla_trial_tables(recap.drop(columns=["tables_pct", "ex"]))
     assert "EX (zero-shot)" not in old["grid"].columns and "Avg tables retrieved, % of DB" not in old["grid"].columns
     assert rt.sla_trial_tables(None) == {"steps": None, "grid": None}
-    assert rt.sla_trial_tables(recap[recap["trial"].str.startswith("Baseline")])["steps"] is None
+    assert rt.sla_trial_tables(recap[recap["trial"].str.startswith("GraphRAG 1-Stage")])["steps"] is None
+
+
+def test_one_stage_trial_names():
+    # Rekap baru (poin 39) menamai baris 1-Stage "GraphRAG 1-Stage | T.." dan "GraphRAG 1-Stage+ | T..";
+    # rekap lama "Baseline | T.." dulu selalu meng-embed nama + kolom, jadi dibaca sebagai 1-stage+
+    recap = pd.DataFrame([
+        recap_row("G7 + nama natural | T0.50/K0.70", 0.5, 0.7, 0.55),
+        recap_row("GraphRAG 1-Stage | T0.50", 0.5, None, 0.50),
+        recap_row("GraphRAG 1-Stage+ | T0.50", 0.5, None, 0.48),
+        recap_row("Baseline | T0.55", 0.55, None, 0.47),
+    ])
+    grid = rt.sla_trial_tables(recap)["grid"]
+    assert list(grid["Pipeline"]) == ["1-stage", "1-stage+", "2-stage", "1-stage+"]
+    assert list(grid["EX (zero-shot)"]) == [0.50, 0.48, 0.55, 0.47]
+    assert rt.pipeline_label("GraphRAG 2-Stage") == "2-stage" and rt.pipeline_label("Baseline") == "1-stage"
 
 
 def test_preprocessing_steps():
@@ -182,7 +197,7 @@ def test_workbook_sheets():
     recap = pd.DataFrame([
         recap_row("G1 threshold saja | T0.50/K0.70", 0.5, 0.7, 0.50),
         recap_row("G7 + nama natural | T0.50/K0.70", 0.5, 0.7, 0.55),
-        recap_row("Baseline | T0.50", 0.5, None, 0.50),
+        recap_row("GraphRAG 1-Stage | T0.50", 0.5, None, 0.50),
     ])
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
@@ -192,17 +207,17 @@ def test_workbook_sheets():
         wb = load_workbook(out)
         assert wb.sheetnames == ["Trial Preprocessing", "Trial Thresholds"]      # tanpa sheet Info
         for ws in wb:
-            assert len(ws.tables) == 1 and next(iter(ws.tables.values())).ref.startswith("A")
-        assert all(wb[n].freeze_panes and wb[n].freeze_panes.startswith("F") for n in ("Trial Preprocessing", "Trial Thresholds"))
+            assert len(ws.tables) == 1 and next(iter(ws.tables.values())).ref.startswith("A1:")   # tabel langsung di baris 1
+        assert wb["Trial Preprocessing"].freeze_panes == "F2" and wb["Trial Thresholds"].freeze_panes == "F2"
         text = [c.value for ws in wb for row in ws.iter_rows() for c in row if isinstance(c.value, str)]
-        assert not [t for t in text if re.search(r"\bG[1-7]\b|Baseline|percentile", t)], text
+        assert not [t for t in text if re.search(r"\bG[1-7]\b|Baseline|GraphRAG|percentile", t)], text
         wb.close()
 
         # Sumber tidak ada sama sekali: tetap menulis workbook berisi catatan, tidak crash
         empty = d / "empty"
         empty.mkdir()
         wb = load_workbook(build_workbook(empty, empty, d / "y.xlsx", skip_missing=True))
-        assert wb.sheetnames == ["Info"]      # tanpa sumber: Info mencatat semua sumber "Found: No"
+        assert "Info" not in wb.sheetnames and wb["Summary"]["A1"].value.startswith("Source not found")
         wb.close()
 
 
@@ -211,6 +226,7 @@ def main():
     test_median_summary()
     test_ex_scorer()
     test_tables()
+    test_one_stage_trial_names()
     test_preprocessing_steps()
     test_workbook_sheets()
     print("OK: threshold trial tracing tests passed")
