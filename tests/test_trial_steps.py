@@ -116,7 +116,7 @@ def test_settings():
 
     cfg = PipelineConfig()
     final = ts.settings_of(cfg)
-    assert ts.switches_to_settings(True, True, False, True, True, True) == final          # default saklar = config.py
+    assert ts.switches_to_settings(True, True, True, True, True, True) == final          # default saklar = config.py
     assert ts.settings_of(replace(cfg, **ts.knobs_of(final))) == final
     alt = ts.switches_to_settings(False, True, True, True, True, True)
     assert alt["stopword"] == "none" and alt["value_link"] == "text + numbers"

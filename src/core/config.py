@@ -65,6 +65,10 @@ class PipelineConfig:
     # to become a candidate. 0.0 = disabled. Tuned separately from the column
     # threshold (the score scales differ).
     table_similarity_threshold: float = 0.60
+    # GraphRAG 1-Stage (baseline) table threshold, chosen separately in the threshold
+    # trial (poin 43). None = same as table_similarity_threshold (the trial grid uses
+    # this so 1-Stage follows each T). Read through baseline_table_threshold().
+    baseline_table_similarity_threshold: float | None = 0.65
     # Longest n-gram of the question (unigram + bigram). Shared by GraphRAG Stage 1/2,
     # value linking (cell values longer than this many words can no longer match) and
     # the Baseline table linking.
@@ -114,16 +118,16 @@ class PipelineConfig:
     # --- Value linking (GraphRAG, exact match; src/retrieval/value_linking.py) ---
     # Question n-grams that exactly equal a cell value ("asia") add that column
     # (country.Continent) as an extra traversal anchor. Index built once per DB.
-    use_value_linking: bool = True               # preprocessing (fixed), text values only
+    use_value_linking: bool = True               # preprocessing (fixed); numbers via value_link_numbers
     value_max_rows_per_column: int = 2000    # SELECT DISTINCT ... LIMIT N per column
     value_min_chars: int = 3                 # shorter values are ignored
     value_max_chars: int = 50                # longer values ignored; column skipped if mean length exceeds it
     value_max_numeric_ratio: float = 0.5     # column skipped if more values than this are pure numbers
     value_max_columns_per_value: int = 3     # value in more columns than this = too common, ignored
     value_max_linked_columns: int = 5        # max columns added per question
-    # Numbers ("played in 2013" -> matches.year). Off (fixed): in the SLA trial they
-    # added more false positives than recall (SLA trial, G4; see notebooks/trial_preprocessing.ipynb).
-    value_link_numbers: bool = False
+    # Numbers ("played in 2013" -> matches.year). On since poin 43: the threshold
+    # trial that picked T/K ran with text + numbers (earlier off because of SLA trial G4).
+    value_link_numbers: bool = True
     value_max_columns_per_number: int = 2    # stricter than text: small numbers sit in many columns
     value_number_skip_after: list[str] = field(default_factory=lambda: [
         "top", "first", "last", "limit",       # "top 3" is a LIMIT, not a cell value
@@ -187,6 +191,12 @@ class PipelineConfig:
     def __post_init__(self) -> None:
         self.validate()
 
+    def baseline_table_threshold(self) -> float:
+        """Effective GraphRAG 1-Stage table threshold."""
+        if self.baseline_table_similarity_threshold is None:
+            return self.table_similarity_threshold
+        return self.baseline_table_similarity_threshold
+
     def resolve_llm_model(self, name: str) -> str:
         """Short name -> full model id: "14B" -> "Qwen/Qwen2.5-Coder-14B-Instruct". A full id is returned as is."""
         if "/" in name:
@@ -230,6 +240,7 @@ _CLI_OVERRIDES = (
     ("--baseline-tables-pct", "baseline_top_k_tables_pct", float),
     ("--threshold", "semantic_similarity_threshold", float),
     ("--table-threshold", "table_similarity_threshold", float),
+    ("--baseline-table-threshold", "baseline_table_similarity_threshold", float),
     ("--stopword-mode", "query_stopword_mode", str),
     ("--traversal-mode", "traversal_mode", str),
     ("--few-shot-k", "few_shot_k", int),
@@ -237,6 +248,7 @@ _CLI_OVERRIDES = (
     ("--llm-model", "llm_model", str),
     ("--baseline-embed-columns", "baseline_embed_columns", _str2bool),
     ("--value-linking", "use_value_linking", _str2bool),
+    ("--value-link-numbers", "value_link_numbers", _str2bool),
 )
 
 

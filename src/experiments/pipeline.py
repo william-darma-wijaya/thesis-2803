@@ -1027,7 +1027,7 @@ def run_comparison(
         "  Node granularity      column/node      table/node",
         "  Schema context        pruned cols      all cols in table",
         "  Linking strategy      n-gram match     n-gram match (same as GraphRAG 2-Stage Stage 1)",
-        f"  Table threshold       {cfg.table_similarity_threshold:<16} {cfg.table_similarity_threshold}",
+        f"  Table threshold       {cfg.table_similarity_threshold:<16} {cfg.baseline_table_threshold()}",
         f"  Top-k tables (pct)    {cfg.top_k_tables_pct:<16} {cfg.baseline_top_k_tables_pct}",
         f"  Top-k columns (pct)   {cfg.top_k_columns_pct:<16} -",
         f"  Few-shot k            {cfg.few_shot_k:<16} {cfg.few_shot_k}",

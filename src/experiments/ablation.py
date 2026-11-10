@@ -407,7 +407,7 @@ def _save_results(results: list[AblationResult], cfg: PipelineConfig, mode: str)
             "avg_columns":           round(r.avg_columns, 1),
             "avg_schema_tokens":     round(r.avg_schema_tokens, 1),
             "n_samples":             r.n_samples,
-            "table_threshold":       cfg.table_similarity_threshold,
+            "table_threshold":       cfg.table_similarity_threshold if mode == "graphrag" else cfg.baseline_table_threshold(),
             "column_threshold":      cfg.semantic_similarity_threshold if mode == "graphrag" else "",
             "tables_pct":            cfg.top_k_tables_pct if mode == "graphrag" else cfg.baseline_top_k_tables_pct,
             "columns_pct":           cfg.top_k_columns_pct if mode == "graphrag" else "",
@@ -454,7 +454,7 @@ def main(
                     cfg.top_k_tables_pct, cfg.top_k_columns_pct, cfg.semantic_similarity_threshold)
     else:
         logger.info("Table selection (stage 1): threshold=%.2f baseline_tables_pct=%.2f (0 = no cap)",
-                    cfg.table_similarity_threshold, cfg.baseline_top_k_tables_pct)
+                    cfg.baseline_table_threshold(), cfg.baseline_top_k_tables_pct)
     logger.info("Make sure the thresholds are the winners of trial_thresholds.ipynb (config.py or --threshold).")
 
     logger.info("Loading schema …")

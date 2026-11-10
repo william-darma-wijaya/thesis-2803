@@ -35,7 +35,7 @@ from src.utils import timing  # noqa: E402
 CONDITIONS = ("baseline", "graphrag")
 CONDITION_LABELS = {"baseline": "1-stage", "graphrag": "2-stage"}
 RESULTS_FILENAME = "metrics_results.json"
-VARIANT_KEYS = ("baseline_embed_columns", "use_value_linking", "value_link_numbers", "query_stopword_mode",
+VARIANT_KEYS = ("baseline_table_similarity_threshold", "baseline_embed_columns", "use_value_linking", "value_link_numbers", "query_stopword_mode",
                 "traversal_mode", "connect_no_pk_tables", "embed_natural_names", "max_ngram")
 
 

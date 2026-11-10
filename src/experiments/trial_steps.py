@@ -104,7 +104,8 @@ def two_stage_trial(cfg, settings: dict, t: float, k: float) -> tuple:
 def one_stage_trial(cfg, t: float) -> tuple:
     """(nama trial, pipeline, cfg) untuk 1-Stage di T: teks tabel = nama saja, sama dengan Stage 1 2-Stage
     (poin 39, keputusan peneliti: 1-Stage+ tidak dijalankan di trial)."""
-    c = replace(cfg, table_similarity_threshold=t, baseline_top_k_tables_pct=0.0, use_full_schema_bypass=False,
+    c = replace(cfg, table_similarity_threshold=t, baseline_table_similarity_threshold=None,
+                baseline_top_k_tables_pct=0.0, use_full_schema_bypass=False,
                 embed_natural_names=True, baseline_embed_columns=False)
     return f"1-stage | T{t:.2f}", "baseline", c
 

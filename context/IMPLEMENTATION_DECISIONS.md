@@ -862,6 +862,24 @@ Untuk sekarang `run_all_dimensions.py` menerima angkanya manual (`--ex-per-k` / 
 
 **Tes:** `python tests/test_trial_steps.py` (skema sintetis dengan SQLite untuk value linking, embedder palsu; gold schema ditulis tangan karena parser Spider butuh data NLTK). Sel kedua notebook juga dijalankan di data sintetis yang sama. Belum dijalankan dengan Spider asli maupun GPU.
 
+## 43. Threshold terpilih untuk ablation few-shot dan run final; value linking teks + angka (2026-11-10)
+
+**Keputusan peneliti** (dari `hasil_trial_thresholds.xlsx`, `trial_thresholds.ipynb`, sampel stratified 20% = 207 query, EX zero-shot, 7B):
+- **GraphRAG 1-Stage: T = 0.65.** EX 70.5%, tertinggi di antara 1-Stage (T 0.50-0.70: 69.1-70.5%).
+- **GraphRAG 2-Stage: T = 0.60, K = 0.70.** EX 66.2%, recall kolom (gold tidak kosong) 93.8%, token prompt zero-shot −30.9% terhadap DDL penuh. Ini bukan EX 2-Stage tertinggi (68.1% di T0.55-0.60/K0.55-0.60). Pilihan ini menukar sekitar 2 pp EX dengan token yang lebih sedikit; pada n = 207, 2 pp setara kira-kira 4 query.
+- **Value linking teks + angka** (`value_link_numbers = True`): semua baris 2-Stage di trial itu memakai angka, jadi ablation dan run final memakai preprocessing yang sama. Ini menggantikan bagian "angka mati" di poin 30 (trial G4).
+
+**Yang berubah:**
+- Field baru `baseline_table_similarity_threshold` (default 0.65; `None` = sama dengan `table_similarity_threshold`), dibaca lewat `cfg.baseline_table_threshold()` di `baseline.py`. Stage 1 2-Stage tetap `table_similarity_threshold` (0.60). Kedua pipeline tetap memakai teks tabel nama saja (poin 39); yang berbeda hanya batas skornya.
+- `trial_steps.one_stage_trial()` memakai `baseline_table_similarity_threshold=None`, jadi 1-Stage di grid trial tetap mengikuti T tiap baris.
+- CLI: `--baseline-table-threshold` dan `--value-link-numbers true|false` (`pipeline.py`, `ablation.py`).
+- Laporan: `ablation_results.csv` kolom `table_threshold` berisi threshold efektif per mode, tabel konfigurasi notebook menampilkan keduanya, dan `run_metadata()` mencatat `baseline_table_similarity_threshold` sehingga `combine_models.py` memperingatkan kalau berbeda antar model.
+- Notebook: `ablation_fewshot.ipynb` (T 1-Stage / 2-Stage, K, angka) dan `eval_pipeline.ipynb` (`BASELINE_TABLE_THRESHOLD`); `trial_thresholds.ipynb` default `VALUE_NUMBERS = True` mengikuti `config.py`.
+
+**Konsekuensi:** run dengan default config sebelum perubahan ini (1-Stage di T 0.60, angka mati) tidak sebanding dengan run sesudahnya.
+
+**Tes:** `python tests/test_table_threshold.py` (embedder palsu: tabel dengan skor sekitar 0.62 lolos di 2-Stage, tidak lolos di 1-Stage; `None` mengikuti T 2-Stage; flag CLI).
+
 ### F. Baseline DAIL-SQL belum diimplementasikan
 
 **Dicatat (2026-11-07, poin 38).** Baseline skripsi adalah DAIL-SQL, dikerjakan nanti. Belum diputuskan: cara DAIL-SQL dijalankan, model dan few-shot yang dipakai supaya sebanding, metrik apa saja yang dibandingkan, dan pembanding TEP (saat ini `B` di rumus = GraphRAG 1-Stage). `combine_models.py` dan kode lain belum punya tempat untuk kondisi ketiga.

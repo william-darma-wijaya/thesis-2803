@@ -238,7 +238,8 @@ def semantic_linking_table_level(
     (retrieval.retrieve_candidate_tables): the question is split into n-grams
     (cfg.max_ngram, cfg.query_stopword_mode), each table is scored by the best
     (max) cosine any n-gram gives it, then
-      1. tables below cfg.table_similarity_threshold are dropped;
+      1. tables below cfg.baseline_table_threshold() are dropped (1-Stage has its own
+         table threshold, poin 43; None falls back to table_similarity_threshold);
       2. if cfg.baseline_top_k_tables_pct > 0, at most
          k_from_pct(pct, #tables in DB) are kept (a cap, never a target);
       3. if nothing passes, the single best table is kept.
@@ -263,7 +264,8 @@ def semantic_linking_table_level(
     max_scores, _ = scores.max(dim=0)                            # best n-gram per table
     ranked = torch.argsort(max_scores, descending=True).tolist()
 
-    kept = [i for i in ranked if max_scores[i].item() >= cfg.table_similarity_threshold]
+    threshold = cfg.baseline_table_threshold()
+    kept = [i for i in ranked if max_scores[i].item() >= threshold]
     if cfg.baseline_top_k_tables_pct > 0:
         kept = kept[: k_from_pct(cfg.baseline_top_k_tables_pct, len(index.table_node_ids))]
     if not kept:
@@ -460,13 +462,13 @@ def retrieve_baseline_tables(
     """
     The whole GraphRAG 1-Stage retrieval step for one question, shared by
     run_single_baseline(), ablation.py, sweep.py and the notebook:
-    tables by n-gram similarity >= cfg.table_similarity_threshold (optionally
+    tables by n-gram similarity >= cfg.baseline_table_threshold() (optionally
     capped by baseline_top_k_tables_pct) -> FK path tracing. Full-schema bypass,
     or both limits off (pct = 0 and threshold <= 0) -> every table, same
     semantics as GraphRAG 2-Stage Stage 1.
     """
     if cfg.use_full_schema_bypass or (
-        cfg.baseline_top_k_tables_pct <= 0 and cfg.table_similarity_threshold <= 0
+        cfg.baseline_top_k_tables_pct <= 0 and cfg.baseline_table_threshold() <= 0
     ):
         return _all_table_nodes(graph, db_id)
 
