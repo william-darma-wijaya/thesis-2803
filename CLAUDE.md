@@ -14,7 +14,7 @@ Penelitian ini menganalisis trade-off antara performa SQL generation dan efisien
 - **GraphRAG 1-Stage** (`baseline` di kode) — table-level retrieval + table path tracing: pilih tabel, kirim semua kolom dari tabel terpilih ke LLM
 - **GraphRAG 2-Stage** (`graphrag` di kode) — two-stage column-level retrieval + graph traversal: kirim hanya kolom yang relevan
 
-**Baseline skripsi adalah DAIL-SQL (state of the art), yang belum diimplementasikan** (poin 38, open item F). `baseline` di kode, nama file, dan kunci data adalah nama lama untuk GraphRAG 1-Stage, BUKAN baseline skripsi. Di dokumen lama, "Baseline" juga berarti GraphRAG 1-Stage dan "GraphRAG" berarti GraphRAG 2-Stage.
+**Baseline skripsi adalah DAIL-SQL (state of the art)** (poin 38). Di branch `feat/dail-sql` DAIL-SQL dijalankan apa adanya (kode asli di `external/dail_sql/`, tidak diubah), hanya LLM diganti Qwen, dan dievaluasi dengan fungsi yang sama dengan `eval_pipeline.ipynb` lewat `notebooks/eval_dail.ipynb` (poin 43). Penggabungan tiga kondisi dalam satu Excel/dimensi belum (open item F). `baseline` di kode, nama file, dan kunci data adalah nama lama untuk GraphRAG 1-Stage, BUKAN baseline skripsi. Di dokumen lama, "Baseline" juga berarti GraphRAG 1-Stage dan "GraphRAG" berarti GraphRAG 2-Stage.
 
 Token efficiency GraphRAG 2-Stage berasal dari selektivitas retrieval — bukan dari seluruh database, hanya k tabel → k kolom → kolom hasil traversal yang masuk ke prompt.
 
@@ -32,8 +32,8 @@ thesis-2803/
 │   ├── retrieval/
 │   │   ├── retrieval.py    — GraphRAG: two-stage semantic linking, graph traversal, context builder
 │   │   ├── baseline.py     — Baseline: table-level graph, table-level semantic linking, context builder
-│   │   └── value_linking.py — GraphRAG: exact-match value linking (nilai sel DB → kolom anchor), indeks per DB di-cache
-│   │   └── baseline.py     — Baseline: table-level graph, table-level semantic linking, context builder
+│   │   ├── value_linking.py — GraphRAG: exact-match value linking (nilai sel DB → kolom anchor), indeks per DB di-cache
+│   │   └── dail.py         — baseline DAIL-SQL: bungkus kode DAIL asli (external/dail_sql/), `run_single_dail()` pass 1 → skeleton → pass 2 per pertanyaan, LLM = Qwen (poin 43)
 │   ├── skeleton/
 │   │   ├── masking.py      — de-semanticization (Guo et al., 2023, disederhanakan): pertanyaan → skeleton [MASK] untuk seleksi few-shot; dijalankan lokal (spaCy), tulis data/skeletons/{train,dev}.json (poin 29)
 │   │   ├── compare_retrieval.py — cek tanpa LLM: contoh by skeleton vs by pertanyaan mentah, kemiripan struktur SQL ke gold (Kaggle, hasil di outputs/tables/skeleton_retrieval_check.json)
@@ -50,6 +50,8 @@ thesis-2803/
 │   │   ├── export_excel.py — rangkum hasil run (raw_logs, confound_diagnostics.json, spider_official_eval.csv, dimensions_results.json, ablation/model/trial CSV) jadi satu workbook Excel `outputs/tables/hasil_skripsi.xlsx`; tiap tabel = Excel Table (filter), format %/pp/token, header dibekukan, sheet yang sumbernya belum ada diberi catatan. Sheet trial `Trial Preprocessing` dan `Trial Thresholds` dari `trial_preprocessing.ipynb` dan `trial_thresholds.ipynb` (poin 35, 42); label pipeline `1-stage`/`2-stage`, tanpa sheet `Info`, judul, atau catatan sheet (poin 41)
 │   │   ├── metrics_summary.py — rangkum 6 metrik satu model dari raw_logs jadi `metrics_results.json` (poin 36)
 │   │   ├── notebook_steps.py — langkah-langkah `eval_pipeline.ipynb` (persiapan, contoh satu pertanyaan, loop utama, evaluator resmi, simpan), diberi komentar per baris supaya sel notebook cukup satu atau dua baris (poin 36)
+│   │   ├── dail_steps.py   — langkah-langkah `eval_dail.ipynb` (baseline DAIL-SQL): memakai ulang notebook_steps.py, metrics_summary.py, result_tables.py, timing.py; hasil ke file `dail_*` terpisah, TEP dengan DAIL sebagai B kalau raw_logs 1-Stage/2-Stage sebanding (poin 43)
+│   │   ├── dail_preprocess.py — preprocessing DAIL sekali (schema linking CoreNLP + GloVe, fungsi DAIL asli) → data/dail/ (poin 43)
 │   │   ├── combine_models.py — gabungkan hasil beberapa model jadi `outputs/tables/hasil_gabungan.{json,xlsx}`, dengan peringatan kalau hasil tidak sebanding (poin 36)
 │   │   ├── build_qvt_variations.py — bangun data/qvt_variations/*.json dari paraphrase alami dev.json + raw_logs (lihat IMPLEMENTATION_DECISIONS.md poin 21)
 │   │   └── run_all_dimensions.py — entry point evaluasi: baca raw_logs, jalankan 6 dimensi analisis
@@ -57,23 +59,27 @@ thesis-2803/
 │   ├── metrics/             — metrik skripsi level query: sla.py, esm_ex_cm.py, token_consumption.py, tep.py, qvt.py, token_reduction.py (reduksi kolom/token GraphRAG vs Baseline berpasangan, poin 33)
 │   └── dimensions/          — 6 dimensi analisis (agregasi + interpretasi dari metrics/): dim1_efficiency.py … dim6_ablation.py
 ├── external/
-│   └── spider_eval/        — official SPIDER evaluation.py + process_sql.py (di-wget manual, dipakai juga oleh src/metrics/)
+│   ├── spider_eval/        — official SPIDER evaluation.py + process_sql.py (di-wget manual, dipakai juga oleh src/metrics/)
+│   └── dail_sql/           — kode DAIL-SQL asli (github.com/beachwang/DAIL-SQL commit 2061f68, tanpa .git/img/results), JANGAN diedit; dibungkus src/retrieval/dail.py (poin 43)
 ├── data/
 │   ├── raw_logs/            — INPUT dimensi analisis: baseline_log.json, graphrag_log.json (skema di context/EVALUATION_ANALYSIS_GUIDE.md Bagian 2) — diproduksi oleh `pipeline.py`'s `run_comparison()` (via `--baseline`), BELUM oleh `ablation.py`, lihat TBD di bawah
 │   ├── db_schema/           — schema per db_id untuk validasi SLA
 │   ├── skeletons/           — train.json, dev.json: {db_id, question, skeleton, query}, output `src/skeleton/masking.py`
+│   ├── dail/                — hasil preprocessing DAIL (`dail_preprocess.py`): train_spider_and_others.json + enc/{test,train}_schema-linking.jsonl; di Kaggle = Kaggle Dataset (`DAIL_DATA_DIR`)
 │   └── qvt_variations/      — dataset paraphrase NL question untuk metrik QVT (Dimensi 4), dibangun otomatis oleh `build_qvt_variations.py` dari paraphrase alami di `data/spider_data/dev.json` (bukan digenerate manual — lihat IMPLEMENTATION_DECISIONS.md poin 21)
 ├── context/
 │   ├── EVALUATION_ANALYSIS_GUIDE.md — source of truth formula & alur berpikir untuk src/metrics/ dan src/dimensions/ (JANGAN ubah formula/threshold di situ tanpa konfirmasi peneliti)
 │   ├── IMPLEMENTATION_DECISIONS.md — catatan SEMUA keputusan peneliti saat implementasi (konflik guide vs kode/tooling resmi SPIDER, dan alasannya) — baca ini sebelum mengubah perilaku src/metrics/ yang terasa "aneh"
 │   ├── METRICS_EXPLAINED.md — companion EVALUATION_ANALYSIS_GUIDE.md dalam bahasa non-formula: apa arti tiap angka METRIK, bukan cuma formulanya (SLA, Token Consumption, TEP, QVT sejauh ini — ESM/EX/CM ditambah seiring progres)
 │   ├── DIMENSIONS_EXPLAINED.md — satu level di atas METRICS_EXPLAINED.md: apa yang disimpulkan satu DIMENSI (kombinasi beberapa metrik) yang tidak kelihatan dari satu metrik saja (Dimensi 1 sejauh ini — sisanya ditambah seiring progres)
+│   ├── DAIL_SQL_EXPLAINED.md — arsitektur DAIL-SQL asli, apa yang diubah supaya apple-to-apple, dan isi tiap file DAIL (poin 43)
 │   ├── TRIAL_COLUMNS_EXPLAINED.md — arti tiap kolom sheet `Trial Preprocessing` dan `Trial Thresholds` di Excel (bahasa Inggris, poin 35)
 │   └── RESEARCHER_TODO.md — checklist hal yang jadi tanggung jawab PENELITI (bukan Claude Code): data yang harus disiapkan/dikumpulkan manual, eksperimen yang harus dijalankan (butuh GPU/Kaggle), keputusan yang perlu didiskusikan dulu. **Baca file ini setiap kali peneliti bertanya "hal apa yang belum kita siapkan?"** atau pertanyaan sejenis soal kesiapan/prasyarat
 ├── notebooks/               — EDA notebooks + notebooks/compiled/ (Kaggle-ready compiled notebook)
 │   ├── trial_preprocessing.ipynb — trial preprocessing: SEMUA kombinasi 5 langkah schema linking 2-Stage di satu (T, K), error analysis, oracle traversal (poin 42). Tidak memilih apa pun
 │   ├── trial_thresholds.ipynb — trial threshold: grid T x K 2-Stage dengan saklar preprocessing on/off + 1-Stage (nama tabel saja) di tiap T, EX zero-shot, `BEST_T`/`BEST_K` dipilih peneliti (poin 42). Kode bersama: `src/experiments/trial_steps.py`
 │   ├── ablation_fewshot.ipynb — ablation TAHAP 2 siap-upload Kaggle: setup, uji cepat (5%), `ablation.py` per pipeline (graphrag + baseline), ringkasan EX per k + k pemenang, ekspor Excel/zip. Threshold tabel/kolom diisi di sel konfigurasi (hasil trial SLA)
+│   ├── eval_dail.ipynb      — notebook baseline DAIL-SQL: arsitektur DAIL asli, LLM = Qwen sesuai `MODEL`, evaluasi (6 metrik, latensi, evaluator resmi, Excel `tables/dail/hasil_dail.xlsx`) sama dengan eval_pipeline (poin 43). Jalankan dengan `MODEL`/`SAMPLE_RATIO` yang sama dengan eval_pipeline supaya berpasangan
 │   └── eval_pipeline.ipynb  — notebook 1-Stage (`baseline`) vs 2-Stage (`graphrag`): pilih `MODEL`, jalankan kedua varian, tampilkan 6 metrik dalam satu tabel beserta rinciannya, lalu 6 dimensi, baru simpan JSON/Excel/zip per model di sel terakhir (poin 36). Sel kode pendek dan diberi komentar per baris; logikanya di `src/experiments/notebook_steps.py`. Satu-satunya salinan (duplikat di root dihapus 2026-09-26). Sel setup pertama otomatis `chdir` ke root repo kalau dijalankan dari `notebooks/` (atau `git clone` di Kaggle), jadi aman dari lokasi mana pun
 ├── outputs/
 │   ├── plots/               — EDA plot PNGs
@@ -363,7 +369,7 @@ data_path = Path("/kaggle/input/datasets/alrette/spiderdataset/spider_data")
 
 ## Hal yang Masih TBD (update setelah eksperimen)
 
-- Implementasi baseline DAIL-SQL dan cara membandingkannya dengan GraphRAG 1-Stage dan 2-Stage, dikerjakan nanti (`IMPLEMENTATION_DECISIONS.md` open item F)
+- Baseline DAIL-SQL: kode ada (branch `feat/dail-sql`, poin 43) tapi belum dijalankan dengan preprocessing asli, mpnet asli, maupun Qwen di GPU. Penggabungan tiga kondisi (satu Excel, Dimensi 1-6, `combine_models.py`) dan pasangan TEP yang dilaporkan belum diputuskan (`IMPLEMENTATION_DECISIONS.md` open item F)
 - Nilai final `top_k_tables_pct`, `top_k_columns_pct`, `baseline_top_k_tables_pct` → tunggu ablation tahap 1 (`sweep.py`, SLA); `semantic_similarity_threshold` → `sweep.py --thresholds`
 - Nilai final `few_shot_k` (sama untuk Baseline & GraphRAG) → tunggu ablation tahap 2 (`ablation.py`, EX)
 - Nilai final `llm_model` → tunggu ablation tahap 3 (`pipeline.py --baseline --models all`)
@@ -422,6 +428,10 @@ python src/experiments/run_all_dimensions.py
 
 # Rangkum semua hasil jadi satu file Excel (outputs/tables/hasil_skripsi.xlsx)
 python src/experiments/export_excel.py
+
+# Baseline DAIL-SQL (poin 43): preprocessing sekali (Java + CoreNLP + GloVe, environment terpisah),
+# lalu jalankan notebooks/eval_dail.ipynb di Kaggle
+python src/experiments/dail_preprocess.py --spider-dir data/spider_data --out-dir data/dail
 
 # Idem, subset dimensi + data ablation untuk Dimensi 6
 python src/experiments/run_all_dimensions.py --only 1 2 3

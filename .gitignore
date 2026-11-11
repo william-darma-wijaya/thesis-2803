@@ -7,3 +7,8 @@ __pycache__/
 # mount in production, manual download for local dev). Beda dengan
 # external/spider_eval/ yang SUDAH di-commit (kecil, ikut ter-clone).
 data/spider_data/
+
+# DAIL-SQL preprocessing (src/experiments/dail_preprocess.py): GloVe 42B cache (~5 GB)
+# and Stanford CoreNLP, both downloaded only for preprocessing.
+data/dail_cache/
+external/dail_sql/third_party/
