@@ -862,7 +862,41 @@ Untuk sekarang `run_all_dimensions.py` menerima angkanya manual (`--ex-per-k` / 
 
 **Tes:** `python tests/test_trial_steps.py` (skema sintetis dengan SQLite untuk value linking, embedder palsu; gold schema ditulis tangan karena parser Spider butuh data NLTK). Sel kedua notebook juga dijalankan di data sintetis yang sama. Belum dijalankan dengan Spider asli maupun GPU.
 
+## 43. Baseline DAIL-SQL: arsitektur asli, hanya LLM diganti, evaluasi sama dengan `eval_pipeline` (2026-11-11)
+
+**Keputusan peneliti:**
+- DAIL-SQL (Gao et al., 2023; `github.com/beachwang/DAIL-SQL`) dipakai **apa adanya** sebagai baseline skripsi. Konfigurasi = DAIL-SQL di `run_dail_sql.sh`: representasi `SQL` (CREATE TABLE seluruh DB dari `sqlite_master`), organisasi `QA`, pass 1 `EUCDISQUESTIONMASK` untuk SQL awal lalu pass 2 `EUCDISMASKPRESKLSIMTHR` (DAIL Selection, threshold skeleton 0.85), k = 9, embedding `all-mpnet-base-v2`, pool contoh `train_spider` + `train_others`, cleaner SQL `ask_llm.py`. Tidak dituning ulang ("best config" DAIL sendiri, dibandingkan dengan best config 1-Stage/2-Stage).
+- Yang diganti hanya LLM: GPT-4 -> Qwen2.5-Coder sesuai `MODEL`, **untuk kedua pass** (SQL awal juga dari Qwen, bukan GPT-4/Graphix). Self-consistency tidak dipakai.
+- Evaluasi mengikuti `eval_pipeline.ipynb` supaya semua metrik apple-to-apple.
+- Pilihan B (dari diskusi 2026-11-11): DAIL punya notebook sendiri dulu; `eval_pipeline.ipynb` dan modul evaluasinya tidak diubah. Penggabungan tiga kondisi dalam satu run/Excel/dimensi menyusul (pilihan A).
+
+**Implementasi (branch `feat/dail-sql`):**
+- `external/dail_sql/`: salinan DAIL commit `2061f68` (2025-03-07) tanpa `.git`, `img/`, `results/`. **Tidak diubah**, sama seperti `external/spider_eval/`.
+- `src/retrieval/dail.py` (kode custom): import paket DAIL (`utils`, `prompt`), dataset DAIL dengan path ke data skripsi dan `data/dail/`, lalu `run_single_dail()` per pertanyaan: pass 1 -> SQL awal -> `sql2skeleton()` -> pass 2 -> SQL final. Kelas prompt/selector DAIL dipanggil langsung (bukan lewat `generate_question.py`/`ask_llm.py`), jadi sampel stratified yang sama dengan run kita bisa dipakai dan pass 2 tidak butuh file hasil seluruh dev set. Generate: prompt mentah tanpa chat template, greedy, `cfg.max_new_tokens`, stop `;` (`dail_stop_strings`, mode completion DAIL `llm/chatgpt.py`), karena prompt DAIL diakhiri `SELECT `. Kalau SQL awal tidak bisa dibuat skeleton-nya, skeleton kosong dan dicatat (`pre_skeleton_error`).
+- `src/experiments/dail_preprocess.py`: memanggil `schema_linking_producer()` DAIL apa adanya dengan path skripsi, menulis `data/dail/{train_spider_and_others.json, enc/*_schema-linking.jsonl}`, dan memeriksa jumlah baris linking = jumlah pertanyaan (DAIL mencocokkannya per posisi).
+- `src/experiments/dail_steps.py` + `notebooks/eval_dail.ipynb`: alur seperti `eval_pipeline.ipynb`.
+- `config.py`: field `dail_*` (nilai DAIL asli). Nilai yang sudah ada tidak berubah.
+
+**Kesebandingan evaluasi:** `load_dev_questions()`, `write_gold_file()`, `load_model_and_tokenizer()`, `SqlEvaluator`, `_log_entry()` (skema raw_logs sama, ditambah field `dail`), `prompt_stats()`, agregasi `metrics_summary.py` (`_sla`, `_accuracy`, `_cm`, `_token`, `_qvt`, `_tep`), `build_groups()`/`join_with_raw_logs()` untuk QVT, `_run_spider_for()` untuk evaluator resmi, `Sheet` dari `export_excel.py`. Tidak ada formula baru.
+- **Token:** T_in dan T_out = pass 1 + pass 2 (DAIL memanggil LLM dua kali); rincian per pass disimpan di `dail.passes`.
+- **SLA:** `predicted_schema` = semua kolom DB (`tables.json`), karena DAIL mengirim seluruh schema. `schema_tokens` dihitung dari blok CREATE TABLE yang benar-benar masuk prompt DAIL.
+- **TEP:** rumus yang sama dengan **DAIL-SQL sebagai B**, untuk 1-Stage dan 2-Stage, hanya kalau `baseline_log.json`/`graphrag_log.json` model yang sama ada dengan pertanyaan yang sama persis (query_id, db_id, gold SQL, urutan).
+- **Latensi:** nama tahap sama (`build_ddl` = ambil CREATE TABLE, `few_shot` = masking + seleksi contoh, `build_prompt`, `prompt_tokenize`, `llm_generate`, `sql_clean`), dijumlah atas kedua pass; `retrieval_search` tidak ada (0). `build_prompt` diukur di sekitar `format()` DAIL lalu dikurangi `build_ddl` dan `few_shot` (`dail.finish_latency()`), supaya `end_to_end` tidak menghitung dua kali. Tambahan `dail_pass1`/`dail_pass2` (total per pass, tidak dijumlah ke `end_to_end`). Sekali-jalan: `dail_setup` (baca dev/train + linking, index mpnet kedua pass).
+- **File terpisah:** `predictions/dail_predictions.txt`, `predictions/dail_prompts.jsonl`, `raw_logs/dail_log.json`, `tables/dail/` (`dail_metrics_results.json`, `hasil_dail.xlsx`, `spider_official_eval.csv`, `latency_run.json`), `qvt_variations/dail_qvt.json`. Tidak menimpa hasil 1-Stage/2-Stage.
+
+**Dependensi:** run butuh `sentence-transformers`, `sql_metadata<3`, `sqlparse`, nltk `stopwords`. **`sql_metadata` 3.x mengubah API token dan membuat `sql2skeleton()` DAIL crash** (diverifikasi), jadi dipin ke 2.x. Preprocessing butuh Java + CoreNLP 2018-10-05, `stanford-corenlp`, `torchtext` (GloVe 42B ~5 GB), `bpemb`: dijalankan sekali di environment terpisah, hasilnya di-upload sebagai Kaggle Dataset (`DAIL_DATA_DIR`).
+
+**Perbedaan yang harus ditulis di metodologi:** pool contoh DAIL = `train_spider` + `train_others` (1-Stage/2-Stage: `train_spider`); embedding seleksi DAIL = mpnet (bukan BGE-M3); DDL DAIL dari file `.sqlite`, SLA tetap dari `tables.json`; `max_new_tokens` 256 (DAIL 200) dan stop `;`; konfigurasi DAIL dicari untuk GPT-4, belum tentu optimal untuk Qwen.
+
+**Tes:** smoke test lokal dengan kode prompt/selector DAIL asli, data Spider asli, linking sintetis, encoder dan LLM palsu (torch tidak ada di mesin lokal): prompt pass 1/pass 2 (9 contoh, diakhiri `SELECT `), skeleton SQL awal, cleaner, token per pass, latensi tanpa hitung ganda, raw_logs, metrik, TEP, tabel, dan Excel. **Belum dijalankan:** preprocessing asli (CoreNLP), mpnet asli, Qwen di GPU.
+
+**Belum diputuskan (pilihan A):** satu run/Excel/`combine_models.py` untuk tiga kondisi, Dimensi 1-6 dengan DAIL, dan pasangan TEP yang dilaporkan.
+
+**Ablation k DAIL (2026-11-13, permintaan peneliti):** `DAIL_K_SHOT` di `eval_dail.ipynb` (`cfg.dail_k_shot`) bisa diganti untuk mencoba k lain. Baseline skripsi tetap k = 9. Hasil k selain 9 disimpan di subfolder `dail_k<k>` (prediksi, raw_logs, tabel, zip `hasil_dail_<MODEL>_k<k>`), jadi tidak menimpa run k = 9 dan tidak dibandingkan otomatis dengan 1-Stage/2-Stage. Pada k = 0 hanya satu pass yang dijalankan: tanpa contoh, skeleton SQL awal tidak berpengaruh, sehingga pass 1 hanya mengulang prompt yang sama dan menggandakan token. Kode DAIL sendiri sudah mendukung k = 0 (`prompt_factory`); yang diperbaiki hanya pembungkusnya (`load_dail` tidak membungkus `get_examples` yang tidak ada di kelas zero-shot). Tes: `python tests/test_dail_k_shot.py`.
+
 ### F. Baseline DAIL-SQL belum diimplementasikan
+
+🟡 **Sebagian (2026-11-11) — lihat poin 43.** DAIL-SQL sudah bisa dijalankan dan dievaluasi lewat `notebooks/eval_dail.ipynb`; penggabungan tiga kondisi (Excel, dimensi, `combine_models.py`) belum. Teks asli di bawah dipertahankan sebagai catatan historis.
 
 **Dicatat (2026-11-07, poin 38).** Baseline skripsi adalah DAIL-SQL, dikerjakan nanti. Belum diputuskan: cara DAIL-SQL dijalankan, model dan few-shot yang dipakai supaya sebanding, metrik apa saja yang dibandingkan, dan pembanding TEP (saat ini `B` di rumus = GraphRAG 1-Stage). `combine_models.py` dan kode lain belum punya tempat untuk kondisi ketiga.
 

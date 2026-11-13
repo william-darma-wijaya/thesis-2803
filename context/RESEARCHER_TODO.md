@@ -112,7 +112,10 @@ lokal) — jalankan di Kaggle.
 
 ## 3. Keputusan yang perlu didiskusikan
 
-- [ ] **Baseline DAIL-SQL** (dikerjakan nanti, `IMPLEMENTATION_DECISIONS.md` poin 37 dan open item F). GraphRAG 1-Stage dan 2-Stage adalah metode peneliti; baseline skripsi adalah DAIL-SQL. Perlu diputuskan cara menjalankannya, syarat kesebandingan, metrik yang dibandingkan, dan pembanding TEP.
+- [ ] **Baseline DAIL-SQL** (`IMPLEMENTATION_DECISIONS.md` poin 43, open item F). Kode sudah ada di branch `feat/dail-sql` (DAIL asli, hanya LLM diganti Qwen, evaluasi sama dengan `eval_pipeline`). Yang harus dilakukan peneliti:
+  - [ ] Preprocessing DAIL sekali (Java + CoreNLP + GloVe, environment terpisah): `python src/experiments/dail_preprocess.py --spider-dir <spider_data> --out-dir data/dail`, lalu upload `data/dail/` sebagai Kaggle Dataset.
+  - [ ] Jalankan `notebooks/eval_dail.ipynb` per model, dengan `MODEL` dan `SAMPLE_RATIO` yang sama dengan `eval_pipeline.ipynb` (uji dulu `SAMPLE_RATIO = 0.05`).
+  - [ ] Putuskan (dengan pembimbing) pasangan TEP yang dilaporkan dan cara menggabungkan tiga kondisi di Excel/dimensi (pilihan A).
 
 - [x] **Definisi final Baseline** — DIPUTUSKAN 2026-09-06: **table-level
   retrieval** (`src/retrieval/baseline.py`) adalah baseline skripsi, FINAL.

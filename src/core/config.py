@@ -170,6 +170,28 @@ class PipelineConfig:
     max_new_tokens: int = 256
     temperature: float = 0.0
 
+    # --- DAIL-SQL baseline (src/retrieval/dail.py, IMPLEMENTATION_DECISIONS.md point 43) ---
+    # DAIL's own code is vendored unchanged in dail_dir. dail_data_dir holds the output of
+    # DAIL's data_preprocess.py (src/experiments/dail_preprocess.py): the merged train file
+    # and enc/{test,train}_schema-linking.jsonl. On Kaggle point it at the uploaded dataset.
+    dail_dir: Path = Path("external/dail_sql")
+    dail_data_dir: Path = Path("data/dail")
+    # DAIL-SQL as published (run_dail_sql.sh): SQL representation, QA examples, k = 9,
+    # question-mask selection for the preliminary SQL, then DAIL Selection. Not tuned:
+    # the baseline is reproduced as is, only the LLM is swapped.
+    dail_prompt_repr: str = "SQL"
+    dail_example_type: str = "QA"
+    dail_pre_selector: str = "EUCDISQUESTIONMASK"
+    dail_selector: str = "EUCDISMASKPRESKLSIMTHR"
+    dail_k_shot: int = 9
+    dail_max_seq_len: int = 4096     # DAIL's example budget; its token counter returns 0, so never binding
+    dail_max_ans_len: int = 200
+    dail_scope_factor: int = 100     # candidate pool = k_shot x scope_factor
+    # Stop sequences of DAIL's completion mode (llm/chatgpt.py ask_completion: stop=[";"]).
+    # The prompt ends with "SELECT ", so Qwen is used in completion mode like text-davinci.
+    # Empty list = stop only at EOS / max_new_tokens.
+    dail_stop_strings: list[str] = field(default_factory=lambda: [";"])
+
     # --- Mode ---
     use_full_schema_bypass: bool = False
 
