@@ -148,7 +148,7 @@ DAIL asli dijalankan sebagai **script CLI per tahap**: buat semua prompt pass 1 
 
 1. **Pool contoh DAIL lebih besar** (`train_spider` + `train_others`) dibanding 1-Stage/2-Stage (`train_spider`). Ini bagian dari arsitektur DAIL. Keduanya tetap retrieval dari train set, bukan kebocoran dev.
 2. **Embedding seleksi DAIL = mpnet**, bukan BGE-M3.
-3. **k = 9**, bukan k hasil ablation skripsi. Itu best config DAIL sendiri.
+3. **k = 9**, bukan k hasil ablation skripsi. Itu best config DAIL sendiri. Untuk ablation, k bisa diganti lewat `DAIL_K_SHOT` di `eval_dail.ipynb`; hasilnya disimpan di subfolder `dail_k<k>`, dan k = 0 hanya menjalankan satu pass.
 4. **Konfigurasi DAIL dicari untuk GPT-4**, jadi belum tentu optimal untuk Qwen (keterbatasan). Baseline tidak wajib dituning ulang.
 5. **DDL DAIL dibaca dari file `.sqlite`**, sedangkan SLA memakai `tables.json`. Isi kolomnya sama; yang berbeda hanya teks DDL-nya.
 6. **`max_new_tokens` 256** (DAIL 200) dan stop `;`.

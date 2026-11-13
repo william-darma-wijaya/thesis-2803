@@ -171,8 +171,10 @@ def load_dail(cfg) -> DailBaseline:
     def make_prompt(selector: str):
         cls = dail["prompt_builder"].prompt_factory(cfg.dail_prompt_repr, cfg.dail_k_shot, cfg.dail_example_type, selector)
         prompt = cls(data=data, tokenizer=DAIL_TOKENIZER_NAME)
-        # Seleksi contoh dicatat sebagai tahap few_shot (nama sama dengan pipeline kita)
-        prompt.get_examples = _timed("few_shot", prompt.get_examples)
+        # Seleksi contoh dicatat sebagai tahap few_shot (nama sama dengan pipeline kita).
+        # k = 0: kelas zero-shot DAIL tidak punya selector, jadi tidak ada yang dibungkus.
+        if hasattr(prompt, "get_examples"):
+            prompt.get_examples = _timed("few_shot", prompt.get_examples)
         return prompt
 
     with timing.run_step("dail_index_pass1"):
@@ -253,6 +255,14 @@ def run_single_dail(item: dict, dail: DailBaseline, llm, tokenizer) -> dict:
     # Salinan dangkal cukup: yang diubah hanya kunci pre_skeleton. deepcopy tidak bisa dipakai karena
     # SqliteTable DAIL (dict dengan __getattr__ = dict.__getitem__) membuat copy.deepcopy() KeyError.
     target = dict(dail.targets[key])
+    if dail.cfg.dail_k_shot == 0:
+        # k = 0 (ablation few-shot): tanpa contoh, skeleton SQL awal tidak dipakai, jadi pass 1
+        # hanya mengulang prompt yang sama. Satu pass saja supaya token tidak terhitung dua kali.
+        final = _one_pass(dail, dail.final_prompt, target, "pass2", llm, tokenizer)
+        return {"pred": final["sql"], "n_in": final["n_in"], "n_out": final["n_out"],
+                "pre_sql": None, "pre_skeleton": "", "pre_skeleton_error": None,
+                "passes": {"pass2": {k: final[k] for k in ("n_in", "n_out", "n_examples")}},
+                "prompts": {"pass2": final["prompt"]}, "raw": {"pass2": final["raw"]}}
     pass1 = _one_pass(dail, dail.pre_prompt, target, "pass1", llm, tokenizer)
     # Skeleton SQL awal, sama dengan get_pre_skeleton() DAIL. Kalau SQL awal tidak bisa di-parse,
     # skeleton kosong: selector pass 2 lalu jatuh ke urutan kemiripan pertanyaan saja.

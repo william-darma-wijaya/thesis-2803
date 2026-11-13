@@ -186,12 +186,14 @@ def walk_through(tools: DailTools, item: dict, show_prompts: bool = True) -> dic
     print(f"DB       : {item['db_id']}\nQuestion : {item['question']}\nGold SQL : {item['query']}")
     # Jalankan kedua pass
     out = dail_mod.run_single_dail(item, tools.dail, tools.llm, tools.tokenizer)
-    # Tampilkan prompt pass 1 kalau diminta
-    if show_prompts:
-        # Prompt pass 1 lengkap: schema seluruh DB, 9 contoh, pertanyaan
-        print(f"\n[Prompt pass 1]\n{out['prompts']['pass1']}")
-    # Tampilkan SQL awal dan skeleton-nya
-    print(f"\n[Pass 1] SQL awal : {out['pre_sql']}\n[Pass 1] skeleton : {out['pre_skeleton']}")
+    # k = 0 hanya punya satu pass (tanpa SQL awal)
+    if "pass1" in out["prompts"]:
+        # Tampilkan prompt pass 1 kalau diminta
+        if show_prompts:
+            # Prompt pass 1 lengkap: schema seluruh DB, k contoh, pertanyaan
+            print(f"\n[Prompt pass 1]\n{out['prompts']['pass1']}")
+        # Tampilkan SQL awal dan skeleton-nya
+        print(f"\n[Pass 1] SQL awal : {out['pre_sql']}\n[Pass 1] skeleton : {out['pre_skeleton']}")
     # Tampilkan prompt pass 2 kalau diminta
     if show_prompts:
         # Prompt pass 2: contoh dipilih ulang dengan DAIL Selection
@@ -580,7 +582,9 @@ def token_tables(results: dict, dail_logs: list) -> list:
     pass_rows = [{"Pass": name, "Mean T_in": mean([e["dail"]["passes"][p]["n_in"] for e in ok]),
                   "Mean T_out": mean([e["dail"]["passes"][p]["n_out"] for e in ok]),
                   "Mean examples in prompt": mean([e["dail"]["passes"][p]["n_examples"] for e in ok])}
-                 for p, name in (("pass1", "Pass 1: preliminary SQL"), ("pass2", "Pass 2: final SQL"))]
+                 for p, name in (("pass1", "Pass 1: preliminary SQL"), ("pass2", "Pass 2: final SQL"))
+                 # Pass yang tidak dijalankan (pass 1 di k = 0) tidak ditampilkan
+                 if any(p in e["dail"]["passes"] for e in ok)]
     # Tabel per pass
     passes = rt.with_formats(pd.DataFrame(pass_rows), {"Mean T_in": "num1", "Mean T_out": "num1", "Mean examples in prompt": "num2"},
                              title="DAIL-SQL tokens per pass (T_in and T_out above are the sum of both passes)")

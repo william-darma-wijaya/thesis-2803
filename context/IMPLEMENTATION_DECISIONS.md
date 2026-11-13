@@ -892,6 +892,8 @@ Untuk sekarang `run_all_dimensions.py` menerima angkanya manual (`--ex-per-k` / 
 
 **Belum diputuskan (pilihan A):** satu run/Excel/`combine_models.py` untuk tiga kondisi, Dimensi 1-6 dengan DAIL, dan pasangan TEP yang dilaporkan.
 
+**Ablation k DAIL (2026-11-13, permintaan peneliti):** `DAIL_K_SHOT` di `eval_dail.ipynb` (`cfg.dail_k_shot`) bisa diganti untuk mencoba k lain. Baseline skripsi tetap k = 9. Hasil k selain 9 disimpan di subfolder `dail_k<k>` (prediksi, raw_logs, tabel, zip `hasil_dail_<MODEL>_k<k>`), jadi tidak menimpa run k = 9 dan tidak dibandingkan otomatis dengan 1-Stage/2-Stage. Pada k = 0 hanya satu pass yang dijalankan: tanpa contoh, skeleton SQL awal tidak berpengaruh, sehingga pass 1 hanya mengulang prompt yang sama dan menggandakan token. Kode DAIL sendiri sudah mendukung k = 0 (`prompt_factory`); yang diperbaiki hanya pembungkusnya (`load_dail` tidak membungkus `get_examples` yang tidak ada di kelas zero-shot). Tes: `python tests/test_dail_k_shot.py`.
+
 ### F. Baseline DAIL-SQL belum diimplementasikan
 
 🟡 **Sebagian (2026-11-11) — lihat poin 43.** DAIL-SQL sudah bisa dijalankan dan dievaluasi lewat `notebooks/eval_dail.ipynb`; penggabungan tiga kondisi (Excel, dimensi, `combine_models.py`) belum. Teks asli di bawah dipertahankan sebagai catatan historis.
